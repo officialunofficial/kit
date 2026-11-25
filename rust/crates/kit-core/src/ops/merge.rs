@@ -15,7 +15,7 @@
 //! (depth in A's ancestor tree) + (depth in B's BFS).
 //!
 //! `find_merge_base` and `is_ancestor` end a path at a missing object, for
-//! push and its shallow boundaries. `find_merge_base_strict` and
+//! push, whose store may hold only part of a history. `find_merge_base_strict` and
 //! `is_ancestor_strict` give the same answers on a healthy store and fail
 //! with an error that names the commit where a commit cannot be read.
 
@@ -25,7 +25,7 @@ use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::ops::graph::{AncestorError, read_history_commit};
 use crate::serialize;
-use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError, WalkBudget};
 
 /// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,7 +89,10 @@ impl MergeResult {
 ///
 /// # Errors
 ///
-/// Propagates [`StoreError`] from reads and writes, including budget exhaustion.
+/// Propagates [`StoreError`] from reads and writes, including budget exhaustion,
+/// and returns [`StoreError::TreeTooLarge`] when the entries the walk compares
+/// pass [`crate::store::MAX_TREE_LEAVES`]: trees that differ at every path
+/// expand as far as a tree bomb does.
 /// Earlier writes are retained on failure; this operation is not transactional.
 pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
@@ -112,6 +115,7 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
         &mut merged,
         &mut conflicts,
         0,
+        &mut WalkBudget::new(),
     )?;
 
     let tree_hash = put_tree(store, merged)?;
@@ -132,8 +136,8 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
 /// multiple times, but it is the behaviour the tests pin.
 ///
 /// This walk is lenient on purpose: a missing object, or an object that
-/// is not a commit, ends its path. Push walks histories whose shallow
-/// boundaries the caller supplies, and it relies on that. Everywhere else a
+/// is not a commit, ends its path. Push walks histories its store may hold
+/// only part of, and it relies on that. Everywhere else a
 /// missing commit is corruption, and the answer would come from part of the
 /// history: use [`find_merge_base_strict`], which fails instead.
 ///
@@ -191,8 +195,8 @@ pub fn find_merge_base<S: ObjectSource + ?Sized>(
 ///
 /// This walk is lenient on purpose, like [`find_merge_base`]: a missing
 /// object, or an object that is not a commit, ends its path, so a missing
-/// commit can turn `true` into `false`. Push relies on that for shallow
-/// boundaries. Everywhere else use [`is_ancestor_strict`], which fails
+/// commit can turn `true` into `false`. Push relies on that for history its
+/// store lacks. Everywhere else use [`is_ancestor_strict`], which fails
 /// instead.
 ///
 /// # Errors
@@ -535,6 +539,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
     merged: &mut Vec<TreeEntry>,
     conflicts: &mut Vec<Conflict>,
     depth: usize,
+    budget: &mut WalkBudget,
 ) -> Result<(), StoreError> {
     let sub_prefix = join_path(prefix, entry_name);
     let base_entries = load_entries(store, base_sub)?;
@@ -551,6 +556,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
         &mut sub_merged,
         conflicts,
         depth + 1,
+        budget,
     )?;
 
     let sub_hash = put_tree(store, sub_merged)?;
@@ -558,7 +564,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
     base_entries: &[TreeEntry],
@@ -568,6 +574,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     merged: &mut Vec<TreeEntry>,
     conflicts: &mut Vec<Conflict>,
     depth: usize,
+    budget: &mut WalkBudget,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -584,6 +591,11 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
         let Some(min_name) = min_of_three(b_name, o_name, t_name) else {
             break;
         };
+        budget.visit(if prefix.is_empty() {
+            min_name.len()
+        } else {
+            prefix.len() + 1 + min_name.len()
+        })?;
 
         let has_base = b_name.is_some_and(|n| n == min_name);
         let has_ours = o_name.is_some_and(|n| n == min_name);
@@ -638,6 +650,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             merged,
                             conflicts,
                             depth,
+                            budget,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -655,6 +668,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             merged,
                             conflicts,
                             depth,
+                            budget,
                         )?;
                     } else {
                         add_entry(merged, min_name, t.mode, t.object_hash);
@@ -672,6 +686,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             merged,
                             conflicts,
                             depth,
+                            budget,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -691,6 +706,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         merged,
                         conflicts,
                         depth,
+                        budget,
                     )?;
                 } else if o.mode == t.mode
                     && matches!(o.mode, EntryMode::Blob | EntryMode::Executable)
@@ -738,6 +754,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         merged,
                         conflicts,
                         depth,
+                        budget,
                     )?;
                 } else {
                     conflicts.push(Conflict {
@@ -1662,5 +1679,134 @@ mod strict_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod walk_budget_tests {
+    use super::*;
+    use crate::object::{Blob, Object, Tree};
+    use crate::serialize;
+    use tempfile::TempDir;
+
+    fn put(store: &crate::store::ObjectStore, obj: &Object) -> Hash {
+        store.write(&serialize::serialize(obj).unwrap()).unwrap()
+    }
+
+    /// `levels` doubling trees over one file holding `leaf`.
+    fn doubling(store: &crate::store::ObjectStore, levels: usize, leaf: &[u8]) -> Vec<TreeEntry> {
+        let entry = |name: &[u8], mode, object_hash| TreeEntry {
+            name: name.to_vec(),
+            mode,
+            object_hash,
+        };
+        let blob = put(
+            store,
+            &Object::Blob(Blob {
+                data: leaf.to_vec(),
+            }),
+        );
+        let mut cur = put(
+            store,
+            &Object::Tree(Tree {
+                entries: vec![entry(b"f", EntryMode::Blob, blob)],
+            }),
+        );
+        for _ in 0..levels - 1 {
+            cur = put(
+                store,
+                &Object::Tree(Tree {
+                    entries: vec![
+                        entry(b"a", EntryMode::Tree, cur),
+                        entry(b"b", EntryMode::Tree, cur),
+                    ],
+                }),
+            );
+        }
+        vec![
+            entry(b"a", EntryMode::Tree, cur),
+            entry(b"b", EntryMode::Tree, cur),
+        ]
+    }
+
+    #[test]
+    fn two_sides_that_add_different_trees_at_every_path_stop_at_the_walk_budget() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::store::ObjectStore::init(&crate::layout::RepoLayout::single(dir.path()))
+            .unwrap();
+        // Ours and theirs both add trees that differ below every name, so the
+        // walk would compare 2^7 add/add pairs.
+        let ours = doubling(&store, 7, b"ours");
+        let theirs = doubling(&store, 7, b"theirs");
+        let merge = |limit| {
+            let (mut merged, mut conflicts) = (Vec::new(), Vec::new());
+            let mut budget = WalkBudget::with_limit(limit);
+            merge_entries_recursive(
+                &store,
+                &[],
+                &ours,
+                &theirs,
+                "",
+                &mut merged,
+                &mut conflicts,
+                0,
+                &mut budget,
+            )
+        };
+        merge(1_000_000).unwrap();
+        assert!(matches!(merge(100), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn a_long_directory_name_counts_against_the_byte_budget_at_each_path() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::store::ObjectStore::init(&crate::layout::RepoLayout::single(dir.path()))
+            .unwrap();
+        // Both sides add a directory with a 100 byte name, holding files "a"
+        // and "b" that differ. The walk compares the directory (100 bytes),
+        // then "a" and "b" (102 bytes each), at 67 bytes of index entry each.
+        let side = |data: &[u8]| {
+            let blob = put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            );
+            let file = |name: &[u8]| TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            };
+            let tree = put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: vec![file(b"a"), file(b"b")],
+                }),
+            );
+            vec![TreeEntry {
+                name: vec![b'd'; 100],
+                mode: EntryMode::Tree,
+                object_hash: tree,
+            }]
+        };
+        let (ours, theirs) = (side(b"ours"), side(b"theirs"));
+        let merge = |byte_limit| {
+            let (mut merged, mut conflicts) = (Vec::new(), Vec::new());
+            let mut budget = WalkBudget::with_byte_limit(byte_limit);
+            merge_entries_recursive(
+                &store,
+                &[],
+                &ours,
+                &theirs,
+                "",
+                &mut merged,
+                &mut conflicts,
+                0,
+                &mut budget,
+            )
+        };
+        let exact = (67 + 100) + 2 * (67 + 102);
+        merge(exact).unwrap();
+        assert!(matches!(merge(exact - 1), Err(StoreError::TreeTooLarge)));
     }
 }

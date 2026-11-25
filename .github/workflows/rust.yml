@@ -41,6 +41,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check dependency versions
+        run: |
+          python3 -I -B scripts/check-dependency-versions.py
+          bash scripts/test-check-dependency-versions.sh
+          python3 -I -B scripts/check-format-constants.py
+          bash scripts/test-check-format-constants.sh
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
@@ -109,6 +115,12 @@ jobs:
       - name: Check every target
         working-directory: rust
         run: cargo check --locked --workspace --all-targets
+      - name: Check kit-core against the stable Commonware surface
+        working-directory: rust
+        env:
+          CARGO_TARGET_DIR: target/commonware-beta
+          RUSTFLAGS: --cfg commonware_stability_BETA
+        run: cargo check --locked -p kit-core --features history-mmr
 
   build-and-test:
     name: build and test
@@ -160,12 +172,20 @@ jobs:
         with:
           cache-prefix: rust-nextest
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2  # v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f  # v2
         with:
           tool: cargo-nextest
       - name: Run the tests
         working-directory: rust
         run: cargo nextest run --locked --workspace --all-features --no-fail-fast --profile ci
+      - name: Run ignored boundary assertions
+        working-directory: rust
+        run: >-
+          cargo nextest run --locked --workspace --all-features
+          --no-fail-fast --profile ignored-lane --run-ignored ignored-only
+          --test-threads 1
+          -E 'test(/many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit|a_repository_with_many_branches_clones_fetches_and_pulls_over_ssh/)'
+
 
   # The one check to require. It runs when a job fails, is skipped or is
   # cancelled, and it passes only when every job succeeded.

@@ -231,7 +231,7 @@ steps:
       - |
         set -euo pipefail
         cd rust
-        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+        ../scripts/with-test-tmpdir.sh cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
           --profile ignored-lane --no-fail-fast --run-ignored ignored-only
 
   # nextest does not run doctests, so this step does.
@@ -556,11 +556,11 @@ steps:
         fi
         run_audit() {
           cargo audit --deny warnings \
-            --ignore RUSTSEC-2023-0071 \
             --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2026-0370 \
             --ignore RUSTSEC-2026-0371 \
-            --ignore RUSTSEC-2026-0372
+            --ignore RUSTSEC-2026-0372 \
+            --ignore RUSTSEC-2026-0543
         }
         ( cd rust || exit 1
           failed=0

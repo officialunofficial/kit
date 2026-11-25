@@ -20,7 +20,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kit_attest::grant::{Capabilities, Capability, Grant, RefFlags, RepoScope, packmap_head};
+use kit_attest::grant::{
+    Capabilities, Capability, Grant, RefFlags, RepoScope, packmap_head, tag_tagmap, tagmap_tag,
+};
 use kit_core::hash::from_hex;
 use kit_core::refs::RefWriteCondition;
 use kit_core::repo_identity::RepositoryIdentity;
@@ -46,12 +48,33 @@ struct Candidate {
 fn permits(flags: RefFlags, condition: GrantCondition) -> bool {
     match condition {
         GrantCondition::Missing => flags.contains(RefFlags::CREATE),
-        GrantCondition::Match => {
+        GrantCondition::Match | GrantCondition::Unchanged => {
             flags.contains(RefFlags::UPDATE) || flags.contains(RefFlags::FORCE)
         }
         GrantCondition::Any => flags.contains(RefFlags::FORCE),
         GrantCondition::Delete => flags.contains(RefFlags::DELETE),
         _ => false,
+    }
+}
+
+/// Whether `flags` allow the write of `reference` within `refs`
+/// (SPEC-WRITE-GRANTS §8.3). A tag's create needs `c` and any move of it
+/// `f`; a repair, the tag unchanged together with its tag map's create,
+/// needs `c`. Every other ref follows [`permits`].
+fn permits_ref(flags: RefFlags, reference: &GrantRef<'_>, refs: &[GrantRef<'_>]) -> bool {
+    let Some(tagmap) = tag_tagmap(reference.name) else {
+        return permits(flags, reference.condition);
+    };
+    match reference.condition {
+        GrantCondition::Unchanged
+            if refs.iter().any(|other| {
+                other.name == tagmap && other.condition == GrantCondition::Missing
+            }) =>
+        {
+            flags.contains(RefFlags::CREATE)
+        }
+        GrantCondition::Match | GrantCondition::Unchanged => flags.contains(RefFlags::FORCE),
+        condition => permits(flags, condition),
     }
 }
 
@@ -180,11 +203,14 @@ impl LocalGrants {
                         // fall back to a `u`-only one for a server that can.
                         let mut forces = true;
                         for reference in refs {
-                            // Packmap refs are covered through the head ref. Their own
-                            // condition does not impose a second flag requirement, but
-                            // the head must be in the same request (§8.3: the server
-                            // denies a packmap write without its head).
-                            if let Some(head) = packmap_head(reference.name) {
+                            // Packmap refs are covered through the head ref, and tag
+                            // map refs through the tag. Their own condition does not
+                            // impose a second flag requirement, but the head or tag
+                            // must be in the same request (§8.3: the server denies a
+                            // packmap or tag map write without it).
+                            if let Some(head) =
+                                packmap_head(reference.name).or_else(|| tagmap_tag(reference.name))
+                            {
                                 if !refs.iter().any(|other| other.name == head) {
                                     return None;
                                 }
@@ -192,11 +218,13 @@ impl LocalGrants {
                             }
                             let name = reference.name;
                             let effective = scopes.effective_flags(name);
-                            if !permits(effective, reference.condition) {
+                            if !permits_ref(effective, reference, refs) {
                                 return None;
                             }
-                            if reference.condition == GrantCondition::Match
-                                && !effective.contains(RefFlags::FORCE)
+                            if matches!(
+                                reference.condition,
+                                GrantCondition::Match | GrantCondition::Unchanged
+                            ) && !effective.contains(RefFlags::FORCE)
                             {
                                 forces = false;
                             }
@@ -204,7 +232,7 @@ impl LocalGrants {
                                 .entries()
                                 .iter()
                                 .filter_map(|(pattern, flags)| {
-                                    (pattern.matches(name) && permits(*flags, reference.condition))
+                                    (pattern.matches(name) && permits_ref(*flags, reference, refs))
                                         .then_some(match pattern {
                                             kit_attest::grant::RefPattern::Exact(_) => usize::MAX,
                                             kit_attest::grant::RefPattern::Prefix(prefix) => {
@@ -310,6 +338,33 @@ impl std::fmt::Debug for ConnectAuthority {
 }
 
 impl StepAuthority for ConnectAuthority {
+    fn can_compact_attestations(&self) -> bool {
+        let Some(repository) = self.transport.repository() else {
+            return true;
+        };
+        if repository
+            .namespace()
+            .is_none_or(|ns| ns.to_string() == format!("ed25519-{}", self.signer_key))
+        {
+            return true;
+        }
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
+        let repository = repository.to_string();
+        let request = GrantRequest::new(
+            self.transport.origin(),
+            &repository,
+            &self.signer_key,
+            GrantOperation::Write { refs: &refs },
+        );
+        self.grants.select(&request).is_some_and(|header| {
+            self.grants
+                .header_forces(&header, kit_core::refs::ATTESTMAP_REF)
+        })
+    }
+
     fn authorize(
         &self,
         branch: &str,
@@ -680,6 +735,41 @@ mod tests {
     }
 
     #[test]
+    fn attestmap_uses_exact_update_grants_and_prefers_force_for_compaction() {
+        let grant = |scope: &str| {
+            header(
+                &format!("{NS}/photos"),
+                "write",
+                scope,
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            )
+        };
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
+        let request = request(GrantOperation::Write { refs: &refs });
+        let update = grant("refs/kit/attestmap=u");
+        let force = grant("refs/kit/attestmap=f");
+        assert_eq!(
+            LocalGrants::from_headers(vec![update.clone()]).select_at(&request, NOW),
+            Some(update.clone())
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![update, force.clone()]).select_at(&request, NOW),
+            Some(force)
+        );
+        assert!(
+            LocalGrants::from_headers(vec![grant("refs/kit/*=f")])
+                .select_at(&request, NOW)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn packmap_condition_does_not_add_a_flag_requirement() {
         for (flag, head_condition, packmap_condition) in [
             ("u", GrantCondition::Match, GrantCondition::Missing),
@@ -703,6 +793,108 @@ mod tests {
                     .select_at(&request(GrantOperation::Write { refs: &refs }), NOW),
                 Some(grant),
             );
+        }
+    }
+
+    /// A tag's tag map is covered through the tag (§8.3): a create and a
+    /// repair need `c`, a forced move needs `f`, and a tag map write without
+    /// its tag gets no grant.
+    #[test]
+    fn tag_writes_cover_their_tag_map() {
+        let grant = |flags: &str| {
+            header(
+                &format!("{NS}/photos"),
+                "write",
+                &format!("refs/tags/*={flags}"),
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            )
+        };
+        let select = |flags: &str, refs: &[GrantRef<'_>]| {
+            LocalGrants::from_headers(vec![grant(flags)])
+                .select_at(&request(GrantOperation::Write { refs }), NOW)
+                .is_some()
+        };
+        let tag = "refs/tags/v1";
+        let map = "refs/kit/tagmap/v1";
+        let create = [
+            GrantRef::new(tag, GrantCondition::Missing),
+            GrantRef::new(map, GrantCondition::Missing),
+        ];
+        let repair = [
+            GrantRef::new(tag, GrantCondition::Unchanged),
+            GrantRef::new(map, GrantCondition::Missing),
+        ];
+        let forced_fresh = [
+            GrantRef::new(tag, GrantCondition::Match),
+            GrantRef::new(map, GrantCondition::Missing),
+        ];
+        let forced_append = [
+            GrantRef::new(tag, GrantCondition::Match),
+            GrantRef::new(map, GrantCondition::Match),
+        ];
+        let leftover = [
+            GrantRef::new(tag, GrantCondition::Missing),
+            GrantRef::new(map, GrantCondition::Match),
+        ];
+        for refs in [&create[..], &repair[..], &leftover[..]] {
+            assert!(select("c", refs));
+            assert!(!select("uf", refs));
+        }
+        for refs in [&forced_fresh[..], &forced_append[..]] {
+            assert!(select("f", refs));
+            assert!(!select("cu", refs));
+        }
+        // A tag-only move under `MATCH` needs `f`, a tag-only create `c`.
+        assert!(select("f", &[GrantRef::new(tag, GrantCondition::Match)]));
+        assert!(!select("cu", &[GrantRef::new(tag, GrantCondition::Match)]));
+        assert!(select("c", &[GrantRef::new(tag, GrantCondition::Missing)]));
+        assert!(!select(
+            "cufd",
+            &[GrantRef::new(map, GrantCondition::Missing)]
+        ));
+        assert!(!select(
+            "cufd",
+            &[
+                GrantRef::new("refs/tags/v2", GrantCondition::Missing),
+                GrantRef::new(map, GrantCondition::Missing),
+            ]
+        ));
+    }
+
+    /// `push --delete` sends the head and its chain ref, both as deletes.
+    /// The pair needs `d` on the branch or tag (§8.2), and the chain ref
+    /// adds no flag of its own (§8.3).
+    #[test]
+    fn a_delete_with_its_chain_ref_needs_d() {
+        for (head, map, pattern) in [
+            ("refs/heads/main", "refs/kit/packmap/main", "refs/heads/*"),
+            ("refs/tags/v1", "refs/kit/tagmap/v1", "refs/tags/*"),
+        ] {
+            let select = |flags: &str, refs: &[GrantRef<'_>]| {
+                let grant = header(
+                    &format!("{NS}/photos"),
+                    "write",
+                    &format!("{pattern}={flags}"),
+                    NOW,
+                    NOW + 100_000,
+                    "https://git.example.com",
+                    KEY,
+                );
+                LocalGrants::from_headers(vec![grant])
+                    .select_at(&request(GrantOperation::Write { refs }), NOW)
+                    .is_some()
+            };
+            let pair = [
+                GrantRef::new(head, GrantCondition::Delete),
+                GrantRef::new(map, GrantCondition::Delete),
+            ];
+            assert!(select("d", &pair), "{head}");
+            assert!(!select("cuf", &pair), "{head}");
+            assert!(select("d", &pair[..1]), "{head} alone");
+            assert!(!select("cufd", &pair[1..]), "{map} without {head}");
         }
     }
 
@@ -1006,11 +1198,54 @@ mod tests {
             grants: Arc::new(LocalGrants::from_headers([])),
             signer_key: KEY.to_owned(),
         };
+        assert!(authority.can_compact_attestations());
         assert!(
             authority
                 .authorize("main", RefWriteCondition::Missing, true)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn attestmap_force_uses_the_selected_epoch_and_exact_scope() {
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
+        let request = request(GrantOperation::Write { refs: &refs });
+        let make = |scope, epoch| {
+            let encoded = header(
+                &format!("{NS}/photos"),
+                "write",
+                scope,
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            );
+            let mut signed = SignedHeader::parse(&encoded).unwrap();
+            signed.statement = String::from_utf8(signed.statement)
+                .unwrap()
+                .replace(&format!("\n0\n{NOW}\n"), &format!("\n{epoch}\n{NOW}\n"))
+                .into_bytes();
+            signed.encode().unwrap()
+        };
+        let force = make("refs/kit/attestmap=uf", 1);
+        let update = make("refs/kit/attestmap=u", 2);
+        for (headers, expected) in [
+            (vec![force.clone()], true),
+            (vec![update.clone()], false),
+            (vec![force, update], false),
+            (vec![make("refs/*=uf", 1)], false),
+        ] {
+            let grants = LocalGrants::from_headers(headers);
+            assert_eq!(
+                grants.select_at(&request, NOW + 2).is_some_and(
+                    |header| grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF)
+                ),
+                expected
+            );
+        }
     }
 
     mod load {

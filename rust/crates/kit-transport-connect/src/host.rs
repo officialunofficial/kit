@@ -1,11 +1,12 @@
 //! Host-owned credentials, retry scheduling, admission and progress policy.
 use crate::{
-    ConnectTransport, EnvelopeSigner, GrantOperation, GrantRef, GrantRequest, PendingEvent,
-    UploadEvent,
+    ConnectTransport, EnvelopeSigner, GrantCondition, GrantOperation, GrantRef, GrantRequest,
+    PendingEvent, UploadEvent,
 };
 use http::HeaderMap;
 use kit_client::{
-    Clock, RequestContext, RequestHeaders, RequestPolicy, Signer, UnsignedRequestContext, Veto,
+    Clock, FailureDiagnostic, FailureKind, RefTarget, RequestContext, RequestHeaders,
+    RequestPolicy, Signer, UnsignedRequestContext, Veto,
 };
 use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, BackoffIterator, CommitOutcome, TransportError};
@@ -100,6 +101,10 @@ pub(crate) struct HostPolicy<'a> {
     deadline: Cell<i64>,
     base_deadline: Cell<i64>,
     attempt_deadline: Cell<Option<Instant>>,
+    /// The channel's text for the current attempt's stall, if it stalled.
+    /// The client reports a stall as a transient failure, which is retried
+    /// like a lost connection; the text is kept so the last one is shown.
+    stalled: RefCell<Option<String>>,
     saved: Cell<(u64, u32, u32)>,
 }
 impl<'a> HostPolicy<'a> {
@@ -118,6 +123,7 @@ impl<'a> HostPolicy<'a> {
             deadline: Cell::new((host.now)().saturating_add(7 * 24 * 60 * 60 * 1000)),
             base_deadline: Cell::new((host.now)().saturating_add(7 * 24 * 60 * 60 * 1000)),
             attempt_deadline: Cell::new(None),
+            stalled: RefCell::new(None),
             saved: Cell::new((0, 0, 0)),
         }
     }
@@ -167,8 +173,17 @@ impl<'a> HostPolicy<'a> {
         }
         headers
     }
+    /// Whether `error` is the transient failure the channel reports for a
+    /// stall, so [`Self::map_failure`] names the stall.
+    pub(crate) fn stalled_out(&self, error: &SourceError) -> bool {
+        matches!(error, SourceError::ServerError { status: 503 }) && self.stalled.borrow().is_some()
+    }
     pub(crate) fn map_failure(&self, error: SourceError) -> TransportError {
-        if matches!(error, SourceError::Deadline) && self.attempt_expired() {
+        if matches!(error, SourceError::ServerError { status: 503 })
+            && let Some(cause) = self.stalled.take()
+        {
+            TransportError::RemoteError(cause)
+        } else if matches!(error, SourceError::Deadline) && self.attempt_expired() {
             TransportError::RemoteError("client-side deadline exceeded".into())
         } else if matches!(error, SourceError::Deadline) && self.saw_pending.get() {
             TransportError::RemoteError("pending verification ticket deadline expired".into())
@@ -226,6 +241,8 @@ impl<'a> HostPolicy<'a> {
         }
         Ok(())
     }
+    /// A transfer has no time limit of its own beyond the operation's: the
+    /// channel ends one that moves no data for its stall bound.
     fn attempt_budget(&self, procedure: &str) -> Duration {
         if matches!(
             procedure,
@@ -233,7 +250,7 @@ impl<'a> HostPolicy<'a> {
                 | kit_client::procedures::UPLOAD_PART
                 | "/kit.transport.v1.TransportService/DownloadPack"
         ) {
-            self.host.pack_transfer_timeout
+            self.remaining()
         } else {
             self.host.unary_timeout
         }
@@ -256,7 +273,10 @@ impl<'a> HostPolicy<'a> {
     }
     fn observe_intent(&self, intent: Option<kit_client::WriteIntent<'_>>) {
         if let Some(intent) = intent
-            && intent.procedure == kit_client::procedures::ADVANCE_REFS
+            && matches!(
+                intent.procedure,
+                kit_client::procedures::ADVANCE_REFS | kit_client::procedures::UPDATE_REF
+            )
         {
             self.advance_ticketed.set(intent.ticketed);
         }
@@ -294,6 +314,12 @@ impl<'a> HostPolicy<'a> {
     }
 }
 impl RequestPolicy for HostPolicy<'_> {
+    fn map_failure(&self, failure: &FailureDiagnostic<'_>) -> Option<kit_client::Error> {
+        if failure.kind == FailureKind::Stalled {
+            self.stalled.replace(Some(failure.cause.to_owned()));
+        }
+        None
+    }
     fn request_timeout(&self, procedure: &str) -> Option<Duration> {
         if self.attempt_deadline.get().is_none() {
             self.begin_attempt(procedure);
@@ -324,7 +350,15 @@ impl RequestPolicy for HostPolicy<'_> {
                     .ref_moves
                     .iter()
                     .map(|movement| {
-                        GrantRef::new(&movement.name, crate::client::grant_condition(movement.old))
+                        let condition = match (movement.old, &movement.new) {
+                            (_, RefTarget::Delete) => GrantCondition::Delete,
+                            (
+                                kit_core::refs::RefWriteCondition::Match(old),
+                                RefTarget::Set(new),
+                            ) if old == *new => GrantCondition::Unchanged,
+                            (old, _) => crate::client::grant_condition(old),
+                        };
+                        GrantRef::new(&movement.name, condition)
                     })
                     .collect()
             })
@@ -374,6 +408,7 @@ impl RequestPolicy for HostPolicy<'_> {
 }
 impl WriteRecovery for HostPolicy<'_> {
     fn before_attempt(&self, procedure: &str, deadline: Option<i64>) -> Result<(), SourceError> {
+        self.stalled.replace(None);
         self.begin_attempt(procedure);
         self.deadline
             .set(deadline.map_or(self.base_deadline.get(), |deadline| {
@@ -418,6 +453,7 @@ impl WriteRecovery for HostPolicy<'_> {
     }
     fn before_call(&self, procedure: &str) -> Result<(), SourceError> {
         self.attempt_deadline.set(None);
+        self.stalled.replace(None);
         self.deadline.set(self.base_deadline.get());
         self.check_deadline()?;
         self.saw_pending.set(false);
@@ -440,7 +476,8 @@ impl WriteRecovery for HostPolicy<'_> {
         if (matches!(
             error,
             SourceError::PendingVerification { .. } | SourceError::MembershipNotVisible
-        ) && !procedure.ends_with("/AdvanceRefs"))
+        ) && !(procedure.ends_with("/AdvanceRefs")
+            || (procedure.ends_with("/UpdateRef") && self.advance_ticketed.get())))
             || (matches!(error, SourceError::MembershipNotVisible) && !self.advance_ticketed.get())
             || matches!(error, SourceError::RetryAfter { .. })
         {
@@ -710,6 +747,7 @@ pub(crate) fn map_client(error: kit_client::Error, upload: bool) -> TransportErr
             TransportError::AdmissionRequired(challenges)
         }
         kit_client::Error::Connection(_) => TransportError::ServerError { status: 503 },
+        kit_client::Error::ServerStatus { status } => TransportError::ServerError { status },
         kit_client::Error::RequestTimeout(cause) => TransportError::RemoteError(cause),
         kit_client::Error::Invalid(_) | kit_client::Error::Limit(_) => {
             TransportError::InvalidResponse
@@ -724,7 +762,7 @@ pub(crate) struct HostSource<'a>(
 );
 impl HostSource<'_> {
     fn failure(&self, error: SourceError, upload: bool) -> SourceError {
-        if matches!(error, SourceError::Deadline) {
+        if matches!(error, SourceError::Deadline) || self.1.stalled_out(&error) {
             self.1.map_failure(error).into()
         } else {
             map_source(error, upload).into()
@@ -732,51 +770,69 @@ impl HostSource<'_> {
     }
 }
 impl RemoteSource for HostSource<'_> {
+    fn supports_attestations(&self) -> bool {
+        self.0.supports_attestations()
+    }
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[kit_core::protocol::PackKey],
+    ) -> Result<(), SourceError> {
+        self.0
+            .write_attestmap(condition, tip, keys)
+            .map_err(|e| self.failure(e, false))
+    }
+
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
         self.0.list_branches().map_err(|e| self.failure(e, false))
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+        self.0.list_refs(prefix).map_err(|e| self.failure(e, false))
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.0.read_ref(name).map_err(|e| self.failure(e, false))
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        ref_hint: &str,
     ) -> Result<Vec<u8>, SourceError> {
         self.0
-            .download_pack_via_ref(key, name)
+            .download_blob(key, ref_hint)
             .map_err(|e| self.failure(e, false))
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &kit_core::protocol::PackKey,
-        name: &str,
-    ) -> Result<Vec<u8>, SourceError> {
+        ref_hint: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
         self.0
-            .download_pack_via_ref(key, name)
+            .download_pack(key, ref_hint, sink)
             .map_err(|e| self.failure(e, false))
     }
     fn supports_push(&self) -> bool {
         self.0.supports_push()
     }
-    fn upload_pack_via_ref(
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn kit_core::protocol::PackBody,
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         self.0
-            .upload_pack_via_ref(bytes, key, name)
+            .upload_pack(pack, key, head_ref)
             .map_err(|e| self.failure(e, true))
     }
-    fn upload_blob_via_ref(
+    fn upload_blob(
         &self,
         bytes: &[u8],
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         self.0
-            .upload_blob_via_ref(bytes, key, name)
+            .upload_blob(bytes, key, head_ref)
             .map_err(|e| self.failure(e, true))
     }
     fn update_ref(
@@ -803,8 +859,25 @@ impl RemoteSource for HostSource<'_> {
             .advance_refs_committing(head, hc, tip, packmap, pc, node, keys)
             .map_err(|e| self.failure(e, false))
     }
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        self.0
+            .delete_refs(head, head_expected, map, map_expected)
+            .map_err(|e| self.failure(e, false))
+    }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.0.upload_limits()
+    }
+    fn inspection_max_objects(&self) -> Option<u64> {
+        self.0.inspection_max_objects()
+    }
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        self.0.ref_listing()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.0.supports_atomic_advance()
@@ -820,6 +893,18 @@ impl RemoteSource for HostSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_connect_server_status_stays_a_server_error() {
+        for status in [429, 500, 503] {
+            let mapped = map_client(kit_client::Error::ServerStatus { status }, false);
+            assert!(
+                matches!(mapped, TransportError::ServerError { status: seen } if seen == status)
+            );
+        }
+        let mapped = map_client(kit_client::Error::Invalid("Connect error JSON"), false);
+        assert!(matches!(mapped, TransportError::InvalidResponse));
+    }
 
     #[test]
     fn admission_classification_uses_http_status_and_ignores_spoofed_markers() {

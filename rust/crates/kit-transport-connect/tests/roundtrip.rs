@@ -241,7 +241,10 @@ impl generated::TransportService for TestService {
     ) -> ServiceResult<generated::PackExistsResponse> {
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
+        let exists = self
+            .inner
+            .pack_exists(&key, None)
+            .map_err(to_connect_error)?;
         Ok(Response::new(generated::PackExistsResponse {
             exists: Some(exists),
             ..Default::default()
@@ -297,7 +300,7 @@ impl generated::TransportService for TestService {
         }
         let key = PackKey::new(to_hash(Some(pack_id))?);
         self.inner
-            .upload_pack(&buf, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&buf), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::UploadPackResponse::default()))
     }
@@ -309,7 +312,10 @@ impl generated::TransportService for TestService {
     ) -> ServiceResult<ServiceStream<generated::DownloadPackResponse>> {
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
+        let bytes = self
+            .inner
+            .download_blob(&key, None, u64::MAX)
+            .map_err(to_connect_error)?;
 
         #[allow(clippy::cast_possible_truncation)]
         let total_bytes = bytes.len() as u64;
@@ -462,11 +468,23 @@ fn full_roundtrip_through_real_connect_server() {
     // -- packs --------------------------------------------------------
     let data = b"hello from the real Connect wire, not a mock";
     let key = PackKey::from(blake3_hash(data));
-    assert!(!client.pack_exists(&key).expect("pack_exists before upload"));
-    client.upload_pack(data, &key).expect("upload_pack");
-    assert!(client.pack_exists(&key).expect("pack_exists after upload"));
+    assert!(
+        !client
+            .pack_exists(&key, None)
+            .expect("pack_exists before upload")
+    );
+    client
+        .upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+        .expect("upload_pack");
+    assert!(
+        client
+            .pack_exists(&key, None)
+            .expect("pack_exists after upload")
+    );
     assert_eq!(
-        client.download_pack(&key).expect("download_pack"),
+        client
+            .download_blob(&key, None, u64::MAX)
+            .expect("download_pack"),
         data.to_vec()
     );
 
@@ -474,11 +492,11 @@ fn full_roundtrip_through_real_connect_server() {
     // convention.
     let empty_key = PackKey::from(blake3_hash(b""));
     client
-        .upload_pack(b"", &empty_key)
+        .upload_pack(&kit_core::protocol::SliceBody(b""), &empty_key, None)
         .expect("upload empty pack");
     assert_eq!(
         client
-            .download_pack(&empty_key)
+            .download_blob(&empty_key, None, u64::MAX)
             .expect("download empty pack"),
         Vec::<u8>::new()
     );
@@ -487,15 +505,19 @@ fn full_roundtrip_through_real_connect_server() {
     let big_data = vec![0xABu8; 3 * 1024 * 1024]; // 3 MiB > 800 KiB chunk size
     let big_key = PackKey::from(blake3_hash(&big_data));
     client
-        .upload_pack(&big_data, &big_key)
+        .upload_pack(&kit_core::protocol::SliceBody(&big_data), &big_key, None)
         .expect("upload big pack");
     assert_eq!(
-        client.download_pack(&big_key).expect("download big pack"),
+        client
+            .download_blob(&big_key, None, u64::MAX)
+            .expect("download big pack"),
         big_data
     );
 
     let missing = PackKey::new([0xEEu8; 32]);
-    let err = client.download_pack(&missing).expect_err("missing pack");
+    let err = client
+        .download_blob(&missing, None, u64::MAX)
+        .expect_err("missing pack");
     assert!(matches!(err, TransportError::PackNotFound), "{err:?}");
 
     // -- refs -----------------------------------------------------------

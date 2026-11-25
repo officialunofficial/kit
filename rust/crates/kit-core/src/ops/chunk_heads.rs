@@ -1,7 +1,9 @@
-//! Parallel chunk head reads for the push plan and the closure presence check.
+//! Parallel chunk head reads for the push plan, the closure presence check
+//! and the chunk check of `gc`.
 //!
-//! Both walk a manifest's chunks and read the first bytes of each chunk
-//! object, to learn that it is a blob and how long it is. Each read is an
+//! The first two walk a manifest's chunks and read the first bytes of each
+//! chunk object, to learn that it is a blob and how long it is; `gc` reads
+//! the type of each chunk it keeps. Each read is an
 //! `open` and a short `read` on its own file, so a walk that reads one chunk
 //! after another is bound by disk latency, not by CPU. This module reads the
 //! heads of a window of chunks at once and then applies the results in manifest
@@ -20,7 +22,7 @@ use std::collections::HashMap;
 use super::graph::chunk_blob_len;
 use crate::hash::Hash;
 use crate::object::ChunkedBlob;
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ClosureSource, StoreError};
 
 /// The bounds of a walk. The tests run it with small ones, so a manifest of a
 /// few dozen chunks takes several rounds and reaches the parallel path.
@@ -101,7 +103,7 @@ enum Slot {
 ///
 /// A head read error, a length mismatch and `visit`'s own error.
 pub(crate) fn for_each_checked_chunk<C: LenCache>(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     blob: &ChunkedBlob,
     cache: &mut C,
     wants_head: impl Fn(u32, &Hash) -> bool,
@@ -112,7 +114,7 @@ pub(crate) fn for_each_checked_chunk<C: LenCache>(
 
 /// [`for_each_checked_chunk`] with the bounds of `tuning`.
 fn walk_chunks<C: LenCache>(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     blob: &ChunkedBlob,
     cache: &mut C,
     wants_head: impl Fn(u32, &Hash) -> bool,
@@ -187,13 +189,18 @@ type HeadResult = Option<Result<u64, StoreError>>;
 /// `Some(Ok(_))` and the first failed read is `Some(Err(_))`. Slots after it
 /// may be `Some` or `None`.
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-fn read_heads(store: &ObjectStore, reads: &[(u32, Hash)], tuning: Tuning) -> Vec<HeadResult> {
+fn read_heads(
+    store: &(impl ClosureSource + ?Sized),
+    reads: &[(u32, Hash)],
+    tuning: Tuning,
+) -> Vec<HeadResult> {
     let mut out: Vec<HeadResult> = (0..reads.len()).map(|_| None).collect();
     #[cfg(not(target_arch = "wasm32"))]
     {
         let workers = HEAD_WORKERS.min(reads.len());
         if workers > 1 && reads.len() >= tuning.min_parallel_reads {
-            read_heads_parallel(store, reads, workers, &mut out);
+            let read = |&(index, chunk): &(u32, Hash)| chunk_blob_len(store, &chunk, index);
+            run_parallel(reads, workers, &read, &mut out);
             count_reads(&out);
             return out;
         }
@@ -210,32 +217,32 @@ fn read_heads(store: &ObjectStore, reads: &[(u32, Hash)], tuning: Tuning) -> Vec
     out
 }
 
-/// Up to `workers` threads claim reads in manifest order from a shared counter:
-/// the calling thread and `workers - 1` scoped threads. A thread that cannot be
+/// Up to `workers` threads claim items in order from a shared counter: the
+/// calling thread and `workers - 1` scoped threads. A thread that cannot be
 /// started is left out, so a limit on threads leaves fewer workers and never
-/// a failure. Once a read fails, no read after it starts, and every read before
-/// it has started already, so the lowest failed read is always the one that
-/// is reported.
+/// a failure. Once `run` fails for an item, it starts for no item after it,
+/// and it has started for every item before it already, so the lowest failed
+/// item is always the one that is reported. Slot `i` of `out` takes the
+/// result for `items[i]`.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_heads_parallel(
-    store: &ObjectStore,
-    reads: &[(u32, Hash)],
+fn run_parallel<R: Sync, T: Send, E: Send>(
+    items: &[R],
     workers: usize,
-    out: &mut [HeadResult],
+    run: &(impl Fn(&R) -> Result<T, E> + Sync),
+    out: &mut [Option<Result<T, E>>],
 ) {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let next = AtomicUsize::new(0);
     let first_failed = AtomicUsize::new(usize::MAX);
     let work = || {
-        let mut done: Vec<(usize, Result<u64, StoreError>)> = Vec::new();
+        let mut done: Vec<(usize, Result<T, E>)> = Vec::new();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
-            if i >= reads.len() || i > first_failed.load(Ordering::Relaxed) {
+            if i >= items.len() || i > first_failed.load(Ordering::Relaxed) {
                 return done;
             }
-            let (index, chunk) = reads[i];
-            let result = chunk_blob_len(store, &chunk, index);
+            let result = run(&items[i]);
             if result.is_err() {
                 first_failed.fetch_min(i, Ordering::Relaxed);
             }
@@ -248,12 +255,47 @@ fn read_heads_parallel(
             .collect();
         let mut finished = vec![work()];
         for handle in handles {
-            finished.push(handle.join().expect("a chunk head reader panicked"));
+            finished.push(handle.join().expect("a parallel reader panicked"));
         }
         for (i, result) in finished.into_iter().flatten() {
             out[i] = Some(result);
         }
     });
+}
+
+/// Run `check` on every item of `items`, in order, and return the first
+/// error, as a serial loop does. A window of items runs up to
+/// `HEAD_WORKERS` checks at once, for a check that opens a file and reads a
+/// few bytes, as a head read does; a window too small to gain from threads
+/// runs on the calling thread. Memory is bounded by the window, whatever the
+/// number of items.
+///
+/// # Errors
+///
+/// The first error of `check` in item order.
+pub(crate) fn try_each_in_order<R: Sync, E: Send>(
+    items: &[R],
+    check: impl Fn(&R) -> Result<(), E> + Sync,
+) -> Result<(), E> {
+    let tuning = Tuning::DEFAULT;
+    for window in items.chunks(tuning.window) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let workers = HEAD_WORKERS.min(window.len());
+            if workers > 1 && window.len() >= tuning.min_parallel_reads {
+                let mut out: Vec<Option<Result<(), E>>> = (0..window.len()).map(|_| None).collect();
+                run_parallel(window, workers, &check, &mut out);
+                // Every slot before the first failure is filled, so the
+                // first error here is the first in item order.
+                for result in out.into_iter().flatten() {
+                    result?;
+                }
+                continue;
+            }
+        }
+        window.iter().try_for_each(&check)?;
+    }
+    Ok(())
 }
 
 /// Count the reads a round ran, for the tests that pin how many there are.

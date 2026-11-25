@@ -1,6 +1,6 @@
 //! Multi-pack push integration tests.
 //!
-//! `push_branch`/`push_branch_with_depth` build the whole push plan into a
+//! `push_branch` builds the whole push plan into a
 //! single pack, capped at 256 MiB by default and at most
 //! `pack::MAX_TOTAL_PAYLOAD` (4 GiB). A push whose plan exceeds that in one pack splits
 //! across multiple packs — sealed and uploaded as they fill — recorded
@@ -17,7 +17,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::Repo;
+use common::{Repo, push_branch_with_limits};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::pack::{self, ENTRY_FRAME_LEN, HEADER_LEN, TRAILER_LEN};
@@ -26,7 +26,7 @@ use kit_core::refs;
 use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_memory::MemoryTransport;
-use libkit::transfer::{pull_all, push_all, push_branch_with_limits};
+use libkit::transfer::{pull_all, push_all};
 
 /// Tiny cap that a handful of KiB-sized files reliably exceeds, forcing a
 /// split without moving gigabytes through the test harness.
@@ -46,7 +46,9 @@ fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         cursor = node.prev;
         nodes.push(node);
@@ -107,7 +109,7 @@ fn oversized_push_splits_into_one_node_with_multiple_packs_and_stays_fetchable()
     // Every advertised pack must actually exist — no node references an
     // un-uploaded pack.
     for pack_key in &chain[0].packs {
-        tx.download_pack(&PackKey::from_hash(*pack_key))
+        tx.download_blob(&PackKey::from_hash(*pack_key), None, u64::MAX)
             .unwrap_or_else(|e| panic!("pack {pack_key:?} must be downloadable: {e}"));
     }
 
@@ -192,7 +194,9 @@ fn a_push_of_more_than_the_default_pack_cap_splits_unless_a_larger_cap_is_set() 
     assert!(packs.len() > 1, "{} pack(s)", packs.len());
     let framing = (HEADER_LEN + TRAILER_LEN) as u64 + (FILES + 2) * ENTRY_FRAME_LEN as u64;
     for key in packs {
-        let pack = tx.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let pack = tx
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         assert!(
             pack.len() as u64 <= kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP + framing,
             "{} bytes",

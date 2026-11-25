@@ -21,7 +21,7 @@
 #      kit-core uses the global allocator in production, so we do not
 #      swap in a custom allocator in the fuzz harness — that would make
 #      the harness diverge from production. See docs/FUZZ.md.
-#   4. 100 ms wall-clock cap per iteration.
+#   4. 100 ms wall-clock cap per iteration by default.
 #   5. No unbounded loops; iteration counter mandatory.
 #   6. Seeded RNG so failures reproduce.
 
@@ -46,7 +46,7 @@ undocumented_unsafe_blocks = "deny"
 [dependencies]
 arbitrary = "1.5.0"
 buffa = "0.9.2"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 kit-attest = { path = "../crates/kit-attest", features = ["grants"] }
 kit-core = { path = "../crates/kit-core", features = ["sparse-checkout", "fuzzing"] }
 kit-git-bridge = { path = "../crates/kit-git-bridge" }
@@ -69,9 +69,9 @@ libfuzzer-sys = { version = "0.4.13", optional = true }
 # `minifuzz` (commonware-invariants) drives the in-process `#[test]`
 # property runs — see the `rpc_decode` pilot in `src/lib.rs`. Dev-only:
 # the libfuzzer binaries never touch it. Pinned to the commonware
-# 2026.10.x train, same as the workspace-root commonware-* deps.
+# 2026.11.x train, same as the workspace-root commonware-* deps.
 [dev-dependencies]
-commonware-invariants = "2026.10.0"
+commonware-invariants = "2026.11.0"
 
 [features]
 default = []
@@ -428,6 +428,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "store_read_blob"
+path = "fuzz_targets/store_read_blob.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "read_to_end_capped"
 path = "fuzz_targets/read_to_end_capped.rs"
 test = false
@@ -590,6 +598,30 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "push_refspec"
 path = "fuzz_targets/push_refspec.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "attestation_pack"
+path = "fuzz_targets/attestation_pack.rs"
+test = false
+doc = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "local_pack_index"
+path = "fuzz_targets/local_pack_index.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+
+[[bin]]
+name = "maintenance_stamp"
+path = "fuzz_targets/maintenance_stamp.rs"
 test = false
 doc = false
 bench = false

@@ -12,7 +12,11 @@ use kit_client::{
     StoredPart, TicketMetadata, advance_ticket_limit, data_pack_budget,
 };
 use kit_core::hash::{Hash, to_hex};
-use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackKey, UploadLimits};
+use kit_core::pack::PackError;
+use kit_core::protocol::{
+    AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackBody, PackKey, UploadLimits,
+    saturating_usize,
+};
 use kit_core::refs::RefWriteCondition;
 use kit_core::upload_parts::PartPlan;
 
@@ -315,7 +319,7 @@ impl<
     R: WriteRecovery + ?Sized,
 > ClientSource<'_, T, S, C, E, O, P, R>
 {
-    fn write_info(&self) -> Option<GetServerInfoResponse> {
+    pub(super) fn write_info(&self) -> Option<GetServerInfoResponse> {
         self.write_state()
             .info
             .get_or_init(|| {
@@ -391,6 +395,11 @@ impl<
                     return Ok(value);
                 }
                 Err(error) => {
+                    // A local failure (the caller's sink, or reading the
+                    // pack) is never the remote's, so no host retries it.
+                    if matches!(error, Error::Sink(_) | Error::Pack(PackError::Io(_))) {
+                        return Err(source_error(error));
+                    }
                     let mapped = source_error(error);
                     if matches!(mapped, SourceError::AdmissionRequired { .. })
                         && (ticketed
@@ -407,12 +416,12 @@ impl<
                         renewed_after_unauthenticated = true;
                         continue;
                     }
-                    if procedure == "AdvanceRefs"
+                    if (procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
                         && matches!(mapped, SourceError::PendingVerification { .. })
                     {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
-                    } else if procedure == "AdvanceRefs"
+                    } else if matches!(procedure, "AdvanceRefs" | "UpdateRef")
                         && ticketed
                         && matches!(mapped, SourceError::MembershipNotVisible)
                     {
@@ -425,7 +434,7 @@ impl<
                         return Err(mapped);
                     };
                     definitive = matches!(mapped, SourceError::AdmissionRequired { .. })
-                        || (procedure == "AdvanceRefs"
+                        || ((procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
                             && (matches!(mapped, SourceError::PendingVerification { .. })
                                 || (ticketed
                                     && matches!(mapped, SourceError::MembershipNotVisible))));
@@ -451,14 +460,18 @@ impl<
     /// # Errors
     /// The pack exceeds the transport bound, writes are disabled, or the
     /// host/server refuses the upload.
-    pub fn upload_pack_unhinted(&self, bytes: &[u8], key: &PackKey) -> Result<(), SourceError> {
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(SourceError::PayloadTooLarge(bytes.len()));
+    pub fn upload_pack_unhinted(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+    ) -> Result<(), SourceError> {
+        if pack.len() > PACK_BODY_LIMIT {
+            return Err(SourceError::PayloadTooLarge(saturating_usize(pack.len())));
         }
         self.write_call("UploadPack", false, None, |identity| {
             self.executor.block_on(
                 self.client
-                    .upload_pack(&key.into_hash(), bytes, None, identity),
+                    .upload_pack(&key.into_hash(), pack, None, identity),
             )
         })
         .map(|_| ())
@@ -510,26 +523,37 @@ impl<
         Ok(outcome)
     }
 
+    /// Upload `pack`, reading it from its body as each request is sent: a
+    /// retry, a restarted ticket and each part read the body again.
     pub(super) fn write_upload(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
     ) -> Result<(), SourceError> {
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(SourceError::PayloadTooLarge(bytes.len()));
+        if head == kit_core::refs::ATTESTMAP_REF
+            && self
+                .server_info()
+                .is_none_or(|info| info.supports_attestations != Some(true))
+        {
+            return Err(SourceError::ProtocolError);
+        }
+        let len = pack.len();
+        if len > PACK_BODY_LIMIT {
+            return Err(SourceError::PayloadTooLarge(saturating_usize(len)));
         }
         let info = self.write_info();
-        let ticketless = (info.is_none() && self.client.public_key().is_none())
-            || info.as_ref().is_some_and(|info| {
-                (bytes.len() as u64) < info.begin_upload_threshold_bytes.unwrap_or(0)
-            });
+        let ticketless = head != kit_core::refs::ATTESTMAP_REF
+            && ((info.is_none() && self.client.public_key().is_none())
+                || info
+                    .as_ref()
+                    .is_some_and(|info| len < info.begin_upload_threshold_bytes.unwrap_or(0)));
         if ticketless {
             return self
                 .write_call("UploadPack", false, None, |identity| {
                     self.executor.block_on(self.client.upload_pack(
                         &key.into_hash(),
-                        bytes,
+                        pack,
                         None,
                         identity,
                     ))
@@ -546,7 +570,7 @@ impl<
                 self.executor.block_on(self.client.begin_upload(
                     head,
                     &key.into_hash(),
-                    bytes.len() as u64,
+                    len,
                     identity,
                 ))
             });
@@ -554,7 +578,7 @@ impl<
                 Err(SourceError::Remote(remote)) if remote.code == "unimplemented" => {
                     let message = if info
                         .as_ref()
-                        .is_some_and(|info| bytes.len() as u64 > info.part_size.unwrap_or(0))
+                        .is_some_and(|info| len > info.part_size.unwrap_or(0))
                     {
                         "server storage cannot accept packs over part_size"
                     } else {
@@ -589,7 +613,7 @@ impl<
                 _ => return Err(SourceError::InvalidResponse),
             };
             let id = self.cache_ticket(head, key, &ticket)?;
-            let result = self.upload_ticket_bytes(bytes, key, head, &ticket, info.as_ref(), id);
+            let result = self.upload_ticket_bytes(pack, key, head, &ticket, info.as_ref(), id);
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) if remote_is(&error, "failed_precondition") => {
@@ -607,25 +631,25 @@ impl<
 
     fn upload_ticket_bytes(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
         ticket: &UploadTicket,
         info: Option<&GetServerInfoResponse>,
         id: Hash,
     ) -> Result<(), SourceError> {
-        if bytes.len() as u64 <= ticket.part_size.ok_or(SourceError::InvalidResponse)? {
+        if pack.len() <= ticket.part_size.ok_or(SourceError::InvalidResponse)? {
             self.write_call("UploadPack", true, None, |identity| {
                 self.executor.block_on(self.client.upload_pack(
                     &key.into_hash(),
-                    bytes,
+                    pack,
                     ticket.token.as_deref(),
                     identity,
                 ))
             })
             .map(|_| ())
         } else {
-            self.write_parts(bytes, key, head, ticket, info, id)
+            self.write_parts(pack, key, head, ticket, info, id)
         }
     }
 
@@ -681,7 +705,7 @@ impl<
 
     fn write_parts(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
         ticket: &UploadTicket,
@@ -689,7 +713,7 @@ impl<
         id: Hash,
     ) -> Result<(), SourceError> {
         let plan = PartPlan::new(
-            bytes.len() as u64,
+            pack.len(),
             ticket.part_size.unwrap_or(0),
             info.map_or(u32::MAX, |info| info.max_parts.unwrap_or(0)),
         )
@@ -709,7 +733,7 @@ impl<
                 .map_or_else(String::new, |key| to_hex(&key)),
             head_ref: head.to_owned(),
             pack_key: *key,
-            bytes: bytes.len() as u64,
+            bytes: pack.len(),
             part_size: ticket.part_size.unwrap_or(0),
             expires_unix_ms: ticket.expires_unix_ms.unwrap_or(0),
         };
@@ -741,7 +765,7 @@ impl<
                     }
                 }
             }
-            self.send_missing_parts(bytes, ticket, &plan, &metadata, &mut parts)?;
+            self.send_missing_parts(pack, ticket, &plan, &metadata, &mut parts)?;
             let from_disk = parts.iter().flatten().any(|part| part.from_disk);
             let receipts = parts
                 .into_iter()
@@ -771,9 +795,11 @@ impl<
         Err(SourceError::InvalidResponse)
     }
 
+    /// Send each part without a stored receipt, reading only those parts
+    /// from `pack`: twice each, once for its commitment and once to send it.
     fn send_missing_parts(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         ticket: &UploadTicket,
         plan: &PartPlan,
         metadata: &TicketMetadata,
@@ -786,31 +812,19 @@ impl<
             parts: plan.count(),
             resumed,
             saved_bytes,
-            bytes: bytes.len() as u64,
+            bytes: pack.len(),
         })?;
         for index in 0..plan.count() {
             if parts[index as usize].is_some() {
                 continue;
             }
             self.write_upload_event(UploadEvent::BeforePart)?;
-            let offset = usize::try_from(
-                plan.offset(index)
-                    .map_err(|_| SourceError::InvalidResponse)?,
-            )
-            .map_err(|_| SourceError::InvalidResponse)?;
-            let len = usize::try_from(
-                plan.expected_len(index)
-                    .map_err(|_| SourceError::InvalidResponse)?,
-            )
-            .map_err(|_| SourceError::InvalidResponse)?;
-            let slice = bytes
-                .get(offset..offset + len)
-                .ok_or(SourceError::InvalidResponse)?;
+            let len = plan
+                .expected_len(index)
+                .map_err(|_| SourceError::InvalidResponse)?;
             let response = self.write_call("UploadPart", true, None, |identity| {
-                self.executor.block_on(
-                    self.client
-                        .upload_part(ticket, plan, index, slice, identity),
-                )
+                self.executor
+                    .block_on(self.client.upload_part(ticket, plan, index, pack, identity))
             })?;
             let receipt = response
                 .value
@@ -819,7 +833,7 @@ impl<
                 .ok_or(SourceError::InvalidResponse)?;
             let part = StoredPart {
                 index,
-                len: len as u64,
+                len,
                 receipt,
                 from_disk: false,
             };
@@ -833,11 +847,73 @@ impl<
                 index,
                 parts: plan.count(),
                 saved_bytes,
-                bytes: bytes.len() as u64,
+                bytes: pack.len(),
                 resumed,
             })?;
         }
         Ok(())
+    }
+
+    /// Keys without a cached reservation must already be repository members
+    /// (for example `BeginUpload` answered `AlreadyPresent`). The server verifies
+    /// membership atomically; another session's unconsumed uploads do not count.
+    pub(super) fn write_attestmap_committing(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
+        use kit_core::refs::ATTESTMAP_REF;
+        if !self.client.supports_writes()
+            || self
+                .server_info()
+                .is_none_or(|info| info.supports_attestations != Some(true))
+            || matches!(condition, RefWriteCondition::Any)
+        {
+            return Err(SourceError::ProtocolError);
+        }
+        let selected = keys
+            .iter()
+            .filter_map(|key| {
+                self.write_state()
+                    .tickets
+                    .borrow()
+                    .get(&(ATTESTMAP_REF.to_owned(), *key))
+                    .cloned()
+                    .map(|ticket| (*key, ticket))
+            })
+            .collect::<Vec<_>>();
+        let ids = selected
+            .iter()
+            .map(|(_, t)| {
+                t.id.as_deref()
+                    .unwrap_or_default()
+                    .try_into()
+                    .map_err(|_| SourceError::InvalidResponse)
+            })
+            .collect::<Result<Vec<Hash>, _>>()?;
+        if ids.len()
+            > self
+                .server_info()
+                .as_ref()
+                .map_or(DEFAULT_TICKETS_PER_ADVANCE, advance_ticket_limit) as usize
+            || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+        {
+            return Err(SourceError::ProtocolError);
+        }
+        let deadline = selected.iter().filter_map(|(_, t)| t.expires_unix_ms).min();
+        let result = self.write_call("UpdateRef", !ids.is_empty(), deadline, |identity| {
+            self.executor
+                .block_on(self.client.write_attestmap(condition, *tip, &ids, identity))
+        });
+        match result {
+            Ok(_) => {
+                self.forget_committed_tickets(ATTESTMAP_REF, selected);
+                Ok(())
+            }
+            Err(e) if remote_is(&e, "failed_precondition") => Err(SourceError::RefConflict),
+            Err(e) => Err(e),
+        }
     }
 
     pub(super) fn write_update_ref(
@@ -856,6 +932,69 @@ impl<
             Err(error) if remote_is(&error, "failed_precondition") => Err(SourceError::RefConflict),
             other => other,
         }
+    }
+
+    /// `UpdateRef` with `delete` under `MATCH` (SPEC-TRANSPORT-CONNECT
+    /// §7.8). Another value or an absent ref is `failed_precondition`, a
+    /// [`SourceError::RefConflict`].
+    pub(super) fn write_delete_ref(&self, name: &str, expected: &Hash) -> Result<(), SourceError> {
+        let result = self
+            .write_call("UpdateRef", false, None, |identity| {
+                self.executor.block_on(self.client.delete_ref(
+                    name,
+                    RefWriteCondition::Match(*expected),
+                    identity,
+                ))
+            })
+            .map(|_| ());
+        match result {
+            Err(error) if remote_is(&error, "failed_precondition") => Err(SourceError::RefConflict),
+            other => other,
+        }
+    }
+
+    /// Delete a head and its chain ref in one `AdvanceRefs` with `delete`,
+    /// both under `MATCH` (SPEC-TRANSPORT-CONNECT §7.8): both go, or neither
+    /// does and the outcome names the ref that moved. A head without a chain
+    /// ref is deleted alone, through `UpdateRef`.
+    pub(super) fn write_delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<AdvanceOutcome, SourceError> {
+        let Some(map_expected) = map_expected else {
+            return match self.write_delete_ref(head, head_expected) {
+                Ok(()) => Ok(AdvanceOutcome::Committed),
+                Err(SourceError::RefConflict) => Ok(AdvanceOutcome::HeadConflict),
+                Err(error) => Err(error),
+            };
+        };
+        let mut completion = AdvanceCompletion::new(self.recovery);
+        let request = proto::AdvanceRefsRequest {
+            head_ref: Some(head.to_owned()),
+            head_expectation: Some(proto::RefExpectation::Match.into()),
+            head_expected_id: Some(head_expected.to_vec()),
+            packmap_ref: Some(map.to_owned()),
+            packmap_expectation: Some(proto::RefExpectation::Match.into()),
+            packmap_expected_id: Some(map_expected.to_vec()),
+            delete: Some(true),
+            ..Default::default()
+        };
+        let deadline = self
+            .client
+            .now_ms()
+            .map(|now| now.saturating_add(7 * 24 * 60 * 60 * 1000));
+        let response = self
+            .write_call("AdvanceRefs", false, deadline, |identity| {
+                self.executor
+                    .block_on(self.client.advance_refs(&request, identity))
+            })?
+            .value;
+        let outcome = advance_outcome(&response)?;
+        completion.finish(CommitOutcome::Advanced(outcome));
+        Ok(outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -896,14 +1035,14 @@ impl<
                 "advance contains more than {ticket_limit} or duplicate upload tickets"
             )));
         }
+        // A ticketed advance pairs `refs/heads/<x>` with
+        // `refs/kit/packmap/<x>`, or `refs/tags/<x>` with
+        // `refs/kit/tagmap/<x>` (SPEC-TRANSPORT-CONNECT §4).
         if !ids.is_empty()
-            && head
-                .strip_prefix("refs/heads/")
-                .filter(|branch| !branch.is_empty())
-                .is_none_or(|branch| packmap != crate::packmap::packmap_ref(branch))
+            && (head.ends_with('/') || crate::packmap::chain_ref(head).as_deref() != Some(packmap))
         {
             return Err(SourceError::InvalidRef(
-                "ticketed advance requires paired head and packmap refs".into(),
+                "ticketed advance requires a head or tag paired with its chain ref".into(),
             ));
         }
         let deadline = selected
@@ -1029,6 +1168,160 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::time::Duration;
+
+    #[test]
+    fn attestation_capability_defaults_off_and_is_cached() {
+        use crate::RemoteSource as _;
+        use buffa::Message as _;
+        for advertised in [None, Some(false), Some(true)] {
+            let info = proto::GetServerInfoResponse {
+                protocol: Some("kit.transport.v1".into()),
+                spec_version: Some(2),
+                part_size: Some(8 << 20),
+                max_parts: Some(1),
+                max_list_refs_page_size: Some(1),
+                supports_attestations: advertised,
+                ..Default::default()
+            };
+            let mut response = success();
+            *response.body_mut() = info.encode_to_vec();
+            let channel = Channel {
+                replies: RefCell::new([response.clone(), response].into()),
+                nonces: RefCell::new(Vec::new()),
+            };
+            let time = Time::default();
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
+            let source = ClientSource::new(&client, &super::super::FuturesExecutor);
+            assert_eq!(source.supports_attestations(), advertised == Some(true));
+            assert_eq!(source.supports_attestations(), advertised == Some(true));
+            if advertised != Some(true) {
+                assert!(matches!(
+                    source.write_attestmap(RefWriteCondition::Missing, &[4; 32], &[]),
+                    Err(SourceError::ProtocolError)
+                ));
+                assert!(matches!(
+                    source.write_upload(
+                        &kit_core::protocol::SliceBody(b"unused"),
+                        &PackKey::new([3; 32]),
+                        kit_core::refs::ATTESTMAP_REF
+                    ),
+                    Err(SourceError::ProtocolError)
+                ));
+            }
+            if advertised != Some(true) {
+                assert!(matches!(
+                    futures_executor::block_on(client.write_attestmap(
+                        RefWriteCondition::Missing,
+                        [4; 32],
+                        &[],
+                        None
+                    )),
+                    Err(Error::Invalid("attestation log unsupported"))
+                ));
+            }
+            assert_eq!(channel.nonces.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn attestmap_cas_consumes_only_its_tickets_and_preserves_refusals() {
+        use crate::RemoteSource as _;
+        use buffa::Message as _;
+        struct AttestServer {
+            refusal: Option<&'static str>,
+            calls: Cell<usize>,
+        }
+        impl HttpTransport for AttestServer {
+            async fn send(
+                &self,
+                request: Request<Vec<u8>>,
+                _: usize,
+            ) -> Result<Response<Vec<u8>>, String> {
+                self.calls.set(self.calls.get() + 1);
+                if request.uri().path().ends_with("/GetServerInfo") {
+                    let mut response = success();
+                    *response.body_mut() = proto::GetServerInfoResponse {
+                        protocol: Some("kit.transport.v1".into()),
+                        spec_version: Some(2),
+                        supports_attestations: Some(true),
+                        ..Default::default()
+                    }
+                    .encode_to_vec();
+                    return Ok(response);
+                }
+                let request = proto::UpdateRefRequest::decode_from_slice(request.body()).unwrap();
+                assert_eq!(request.name.as_deref(), Some(kit_core::refs::ATTESTMAP_REF));
+                assert_eq!(
+                    request.expectation.and_then(|v| v.as_known()),
+                    Some(proto::RefExpectation::Match)
+                );
+                assert_eq!(request.expected_id, Some(vec![4; 32]));
+                assert_eq!(request.new_id, Some(vec![5; 32]));
+                assert_eq!(request.ticket_ids, [vec![7; 32], vec![8; 32]]);
+                assert_ne!(request.delete, Some(true));
+                Ok(self.refusal.map_or_else(success, error))
+            }
+        }
+        for refusal in [
+            None,
+            Some("permission_denied"),
+            Some("failed_precondition"),
+            Some("unavailable"),
+        ] {
+            let channel = AttestServer {
+                refusal,
+                calls: Cell::new(0),
+            };
+            let time = Time::default();
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
+            let source = ClientSource::new(&client, &super::super::FuturesExecutor);
+            source
+                .write_state()
+                .info
+                .set(Ok(proto::GetServerInfoResponse {
+                    supports_attestations: Some(true),
+                    ..Default::default()
+                }))
+                .unwrap();
+            let keys = [PackKey::new([1; 32]), PackKey::new([2; 32])];
+            for (key, id) in keys.iter().zip([7, 8]) {
+                source.write_state().tickets.borrow_mut().insert(
+                    (kit_core::refs::ATTESTMAP_REF.into(), *key),
+                    UploadTicket {
+                        id: Some(vec![id; 32]),
+                        expires_unix_ms: Some(100_000),
+                        ..Default::default()
+                    },
+                );
+            }
+            let result = source.write_attestmap(RefWriteCondition::Match([4; 32]), &[5; 32], &keys);
+            match refusal {
+                None => assert!(result.is_ok()),
+                Some("failed_precondition") => {
+                    assert!(matches!(result, Err(SourceError::RefConflict)));
+                }
+                Some("permission_denied") => {
+                    assert_eq!(result.unwrap_err().class(), crate::FailureClass::Refusal);
+                }
+                _ => assert!(result.is_err()),
+            }
+            assert_eq!(
+                source.write_state().tickets.borrow().len(),
+                if refusal.is_none() { 0 } else { 2 }
+            );
+            assert_eq!(channel.calls.get(), 2);
+        }
+    }
 
     #[test]
     fn the_ticket_limit_is_the_advertised_value_within_bounds() {

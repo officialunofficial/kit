@@ -23,6 +23,8 @@ pub mod conflict;
 pub mod diff;
 pub mod epoch;
 pub mod fetch;
+mod fetch_repair;
+mod fetched_tags;
 pub mod for_each_ref;
 pub mod gc;
 #[cfg(feature = "git-bridge")]
@@ -39,6 +41,7 @@ pub mod keygen;
 pub mod log;
 pub mod ls_files;
 pub mod ls_tree;
+mod maintenance;
 pub mod mcp;
 #[cfg(feature = "mcp-v2")]
 pub mod mcp_v2;
@@ -102,9 +105,9 @@ pub(crate) use kit_sync::worktree::{
     index_tracks_path_or_descendant, restore_affects_path,
 };
 pub use kit_sync::worktree::{
-    ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
-    restore_worktree_and_index, sync_index_to_tree, sync_index_to_tree_observed,
-    write_ref_recording_history,
+    ensure_initial_checkout_safe, ensure_restore_safe, ensure_restore_safe_from,
+    ensure_restore_safe_with_options, read_or_seed_index_from_head, restore_worktree_and_index,
+    sync_index_to_tree, sync_index_to_tree_observed, write_ref_recording_history,
 };
 
 /// Stream the content of the blob `h` to `out`, one chunk at a time. A write
@@ -397,6 +400,12 @@ pub(crate) fn c_quote_path(path: &str) -> Option<String> {
     Some(out)
 }
 
+/// `path` as a human listing shows it: C-quoted by [`c_quote_path`] when it
+/// holds a control or non-ASCII byte, else unchanged.
+pub(crate) fn display_path(path: &str) -> String {
+    c_quote_path(path).unwrap_or_else(|| path.to_string())
+}
+
 /// Resolve a CLI path argument to a repo-relative, `/`-separated index
 /// path, validating it. Shared by `rm` and `mv` so both resolve and
 /// validate pathspecs identically. The rules are in
@@ -513,16 +522,24 @@ pub fn record_superseded(
 /// destructive worktree moves (`reset --hard`, `checkout`) these files
 /// are deleted explicitly (`restore_tree_to_worktree` with `clean =
 /// false` writes/overwrites but never deletes). The `(status, hash)`
-/// lets the caller detect local edits by content AND mode/type.
+/// lets the caller detect local edits by content AND mode/type. Pass the
+/// `base_tree` the restore that follows leaves alone, as for
+/// [`ensure_restore_safe_from`], or `None`.
 pub(crate) fn dropped_tracked_paths(
     layout: &RepoLayout,
     store: &ObjectStore,
     target_tree: Hash,
+    base_tree: Option<Hash>,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
     let idx = read_or_seed_index_from_head(layout, store)?;
     let snapshot = kit_core::store::EphemeralSink::new(store);
-    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
-        .map_err(|e| format!("index tree: {e}"))?;
+    // Entries `base_tree` holds unchanged open no object; the restore-safety
+    // check with the same base has checked that the store has the objects of
+    // each path the move changes. With no base every object is opened, so a
+    // missing one refuses the move before anything is written.
+    let index_tree =
+        core_worktree::build_tree_from_index_against(store, &snapshot, &idx, false, base_tree)
+            .map_err(|e| format!("index tree: {e}"))?;
     let mut out = Vec::new();
     for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))
         .map_err(|e| format!("diff index vs target: {e}"))?

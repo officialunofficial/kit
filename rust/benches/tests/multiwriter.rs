@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kit_benches::multiwriter::{self, Connect};
 use kit_core::hash::Hash;
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
+use kit_core::protocol::{RefWriteCondition, Transport, TransportResult};
 use kit_core::refs::Ref;
 use kit_transport_file::FileTransport;
 
@@ -146,20 +146,44 @@ struct DropsWrite {
 }
 
 impl Transport for DropsWrite {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
     fn update_ref(
         &self,
@@ -171,6 +195,9 @@ impl Transport for DropsWrite {
             return Ok(());
         }
         self.inner.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)

@@ -159,6 +159,13 @@ fn collect_others(
     opts: &LsFilesOpts,
     out: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    let local;
+    let ignore = if !prefix.is_empty() && !parent_ignored {
+        local = ignore.load_directory(dir).map_err(std::io::Error::other)?;
+        &local
+    } else {
+        ignore
+    };
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

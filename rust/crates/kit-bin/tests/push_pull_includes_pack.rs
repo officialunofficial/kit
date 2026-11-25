@@ -58,7 +58,10 @@ fn push_pull_transfers_full_object_closure_via_memory_transport() {
     assert!(pushed >= 1);
 
     // Pull remote → bob.
-    let pulled = pull_all(bob.path(), tx.as_ref(), "default", None).expect("pull");
+    let pulled = pull_all(bob.path(), tx.as_ref(), "default", None)
+        .expect("pull")
+        .fetch
+        .branches_fetched;
     assert_eq!(pulled, pushed);
 
     // Alice and Bob now hold exactly the same object set reachable
@@ -113,7 +116,9 @@ fn fetch_all_does_not_move_bob_head() {
     let bob_kit = bob.path().join(".kit");
     let head_before = fs::read_to_string(bob_kit.join("HEAD")).unwrap_or_default();
 
-    let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
+    let n = fetch_all(bob.path(), tx.as_ref(), "default")
+        .expect("fetch")
+        .branches_fetched;
     assert!(n >= 1);
 
     // HEAD unchanged by fetch.
@@ -156,7 +161,9 @@ fn fetch_all_does_not_overwrite_local_branch() {
     let bob_layout = RepoLayout::single(bob.path());
     let bob_before = refs::read_ref(&bob_layout, "main").unwrap().unwrap();
 
-    let n = fetch_all(bob.path(), tx.as_ref(), "default").expect("fetch");
+    let n = fetch_all(bob.path(), tx.as_ref(), "default")
+        .expect("fetch")
+        .branches_fetched;
     assert!(n >= 1);
 
     let bob_after = refs::read_ref(&bob_layout, "main").unwrap().unwrap();

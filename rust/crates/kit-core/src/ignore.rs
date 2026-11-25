@@ -27,18 +27,18 @@
 //! ASCII case-insensitively, so `.KIT` can't bypass on case-insensitive
 //! filesystems — the Git CVE-2021-21300 family).
 //!
-//! Both `.gitignore` and `.kitignore` are read from the repository root;
+//! Both `.gitignore` and `.kitignore` are read in each visited directory;
 //! `.gitignore` patterns are applied first and `.kitignore` last, so a
 //! repo's own `.kitignore` takes precedence under last-match-wins.
 //!
-//! **Deferred (documented non-goals for this pass):** nested per-directory
-//! ignore files (only the root is read), global excludes
-//! (`core.excludesFile`), and escaped trailing spaces.
+//! Deeper rules take precedence. Excluded directories are not entered.
+//! The default global Git ignore file precedes `.kit/info/exclude`, which
+//! precedes per-directory rules. Escaped trailing spaces remain deferred.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Hard cap on a single ignore file (1 MiB).
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
@@ -60,7 +60,7 @@ pub enum IgnoreError {
     #[error("ignore file too large (>{MAX_IGNORE_FILE_BYTES} bytes)")]
     FileTooLarge,
     /// The ignore files hold more than [`MAX_IGNORE_PATTERNS`] patterns.
-    #[error("ignore file has more than {MAX_IGNORE_PATTERNS} patterns")]
+    #[error("ignore rules have more than {MAX_IGNORE_PATTERNS} patterns")]
     TooManyPatterns,
     /// A pattern line is longer than [`MAX_IGNORE_PATTERN_BYTES`].
     #[error("ignore pattern is longer than {MAX_IGNORE_PATTERN_BYTES} bytes")]
@@ -148,7 +148,7 @@ pub struct Pattern {
     pub negated: bool,
     /// `true` if the pattern ended with `/` (directory-only).
     pub dir_only: bool,
-    /// `true` if the pattern is anchored to the repo root (contained a
+    /// `true` if the pattern is anchored to its ignore file's directory (contained a
     /// non-trailing `/`); otherwise it matches at any depth.
     pub anchored: bool,
     /// Effective match segments. Non-anchored patterns carry a leading
@@ -251,6 +251,8 @@ const MIN_INDEXED_LITERALS: usize = 32;
 /// Parsed ignore-list (the merged `.gitignore` + `.kitignore` patterns).
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
+    root: Option<PathBuf>,
+    directory: Option<PathBuf>,
     patterns: Vec<Pattern>,
     /// `None` when the list has too few literal-basename patterns to index.
     index: Option<LiteralIndex>,
@@ -276,6 +278,8 @@ impl IgnoreList {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            root: None,
+            directory: None,
             patterns: Vec::new(),
             index: None,
         }
@@ -306,7 +310,60 @@ impl IgnoreList {
             }
             index
         });
-        Self { patterns, index }
+        Self {
+            root: None,
+            directory: None,
+            patterns,
+            index,
+        }
+    }
+
+    /// Extend this snapshot with ignore files between its directory and `dir`.
+    /// Inherited rules, including global excludes, are never read again.
+    /// Paths remain relative to the original repository root, even inside a
+    /// nested repository. Excluded ancestors prevent reading deeper files.
+    /// Lists created by [`parse`] or [`Self::new`] have no filesystem source
+    /// and are returned unchanged.
+    ///
+    /// # Errors
+    /// Returns [`IgnoreError`] for malformed or unreadable local rules, or
+    /// when `dir` is not this snapshot's directory or a descendant of it.
+    pub fn load_directory(&self, dir: &Path) -> Result<Self, IgnoreError> {
+        let (Some(root), Some(directory)) = (&self.root, &self.directory) else {
+            return Ok(self.clone());
+        };
+        let suffix = dir
+            .strip_prefix(directory)
+            .map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+        let mut list = self.clone();
+        let mut current = directory.clone();
+        for component in suffix.components() {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(IgnoreError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ignore directory is not a descendant",
+                )));
+            }
+            current.push(component);
+            let prefix = current
+                .strip_prefix(root)
+                .map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if list.is_ignored_with_ancestors(&prefix, true) {
+                break;
+            }
+            let mut patterns = list.patterns;
+            for name in [".gitignore", ".kitignore"] {
+                append_file(&mut patterns, &current.join(name), &prefix)?;
+            }
+            list = Self::from_patterns(patterns);
+        }
+        list.root = Some(root.clone());
+        list.directory = Some(dir.to_path_buf());
+        Ok(list)
     }
 
     /// Borrow the parsed patterns.
@@ -398,8 +455,11 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
     f(&buf[..len])
 }
 
-/// Load and merge `.gitignore` then `.kitignore` from `dir`. Returns an
-/// empty list if neither file is present.
+/// Load ignore rules for `dir`, relative to its repository root.
+/// Global rules and `.kit/info/exclude` precede ancestor and local files.
+/// Start with the repository root; use [`IgnoreList::load_directory`] to
+/// extend that snapshot when entering child directories.
+/// An excluded ancestor stops loading deeper files.
 ///
 /// `.gitignore` patterns come first so a repo's own `.kitignore` wins under
 /// last-match-wins.
@@ -411,16 +471,82 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
+    load_from(dir, dir)
+}
+
+fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
-    for name in [".gitignore", ".kitignore"] {
-        if let Some(list) = load_one(&dir.join(name))? {
-            patterns.extend(list.patterns);
+    // Standalone tree builders have no repository config. This also keeps
+    // standalone snapshots independent of the caller's global ignore file.
+    if root.join(".kit").exists() {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
+        if let Some(config) = config {
+            append_external(&mut patterns, &config.join("git/ignore"))?;
         }
-        if patterns.len() > MAX_IGNORE_PATTERNS {
+        let layout =
+            crate::layout::discover(root).map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
+        append_external(&mut patterns, &layout.common_dir().join("info/exclude"))?;
+    }
+    for name in [".gitignore", ".kitignore"] {
+        append_file(&mut patterns, &root.join(name), "")?;
+    }
+    let mut list = IgnoreList::from_patterns(patterns);
+    list.root = Some(root.to_path_buf());
+    list.directory = Some(root.to_path_buf());
+    list.load_directory(dir)
+}
+
+fn append_external(patterns: &mut Vec<Pattern>, path: &Path) -> Result<(), IgnoreError> {
+    append_patterns(patterns, load_one(path, true)?, "")
+}
+
+fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result<(), IgnoreError> {
+    // Git does not follow worktree ignore symlinks. Keep the root file's
+    // strict rejection, but skip a nested symlink rather than following it.
+    if !prefix.is_empty() && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(());
+    }
+    append_patterns(patterns, load_one(path, false)?, prefix)
+}
+
+fn append_patterns(
+    patterns: &mut Vec<Pattern>,
+    list: Option<IgnoreList>,
+    prefix: &str,
+) -> Result<(), IgnoreError> {
+    if let Some(list) = list {
+        if patterns.len() + list.patterns.len() > MAX_IGNORE_PATTERNS {
             return Err(IgnoreError::TooManyPatterns);
         }
+        for mut pattern in list.patterns {
+            if !prefix.is_empty() {
+                let mut segments: Vec<_> = prefix
+                    .split('/')
+                    .map(|s| {
+                        Segment::Glob(
+                            s.chars()
+                                .flat_map(|c| {
+                                    if matches!(c, '*' | '?' | '[' | '\\') {
+                                        vec!['\\', c]
+                                    } else {
+                                        vec![c]
+                                    }
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                segments.append(&mut pattern.segments);
+                pattern.segments = segments;
+                pattern.basename_kind = None;
+            }
+            patterns.push(pattern);
+        }
     }
-    Ok(IgnoreList::from_patterns(patterns))
+    Ok(())
 }
 
 /// Read and parse a single ignore file, or `None` if it is absent.
@@ -428,10 +554,21 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
 /// The file must be a regular file. A symlink, device or FIFO is an
 /// error: `/dev/zero` reports length 0 and would never end. The read
 /// itself is capped, so a file that grows after the check stays bounded.
-fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
-    let meta = match fs::symlink_metadata(path) {
+fn load_one(path: &Path, follow: bool) -> Result<Option<IgnoreList>, IgnoreError> {
+    let meta = match if follow {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    } {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(e) => return Err(IgnoreError::Io(e)),
     };
     if !meta.file_type().is_file() {
@@ -1129,6 +1266,40 @@ mod tests {
         std::os::unix::fs::symlink("/dev/zero", dir.path().join(".kitignore")).unwrap();
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, IgnoreError::Io(_)));
+    }
+
+    #[test]
+    fn scoped_rules_keep_the_original_root_without_repository_metadata() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        fs::write(dir.path().join("sub/.kitignore"), "!keep.log\n/local\n").unwrap();
+        let root = load(dir.path()).unwrap();
+        let nested = root.load_directory(&dir.path().join("sub")).unwrap();
+        assert!(nested.is_ignored("sub/drop.log", false));
+        assert!(!nested.is_ignored("sub/keep.log", false));
+        assert!(nested.is_ignored("sub/local", false));
+        assert!(!nested.is_ignored("other/local", false));
+    }
+
+    #[test]
+    fn directory_snapshots_keep_inherited_rules_after_files_change() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.env\n").unwrap();
+        fs::write(dir.path().join("sub/.gitignore"), "*.local\n").unwrap();
+        let root = load(dir.path()).unwrap();
+        let sub = root.load_directory(&dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "").unwrap();
+        fs::write(dir.path().join("sub/.gitignore"), "").unwrap();
+        let deep = sub.load_directory(&dir.path().join("sub/deep")).unwrap();
+        assert!(deep.is_ignored("sub/deep/private.env", false));
+        assert!(deep.is_ignored("sub/deep/private.local", false));
+        assert!(sub.load_directory(dir.path()).is_err());
+        assert!(
+            sub.load_directory(&dir.path().join("sub/../other"))
+                .is_err()
+        );
     }
 
     // --- glob_match public helper --------------------------------------

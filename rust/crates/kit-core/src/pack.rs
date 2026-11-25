@@ -67,13 +67,29 @@
 
 pub mod window;
 
+mod file_read;
+mod object_spool;
+mod retained;
 pub mod rewrite;
+mod spool;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
-use crate::protocol::PACK_BODY_LIMIT;
+use crate::store::StoreError;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+pub use file_read::{
+    MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
+    STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
+};
+#[doc(hidden)]
+pub use object_spool::{LooseStaging, ObjectSpool};
+pub use retained::RetainedPacks;
 pub use rewrite::{Rewritten, rewrite_excluding};
+pub use spool::{
+    CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,
+    sweep_spool_dir,
+};
+pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled, write_at};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -173,6 +189,10 @@ pub const TRAILER_LEN: usize = 32;
 
 /// Header is `[4B magic][4B version][4B entry_count]`.
 pub const HEADER_LEN: usize = 4 + 4 + 4;
+
+/// The length of a pack of no entries: its header and its trailer, the
+/// overhead every pack carries beside its entries.
+pub(crate) const EMPTY_PACK_LEN: usize = HEADER_LEN + TRAILER_LEN;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
 /// Byte offset of the 4-byte `version` field within the header —
@@ -213,8 +233,11 @@ const MIN_ZSTD_FRAME_LEN: usize = 9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReadLimit {
-    /// The body limit of every transport, header and trailer included.
-    BodyLimit,
+    /// The most bytes the pack may take, header and trailer included: the
+    /// limit its writer was given, the body limit of every transport
+    /// (`kit_core::protocol::PACK_BODY_LIMIT`) unless a remote advertises a
+    /// lower one.
+    BodyLimit(u64),
     /// The decoded-byte budget of [`DecodeLimits::default`] with the delta
     /// bases a reader holds at once.
     DecodedBytes,
@@ -225,7 +248,7 @@ pub enum ReadLimit {
 impl std::fmt::Display for ReadLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BodyLimit => write!(f, "the {PACK_BODY_LIMIT}-byte body limit"),
+            Self::BodyLimit(limit) => write!(f, "the {limit}-byte body limit"),
             Self::DecodedBytes => write!(
                 f,
                 "the {}-byte decoded-byte budget, delta bases held at once included",
@@ -240,6 +263,7 @@ impl std::fmt::Display for ReadLimit {
 /// pack-specific failures (trailer mismatch, base-missing) without
 /// catching every object decode error.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackError {
     #[error("packfile is shorter than the {HEADER_LEN}-byte header + {TRAILER_LEN}-byte trailer")]
     PackfileTooShort,
@@ -282,12 +306,19 @@ pub enum PackError {
     TrailingData,
     #[error("store I/O failure: {0}")]
     Store(#[from] crate::store::StoreError),
+    /// A local read or write of a pack file failed: a spool, or a pack read
+    /// back from one. The pack itself may be fine.
+    #[error("pack file I/O failure: {0}")]
+    Io(#[from] std::io::Error),
     /// `0x03`/`0x04` payload shorter than its `[uncompressed_len]`
     /// length-prefix header (SPEC-PACKFILE §3.3, §3.4) — distinct from
     /// `DeltaEntryTruncated`, which covers the 32-byte `base_hash`
     /// prefix a `0x04` entry has in front of this.
     #[error("zstd entry payload is shorter than its length-prefix header")]
     ZstdEntryTruncated,
+    /// This build cannot decode compressed pack entries.
+    #[error("compressed entries require the pack-zstd feature")]
+    CompressionUnavailable,
     /// Claimed `uncompressed_len` exceeds [`MAX_RAW_OBJECT_SIZE`] —
     /// rejected before any decompression allocation is attempted
     /// (SPEC-PACKFILE §3.3 bomb-guarding).
@@ -308,16 +339,75 @@ pub enum PackError {
     /// rejected on the raw path.
     #[error("pack writer is in raw-only mode and does not accept delta entries")]
     RawOnly,
+    /// The bytes of a downloaded pack do not hash to the key it was asked
+    /// for (SPEC-PACKFILE §7).
+    #[error("pack bytes do not hash to the requested pack key")]
+    KeyMismatch,
+}
+
+/// Count `n` bytes hashed by the code that seals and checks packs. Tests read
+/// the count to show each pack is hashed once.
+#[cfg(test)]
+fn note_hashed(n: usize) {
+    HASHED_BYTES.with(|count| count.set(count.get() + n as u64));
+}
+
+#[cfg(not(test))]
+fn note_hashed(_n: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Result of an unpack: which entries were stored, plus a count of
 /// delta resolutions vs raw writes. Useful for transport/CLI summaries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnpackReport {
     pub raw_count: u32,
     pub delta_count: u32,
-    /// Hashes inserted into the store this unpack call.
+    /// Hashes inserted into the store this unpack call, one per entry in pack
+    /// order. [`PackReader::read_verified`] leaves it empty: a pack read from a
+    /// file may hold millions of entries, and its callers need only the counts
+    /// and [`Self::signed`].
     pub stored: Vec<Hash>,
+    /// The commits, remixes and tags stored, one per entry in pack order, with
+    /// the length of each object's bytes: the objects whose signatures a
+    /// fetch checks.
+    pub signed: Vec<(Hash, u32)>,
+}
+
+impl UnpackReport {
+    /// Count one stored entry. `keep_stored` lists its hash in
+    /// [`Self::stored`].
+    fn note(&mut self, staged: Staged, keep_stored: bool) {
+        if keep_stored {
+            self.stored.push(staged.hash);
+        }
+        if let Some(len) = staged.signed {
+            self.signed.push((staged.hash, len));
+        }
+    }
+}
+
+/// An object one entry stored: its id, and its length when it is a signed
+/// object (a commit, remix or tag).
+#[derive(Debug, Clone, Copy)]
+struct Staged {
+    hash: Hash,
+    signed: Option<u32>,
+}
+
+impl Staged {
+    fn of(hash: Hash, object: &Object, bytes: &[u8]) -> Self {
+        let signed = matches!(
+            object,
+            Object::Commit(_) | Object::Remix(_) | Object::Tag(_)
+        )
+        .then(|| u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+        Self { hash, signed }
+    }
 }
 
 /// A raw entry whose pack-compression decision has already been made by
@@ -408,7 +498,7 @@ impl PreparedDelta {
     /// This entry as [`PackFill::seals_before`] sees it, for the pack `w` is
     /// building.
     #[must_use]
-    pub fn incoming(&self, w: &PackWriter) -> Incoming {
+    pub fn incoming<W>(&self, w: &PackWriter<W>) -> Incoming {
         Incoming::delta(
             self.conservative_len() as u64,
             &self.stream,
@@ -457,15 +547,6 @@ fn delta_fits_within(stream: &[u8], budget: u64) -> bool {
     delta_decoded_len(stream, true).saturating_add(delta_base_len(stream)) <= budget
 }
 
-/// The most bytes one sealed pack holds, header and trailer included: the
-/// limit the remote advertises, never above [`PACK_BODY_LIMIT`]. Every fetch
-/// refuses a pack over that, so a writer applies it even when the remote
-/// advertises no limit.
-#[must_use]
-pub fn serialized_limit(advertised: Option<u64>) -> u64 {
-    advertised.map_or(PACK_BODY_LIMIT, |limit| limit.min(PACK_BODY_LIMIT))
-}
-
 /// An upper bound on the length of a pack of `entries` entries whose wire
 /// payloads total `payload` bytes: the payloads, the frame of each entry, the
 /// header and the trailer.
@@ -473,7 +554,7 @@ pub fn serialized_limit(advertised: Option<u64>) -> u64 {
 pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
     payload
         .saturating_add((entries as u64).saturating_mul(ENTRY_FRAME_LEN as u64))
-        .saturating_add((HEADER_LEN + TRAILER_LEN) as u64)
+        .saturating_add(EMPTY_PACK_LEN as u64)
 }
 
 /// What a pack under construction holds, as far as the limits a reader
@@ -532,7 +613,7 @@ impl Incoming {
 impl PackFill {
     /// The fill of the pack `w` is building.
     #[must_use]
-    pub fn of(w: &PackWriter) -> Self {
+    pub fn of<W>(w: &PackWriter<W>) -> Self {
         Self {
             entries: w.entry_count(),
             payload: w.total_payload(),
@@ -542,15 +623,17 @@ impl PackFill {
         }
     }
 
-    /// Would adding `add` exceed `payload_cap`, pass the serialized limit or
-    /// the decoded budget of a reader with [`DecodeLimits::default`], or does
-    /// the pack already hold `max_entries` entries? Never true for an empty pack: a single entry
+    /// Would adding `add` exceed `payload_cap`, make the pack longer than
+    /// `max_pack_bytes` or pass the decoded budget of a reader with
+    /// [`DecodeLimits::default`], or does the pack already hold `max_entries`
+    /// entries? Never true for an empty pack: a single entry
     /// over the cap (a blob between the cap and [`MAX_RAW_OBJECT_SIZE`], or a
     /// test-injected tiny cap) lands alone in its own pack rather than looping
     /// forever.
     ///
-    /// The serialized limit is `max_pack_bytes`, never above
-    /// [`PACK_BODY_LIMIT`], see [`serialized_limit`]. The decoded budget is
+    /// `max_pack_bytes` bounds the whole pack, header and trailer included. It
+    /// is a transport's limit, which the caller resolves, as
+    /// `kit_core::protocol::max_pack_bytes` does. The decoded budget is
     /// [`DecodeLimits::DEFAULT_MAX_DECODED_BYTES`], the smallest any kit reader
     /// applies. A reader charges it for the bytes of every compressed entry and
     /// delta result, and for each delta base while that base is needed. A
@@ -559,13 +642,15 @@ impl PackFill {
     /// comes back after other deltas is held across them, so the fill adds
     /// its length to the bases held (`held`) and counts the longest base
     /// beside those, whatever the order of the deltas.
-    /// `max_entries` is at most [`MAX_WRITE_ENTRIES`].
+    /// A pack holds at most `max_entries` entries, and never more than
+    /// [`MAX_WRITE_ENTRIES`], which this check applies itself: a caller with
+    /// no bound of its own passes `usize::MAX`.
     #[must_use]
     pub fn seals_before(
         self,
         add: Incoming,
         payload_cap: u64,
-        max_pack_bytes: Option<u64>,
+        max_pack_bytes: u64,
         max_entries: usize,
     ) -> bool {
         self.seals_within(
@@ -583,7 +668,7 @@ impl PackFill {
         self,
         add: Incoming,
         payload_cap: u64,
-        max_pack_bytes: Option<u64>,
+        max_pack_bytes: u64,
         max_entries: usize,
         decoded_budget: u64,
     ) -> bool {
@@ -591,8 +676,7 @@ impl PackFill {
         self.entries > 0
             && (self.entries >= max_entries.min(MAX_WRITE_ENTRIES)
                 || next_payload > payload_cap
-                || serialized_bound(next_payload, self.entries + 1)
-                    > serialized_limit(max_pack_bytes)
+                || serialized_bound(next_payload, self.entries + 1) > max_pack_bytes
                 || self
                     .decoded
                     .saturating_add(add.decoded)
@@ -631,8 +715,9 @@ impl PackFill {
 /// Would a writer seal a finished pack of `len` bytes that holds
 /// `entries` entries, decodes to `decoded` bytes and holds `resident_bases`
 /// bytes of delta bases at its peak ([`PackWriter::peak_resident_bases`])? The
-/// same limits as [`PackFill::seals_before`], for a writer that cannot seal
-/// early because it rewrites a pack it was given.
+/// same limits as [`PackFill::seals_before`], with `max_pack_bytes` the
+/// longest pack allowed, for a writer that cannot seal early because it
+/// rewrites a pack it was given.
 ///
 /// # Errors
 /// [`PackError::OverReadLimit`] naming the first limit the pack passes.
@@ -641,9 +726,10 @@ pub(crate) fn within_read_limits(
     decoded: u64,
     resident_bases: u64,
     entries: usize,
+    max_pack_bytes: u64,
 ) -> Result<(), PackError> {
-    let over = if len as u64 > PACK_BODY_LIMIT {
-        ReadLimit::BodyLimit
+    let over = if len as u64 > max_pack_bytes {
+        ReadLimit::BodyLimit(max_pack_bytes)
     } else if decoded.saturating_add(resident_bases) > DecodeLimits::DEFAULT_MAX_DECODED_BYTES {
         ReadLimit::DecodedBytes
     } else if entries > MAX_WRITE_ENTRIES {
@@ -666,20 +752,25 @@ struct BaseSpan {
 }
 
 /// Builds a packfile, enforcing entry/payload caps and streaming each
-/// pushed entry's frame directly into the final output buffer as it
-/// arrives. [`Self::finish`] only patches the header's entry count
-/// (unknown up front from a streaming writer) and appends the trailer —
-/// it never re-copies the pushed entries into a second, same-sized
-/// buffer.
+/// pushed entry's frame straight into its output as it arrives: a `Vec<u8>`
+/// for a pack held in memory ([`Self::new`]), or a buffered unnamed file
+/// for a pack spooled to disk ([`Self::spool`]). Finishing only patches the
+/// header's version and entry count (unknown up front from a streaming
+/// writer) and appends the trailer. It never re-copies the pushed entries
+/// into a second, same-sized buffer.
 #[derive(Debug)]
-pub struct PackWriter {
-    // The final packfile bytes, built incrementally: `new` writes the
-    // header with a zero entry-count placeholder (patched by `finish`
-    // once the final count is known); `push_raw`/`push_delta` append
-    // each entry's `[type][len][payload]` frame directly here. There is
-    // no separate per-entry collection copied a second time at
-    // `finish`.
-    buf: Vec<u8>,
+pub struct PackWriter<W = Vec<u8>> {
+    // Where the pack goes: `new` writes the header with a zero entry-count
+    // placeholder (patched when the pack is finished, once the final count
+    // is known); `push_raw`/`push_delta` append each entry's
+    // `[type][len][payload]` frame directly here. There is no separate
+    // per-entry collection copied a second time at the end.
+    out: W,
+    // Bytes written to `out` so far, header included.
+    len: u64,
+    // Set when a write to `out` failed, perhaps partway through a frame: the
+    // writer then refuses every later entry and refuses to finish.
+    failed: bool,
     entry_count: u32,
     total_payload: u64,
     // Bytes a reader decodes from the entries pushed so far, as it charges
@@ -697,15 +788,24 @@ pub struct PackWriter {
     max_base_len: u64,
     multi_run_base_sum: u64,
     // Set the first time `push_raw`/`push_delta` emits a `0x03`/`0x04`
-    // entry. `finish` reads this to decide the header's `version`
+    // entry. Finishing reads this to decide the header's `version`
     // field (SPEC-PACKFILE §1's writer version-selection rule) — v2
     // the moment ANY entry ended up compressed, v1 otherwise.
     has_compressed_entry: bool,
     // When true, `push_raw` never compresses, `push_delta` /
-    // `push_prepared_delta` return [`PackError::RawOnly`], and `finish`
+    // `push_prepared_delta` return [`PackError::RawOnly`], and finishing
     // always emits a v1 pack of `0x00` entries. The closure profile
     // (SPEC-DISCLOSURE) is the consumer: a wasm verifier has no zstd.
     raw_only: bool,
+}
+
+/// The header a writer starts with: magic, version 1 and a zero entry count.
+/// Finishing patches the version and the count.
+fn initial_header() -> [u8; HEADER_LEN] {
+    let mut header = [0u8; HEADER_LEN];
+    header[..4].copy_from_slice(MAGIC);
+    header[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&VERSION.to_le_bytes());
+    header
 }
 
 impl Default for PackWriter {
@@ -714,16 +814,12 @@ impl Default for PackWriter {
     }
 }
 
-impl PackWriter {
-    /// Create an empty writer.
-    #[must_use]
-    pub fn new() -> Self {
-        let mut buf = Vec::with_capacity(HEADER_LEN);
-        buf.extend_from_slice(MAGIC);
-        buf.extend_from_slice(&VERSION.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes()); // entry_count placeholder; `finish` patches it in.
+impl<W> PackWriter<W> {
+    fn over(out: W) -> Self {
         Self {
-            buf,
+            out,
+            len: HEADER_LEN as u64,
+            failed: false,
             entry_count: 0,
             total_payload: 0,
             total_decoded: 0,
@@ -734,6 +830,34 @@ impl PackWriter {
             has_compressed_entry: false,
             raw_only: false,
         }
+    }
+
+    /// The header fields finishing patches: the version (v2 iff at least one
+    /// entry ended up compressed, SPEC-PACKFILE §1) and the entry count.
+    fn patched_header(&self) -> Result<[u8; 8], PackError> {
+        self.check_failed()?;
+        if self.entry_count > MAX_ENTRIES {
+            return Err(PackError::TooManyObjects(self.entry_count));
+        }
+        let version = if self.has_compressed_entry {
+            VERSION_V2
+        } else {
+            VERSION
+        };
+        let mut fields = [0u8; 8];
+        fields[..4].copy_from_slice(&version.to_le_bytes());
+        fields[4..].copy_from_slice(&self.entry_count.to_le_bytes());
+        Ok(fields)
+    }
+}
+
+impl PackWriter {
+    /// Create an empty writer.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut buf = Vec::with_capacity(HEADER_LEN);
+        buf.extend_from_slice(&initial_header());
+        Self::over(buf)
     }
 
     /// A writer that never compresses and never accepts deltas.
@@ -749,30 +873,6 @@ impl PackWriter {
         let mut w = Self::new();
         w.raw_only = true;
         w
-    }
-
-    /// Append a raw object entry. `bytes` is the fully serialised object
-    /// payload; `hash_of_bytes` is the BLAKE3 of those same bytes —
-    /// callers usually have it on hand from the object store, so we take
-    /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
-    /// Takes `bytes` by reference (not by value): the streaming writer
-    /// copies it straight into the output buffer as it's pushed, so it
-    /// never needs to own the caller's copy. Returns the
-    /// same hash for chaining.
-    ///
-    /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
-    /// if `bytes` compresses under zstd strictly smaller on the wire
-    /// (and is long enough to bother, see `MIN_COMPRESS_LEN`), this
-    /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
-    /// never need to opt in. Either way the returned/stored identity
-    /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
-    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
-        let frame = if self.raw_only {
-            None
-        } else {
-            maybe_compress(bytes, 0)
-        };
-        self.append_raw_frame(hash_of_bytes, bytes, frame)
     }
 
     /// Pure (no `&self`) compression step for a raw entry, split out of
@@ -799,6 +899,100 @@ impl PackWriter {
         }
     }
 
+    /// Pure (no `&self`) compression step for a delta entry — the
+    /// delta-entry counterpart of [`Self::prepare_raw`]; see its doc
+    /// comment for why this exists and how it's meant to be used (fan
+    /// out `prepare_delta` across a thread pool, then replay results in
+    /// order via [`Self::push_prepared_delta`]).
+    #[must_use]
+    pub fn prepare_delta(base_hash: Hash, delta_stream: Vec<u8>) -> PreparedDelta {
+        let frame = maybe_compress(&delta_stream, DELTA_BASE_LEN);
+        PreparedDelta {
+            base: base_hash,
+            stream: delta_stream,
+            frame,
+        }
+    }
+
+    /// Serialise the pack: header + entries + trailer. Entries are
+    /// already in the buffer (streamed in by `push_raw`/`push_delta`);
+    /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
+    /// iff at least one entry ended up compressed, v1 otherwise) and
+    /// `entry_count`, then appends the trailer,
+    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
+    /// the on-disk pack key — see [`pack_key`], or [`Self::finish_with_key`],
+    /// which computes both in one pass.
+    pub fn finish(self) -> Result<Vec<u8>, PackError> {
+        self.finish_inner(None).map(|(pack, _)| pack)
+    }
+
+    /// [`Self::finish`], also returning the pack key ([`pack_key`] of the
+    /// returned bytes). One BLAKE3 pass over the pack yields both the trailer
+    /// and the key: the key's input is the trailer's input followed by the
+    /// trailer, so the hasher continues from where the trailer was taken.
+    pub fn finish_with_key(self) -> Result<(Vec<u8>, Hash), PackError> {
+        self.finish_inner(None)
+    }
+
+    /// Test-only variant of [`Self::finish`] that also reports, via
+    /// `bytes_copied`, how many payload bytes it copies WHILE finishing
+    /// (as opposed to while entries were pushed). Proves `finish`
+    /// streams rather than double-buffers: the unpatched
+    /// writer re-copied every pushed entry's payload into a fresh
+    /// same-size buffer inside `finish`, so this counter would track
+    /// the whole pack; the streaming writer only ever appends the
+    /// 32-byte trailer here.
+    #[cfg(test)]
+    pub(crate) fn finish_tracking_bytes_copied(
+        self,
+        bytes_copied: &AtomicU64,
+    ) -> Result<Vec<u8>, PackError> {
+        self.finish_inner(Some(bytes_copied)).map(|(pack, _)| pack)
+    }
+
+    fn finish_inner(self, bytes_copied: Option<&AtomicU64>) -> Result<(Vec<u8>, Hash), PackError> {
+        let fields = self.patched_header()?;
+        let mut buf = self.out;
+        buf[VERSION_OFFSET..ENTRY_COUNT_OFFSET + 4].copy_from_slice(&fields);
+        let mut hasher = hash::Hasher::new();
+        hasher.update(&buf);
+        note_hashed(buf.len());
+        let trailer = hasher.finalize();
+        if let Some(c) = bytes_copied {
+            c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
+        }
+        hasher.update(&trailer);
+        note_hashed(TRAILER_LEN);
+        buf.extend_from_slice(&trailer);
+        Ok((buf, hasher.finalize()))
+    }
+}
+
+impl<W: std::io::Write> PackWriter<W> {
+    /// Append a raw object entry. `bytes` is the fully serialised object
+    /// payload; `hash_of_bytes` is the BLAKE3 of those same bytes —
+    /// callers usually have it on hand from the object store, so we take
+    /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
+    /// Takes `bytes` by reference (not by value): the streaming writer
+    /// copies it straight into the output buffer as it's pushed, so it
+    /// never needs to own the caller's copy. Returns the
+    /// same hash for chaining.
+    ///
+    /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
+    /// if `bytes` compresses under zstd strictly smaller on the wire
+    /// (and is long enough to bother, see `MIN_COMPRESS_LEN`), this
+    /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
+    /// never need to opt in. Either way the returned/stored identity
+    /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
+    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
+        let frame = if self.raw_only {
+            None
+        } else {
+            maybe_compress(bytes, 0)
+        };
+        self.append_raw_frame(hash_of_bytes, bytes, frame)
+    }
+
     /// Append a [`PreparedRaw`] produced by [`Self::prepare_raw`].
     /// Identical wire result and cap-check semantics to `push_raw`
     /// called on the same bytes — compression already happened, so
@@ -819,19 +1013,20 @@ impl PackWriter {
         bytes: &[u8],
         frame: Option<Vec<u8>>,
     ) -> Result<Hash, PackError> {
+        self.check_failed()?;
         if let Some(frame) = frame {
             let uncompressed_len: u32 = bytes
                 .len()
                 .try_into()
                 .map_err(|_| PackError::PackfileTooLarge)?;
             let payload_len = ZSTD_LEN_PREFIX + frame.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x03, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self.total_decoded.saturating_add(bytes.len() as u64);
             self.append_entry(0x03, &[&uncompressed_len.to_le_bytes(), &frame])?;
             self.has_compressed_entry = true;
         } else {
-            self.check_caps_for(bytes.len())?;
+            self.check_caps_for(0x00, bytes.len())?;
             self.total_payload += bytes.len() as u64;
             self.append_entry(0x00, &[bytes])?;
         }
@@ -858,21 +1053,6 @@ impl PackWriter {
         self.append_delta_frame(base_hash, delta_stream, frame)
     }
 
-    /// Pure (no `&self`) compression step for a delta entry — the
-    /// delta-entry counterpart of [`Self::prepare_raw`]; see its doc
-    /// comment for why this exists and how it's meant to be used (fan
-    /// out `prepare_delta` across a thread pool, then replay results in
-    /// order via [`Self::push_prepared_delta`]).
-    #[must_use]
-    pub fn prepare_delta(base_hash: Hash, delta_stream: Vec<u8>) -> PreparedDelta {
-        let frame = maybe_compress(&delta_stream, DELTA_BASE_LEN);
-        PreparedDelta {
-            base: base_hash,
-            stream: delta_stream,
-            frame,
-        }
-    }
-
     /// Append a [`PreparedDelta`] produced by [`Self::prepare_delta`].
     /// Identical wire result and cap-check semantics to `push_delta`
     /// called on the same base/stream.
@@ -892,13 +1072,14 @@ impl PackWriter {
         delta_stream: &[u8],
         frame: Option<Vec<u8>>,
     ) -> Result<(), PackError> {
+        self.check_failed()?;
         if let Some(frame) = frame {
             let uncompressed_len: u32 = delta_stream
                 .len()
                 .try_into()
                 .map_err(|_| PackError::PackfileTooLarge)?;
             let payload_len = hash::HASH_LEN + ZSTD_LEN_PREFIX + frame.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x04, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self
                 .total_decoded
@@ -914,7 +1095,7 @@ impl PackWriter {
             self.has_compressed_entry = true;
         } else {
             let payload_len = hash::HASH_LEN + delta_stream.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x02, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self
                 .total_decoded
@@ -923,6 +1104,51 @@ impl PackWriter {
         }
         self.note_base(base_hash, delta_stream);
         self.entry_count += 1;
+        Ok(())
+    }
+
+    /// Append one entry's frame — `[1B type][4B payload_len][payload]`
+    /// — straight onto the output. `parts` is the payload split into its
+    /// logical pieces (a delta entry is `[base_hash][stream]`) so no
+    /// intermediate concatenated buffer is ever built just to hand a single
+    /// contiguous slice to the output.
+    fn append_entry(&mut self, etype: u8, parts: &[&[u8]]) -> Result<(), PackError> {
+        let payload_len: usize = parts.iter().map(|p| p.len()).sum();
+        let plen: u32 = payload_len
+            .try_into()
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        self.check_failed()?;
+        if let Err(error) = write_frame(&mut self.out, etype, plen, parts) {
+            self.failed = true;
+            return Err(error.into());
+        }
+        self.len += (ENTRY_FRAME_LEN + payload_len) as u64;
+        Ok(())
+    }
+}
+
+/// Write one `[type][len][payload]` frame to `out`.
+fn write_frame<W: std::io::Write>(
+    out: &mut W,
+    etype: u8,
+    plen: u32,
+    parts: &[&[u8]],
+) -> std::io::Result<()> {
+    out.write_all(&[etype])?;
+    out.write_all(&plen.to_le_bytes())?;
+    for p in parts {
+        out.write_all(p)?;
+    }
+    Ok(())
+}
+
+impl<W> PackWriter<W> {
+    fn check_failed(&self) -> Result<(), PackError> {
+        if self.failed {
+            return Err(PackError::Io(std::io::Error::other(
+                "an earlier write of this pack failed",
+            )));
+        }
         Ok(())
     }
 
@@ -984,25 +1210,13 @@ impl PackWriter {
         peak
     }
 
-    /// Append one entry's frame — `[1B type][4B payload_len][payload]`
-    /// — straight onto the output buffer. `parts` is the payload split
-    /// into its logical pieces (a delta entry is `[base_hash][stream]`)
-    /// so no intermediate concatenated buffer is ever built just to
-    /// hand a single contiguous slice to `finish`.
-    fn append_entry(&mut self, etype: u8, parts: &[&[u8]]) -> Result<(), PackError> {
-        let payload_len: usize = parts.iter().map(|p| p.len()).sum();
-        let plen: u32 = payload_len
-            .try_into()
-            .map_err(|_| PackError::PackfileTooLarge)?;
-        self.buf.push(etype);
-        self.buf.extend_from_slice(&plen.to_le_bytes());
-        for p in parts {
-            self.buf.extend_from_slice(p);
+    /// Can an entry of type `etype` with a payload of `add_len` bytes join the
+    /// pack? The entry and payload caps of the format, and the frame limit a
+    /// file-backed reader applies ([`max_frame_payload`]).
+    fn check_caps_for(&self, etype: u8, add_len: usize) -> Result<(), PackError> {
+        if add_len as u64 > max_frame_payload(etype) {
+            return Err(PackError::PackfileTooLarge);
         }
-        Ok(())
-    }
-
-    fn check_caps_for(&self, add_len: usize) -> Result<(), PackError> {
         let next_count = u64::from(self.entry_count) + 1;
         if next_count > u64::from(MAX_ENTRIES) {
             return Err(PackError::TooManyObjects(MAX_ENTRIES + 1));
@@ -1045,59 +1259,37 @@ impl PackWriter {
         self.total_decoded
     }
 
-    /// Length in bytes of the pack [`Self::finish`] would return now: the
+    /// Length in bytes of the pack finishing would produce now: the
     /// header, every entry and the trailer.
     #[must_use]
     pub fn serialized_len(&self) -> usize {
-        self.buf.len() + TRAILER_LEN
+        usize::try_from(self.len).unwrap_or(usize::MAX) + TRAILER_LEN
     }
+}
 
-    /// Serialise the pack: header + entries + trailer. Entries are
-    /// already in `self.buf` (streamed in by `push_raw`/`push_delta`);
-    /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
-    /// iff at least one entry ended up compressed, v1 otherwise) and
-    /// `entry_count`, then appends the trailer,
-    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
-    /// the on-disk pack key — see [`pack_key`].
-    pub fn finish(self) -> Result<Vec<u8>, PackError> {
-        self.finish_inner(None)
-    }
+/// Bytes a raw entry for `bytes` takes in a pack, its frame included: what
+/// [`PackWriter::push_raw`] writes, compressed or not. A planner that picks
+/// between a full entry and a delta compares these, since an object that
+/// compresses well is cheaper in full than its raw length says.
+#[must_use]
+pub fn raw_entry_len(bytes: &[u8]) -> u64 {
+    let payload = match maybe_compress(bytes, 0) {
+        Some(frame) => ZSTD_LEN_PREFIX + frame.len(),
+        None => bytes.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
+}
 
-    /// Test-only variant of [`Self::finish`] that also reports, via
-    /// `bytes_copied`, how many payload bytes it copies WHILE finishing
-    /// (as opposed to while entries were pushed). Proves `finish`
-    /// streams rather than double-buffers: the unpatched
-    /// writer re-copied every pushed entry's payload into a fresh
-    /// same-size buffer inside `finish`, so this counter would track
-    /// the whole pack; the streaming writer only ever appends the
-    /// 32-byte trailer here.
-    #[cfg(test)]
-    pub(crate) fn finish_tracking_bytes_copied(
-        self,
-        bytes_copied: &AtomicU64,
-    ) -> Result<Vec<u8>, PackError> {
-        self.finish_inner(Some(bytes_copied))
-    }
-
-    fn finish_inner(mut self, bytes_copied: Option<&AtomicU64>) -> Result<Vec<u8>, PackError> {
-        if self.entry_count > MAX_ENTRIES {
-            return Err(PackError::TooManyObjects(self.entry_count));
-        }
-        let version = if self.has_compressed_entry {
-            VERSION_V2
-        } else {
-            VERSION
-        };
-        self.buf[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
-        self.buf[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
-            .copy_from_slice(&self.entry_count.to_le_bytes());
-        let trailer = hash::hash(&self.buf);
-        if let Some(c) = bytes_copied {
-            c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
-        }
-        self.buf.extend_from_slice(&trailer);
-        Ok(self.buf)
-    }
+/// Bytes a delta entry holding `stream` takes in a pack, its frame and base
+/// id included: what [`PackWriter::push_delta`] writes. See
+/// [`raw_entry_len`].
+#[must_use]
+pub fn delta_entry_len(stream: &[u8]) -> u64 {
+    let payload = match maybe_compress(stream, DELTA_BASE_LEN) {
+        Some(frame) => DELTA_BASE_LEN + ZSTD_LEN_PREFIX + frame.len(),
+        None => DELTA_BASE_LEN + stream.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
 }
 
 /// Compute the on-disk pack key: BLAKE3 of the entire packfile bytes
@@ -1105,6 +1297,7 @@ impl PackWriter {
 /// callers prepend `packs/` and lower-hex-encode for the storage path.
 #[must_use]
 pub fn pack_key(pack_bytes: &[u8]) -> Hash {
+    note_hashed(pack_bytes.len());
     hash::hash(pack_bytes)
 }
 
@@ -1149,10 +1342,13 @@ fn maybe_compress_within(data: &[u8], framing: usize, budget: u64) -> Option<Vec
     if !fits(0) {
         return None;
     }
-    let compressed = ZSTD_COMPRESSOR
+    let mut compressed = ZSTD_COMPRESSOR
         .with(|c| c.borrow_mut().compress(data))
         .ok()?;
     if ZSTD_LEN_PREFIX + compressed.len() < data.len() && fits(compressed.len() as u64) {
+        // The compressor reserves its worst case; a writer holds many frames
+        // at once, so each keeps only its bytes.
+        compressed.shrink_to_fit();
         Some(compressed)
     } else {
         None
@@ -1257,10 +1453,10 @@ fn check_zstd_claim(frame: &[u8], claim: usize) -> Result<(), PackError> {
 
 /// Without `pack-zstd` no frame can be decoded, so no buffer is reserved for one.
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn check_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
@@ -1362,14 +1558,14 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
 }
 
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn zstd_decompress_into(
     _frame: &[u8],
     _capacity: usize,
     _output: &mut Vec<u8>,
 ) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 /// Shared decode window cap: 8 MiB (`windowLog` 23).
@@ -1602,7 +1798,7 @@ fn zstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
 /// the preceding bounds checks; they `expect`-panic only if slice-bounds
 /// elision is wrong.
 pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     if &pack_bytes[..4] != MAGIC.as_slice() {
@@ -1804,6 +2000,7 @@ impl PackReader {
                 budget,
                 &mut bases,
                 &batch,
+                true,
             )?;
             batch.commit()?;
         }
@@ -1865,6 +2062,17 @@ pub trait DeltaBaseSource {
         admit(bytes.len())?;
         Ok(Some(bytes))
     }
+    /// Admit a replacement after a corrupt copy. Each call replaces the
+    /// previous reservation for this object. Sources with one copy use
+    /// the same admission path as before.
+    #[doc(hidden)]
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        self.base_with_admission(id, admit)
+    }
 }
 
 /// A [`DeltaBaseSource`] with no external bases: a pack must be
@@ -1885,10 +2093,10 @@ impl DeltaBaseSource for &ObjectStore {
     const VERIFIED: bool = true;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        if self.contains(id) {
-            Ok(Some(self.read(id)?))
-        } else {
-            Ok(None)
+        match self.read(id) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::ObjectNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1897,18 +2105,45 @@ impl DeltaBaseSource for &ObjectStore {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        if !self.contains(id) {
-            return Ok(None);
-        }
-        self.read_with_allocator(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        match self.read_with_allocator(id, |len| {
             admit(len)?;
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(len)
                 .map_err(|_| PackError::PackfileTooLarge)?;
             Ok(bytes)
-        })
-        .map(Some)
+        }) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(PackError::Store(StoreError::ObjectNotFound(_))) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// The run-once API can reuse the same reservation for another copy of the
+// same size. Different-sized copies need a replacement reservation.
+fn admit_same_size(
+    admit: impl FnOnce(usize) -> Result<(), PackError>,
+) -> impl FnMut(usize) -> Result<(), PackError> {
+    let mut admit = Some(admit);
+    let mut admitted = None;
+    move |len| {
+        if let Some(admit) = admit.take() {
+            admit(len)?;
+            admitted = Some(len);
+        }
+        if admitted != Some(len) {
+            return Err(PackError::PackfileTooLarge);
+        }
+        Ok(())
     }
 }
 
@@ -2060,7 +2295,7 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
     const VERIFIED: bool = B::VERIFIED;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        self.base_with_admission(id, |_| Ok(()))
+        self.base_with_retry_admission(id, |_| Ok(()))
     }
 
     fn base_with_admission(
@@ -2068,14 +2303,27 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        self.inner.base_with_admission(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        let result = self.inner.base_with_retry_admission(id, |len| {
+            if let Some(prev) = self.charged.remove(id) {
+                self.budget.used = self.budget.used.saturating_sub(prev);
+            }
             let charged_len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
             self.budget.charge(charged_len)?;
-            admit(len)?;
-            let held = self.charged.entry(*id).or_default();
-            *held = held.saturating_add(charged_len);
-            Ok(())
-        })
+            self.charged.insert(*id, charged_len);
+            admit(len)
+        });
+        if !matches!(result, Ok(Some(_))) {
+            self.release(id);
+        }
+        result
     }
 }
 
@@ -2551,6 +2799,29 @@ pub fn decode_entry_with<B: DeltaBaseSource>(
     Ok((id, bytes))
 }
 
+trait UnpackSink: Sync {
+    fn stage(
+        &self,
+        position: usize,
+        id: Hash,
+        ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError>;
+}
+
+impl UnpackSink for crate::batch::WriteBatch<'_> {
+    fn stage(
+        &self,
+        _position: usize,
+        id: Hash,
+        _ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError> {
+        self.write_prehashed(id, &[bytes])?;
+        Ok(())
+    }
+}
+
 /// Replay one window's staging results in pack order. Deferred admissions
 /// are strict here. `first_position` is the pack position of `window[0]`.
 #[allow(clippy::too_many_arguments)]
@@ -2562,8 +2833,9 @@ fn replay_window<'p, 'b>(
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'p, 'b>>,
     report: &mut UnpackReport,
     budget: &'b ResidentBudget<'_>,
-    bases: &mut &ObjectStore,
-    batch: &crate::batch::WriteBatch<'_>,
+    bases: &mut impl DeltaBaseSource,
+    batch: &(impl UnpackSink + ?Sized),
+    keep_stored: bool,
 ) -> Result<(), PackError> {
     let mut raw_results = raw_results.into_iter();
     // Step 3 exposes bases only at their pack position and releases
@@ -2572,12 +2844,13 @@ fn replay_window<'p, 'b>(
         let position = first_position + offset;
         match entry {
             Entry::Raw(payload) => {
-                let (stored_hash, retained) = raw_results
+                let (staged, retained) = raw_results
                     .next()
                     .expect("raw frame result")
                     .unwrap_or_else(|| {
                         prepare_and_stage_raw(batch, position, payload, uses, budget)
                     })?;
+                let stored_hash = staged.hash;
                 if has_remaining_uses(uses, &stored_hash) {
                     if let Some(bytes) = retained {
                         in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
@@ -2586,14 +2859,21 @@ fn replay_window<'p, 'b>(
                     }
                 }
                 report.raw_count += 1;
-                report.stored.push(stored_hash);
+                report.note(staged, keep_stored);
             }
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
-                let stored_hash =
-                    stage_delta_target(bases, batch, in_pack, uses, budget, base, stream.as_ref())?;
+                let staged = stage_delta_target(
+                    bases,
+                    (batch, position),
+                    in_pack,
+                    uses,
+                    budget,
+                    base,
+                    stream.as_ref(),
+                )?;
                 report.delta_count += 1;
-                report.stored.push(stored_hash);
+                report.note(staged, keep_stored);
             }
         }
     }
@@ -2662,6 +2942,12 @@ impl<'a> ResidentBudget<'a> {
         let len = count
             .checked_mul(self.entry_cost)
             .ok_or(PackError::PackfileTooLarge)?;
+        self.reserve_bookkeeping(len)
+    }
+
+    /// Charge `len` bytes of bookkeeping for the whole read. Like
+    /// [`Self::reserve_entries`], it is never released.
+    fn reserve_bookkeeping(&self, len: usize) -> Result<(), PackError> {
         let used = self.used.load(Ordering::Relaxed);
         let total = used.checked_add(len).filter(|&total| total <= self.cap);
         if total.is_none() {
@@ -2819,65 +3105,52 @@ fn has_remaining_uses(uses: &std::collections::HashMap<Hash, BaseUses>, hash: &H
 }
 
 // None marks deferred admission or work skipped after an earlier failure.
-type RawStageResult<'b> = Option<Result<(Hash, Option<OwnedBytes<'b>>), PackError>>;
+type RawStageResult<'b> = Option<Result<(Staged, Option<OwnedBytes<'b>>), PackError>>;
 type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 
 /// Validate, hash and stage independent raw frames, preserving result order.
 /// Errors stay in the result queue until step 3 reaches that pack position.
 fn stage_raw_entries<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     frames: &[(usize, EncodedPayload<'_>)],
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
 ) -> RawStageResults<'b> {
+    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    stage_independent(frames, |&(position, payload)| {
+        stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
+    })
+}
+
+/// Run independent staging operations with bounded workers and return their
+/// results in input order. Small windows use the caller's thread.
+pub(crate) fn stage_independent<T: Sync, R: Send>(
+    entries: &[T],
+    stage: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         const ENTRIES_PER_THREAD: usize = 8;
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
-            return stage_raw_entries_parallel(batch, frames, uses, budget, threads);
+        if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return stage_parallel(entries, &stage, threads);
         }
     }
-    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
-    frames
-        .iter()
-        .map(|&(position, payload)| {
-            stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
-        })
-        .collect()
+    entries.iter().map(stage).collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn stage_raw_entries_parallel<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
-    frames: &[(usize, EncodedPayload<'_>)],
-    uses: &std::collections::HashMap<Hash, BaseUses>,
-    budget: &'b ResidentBudget<'_>,
+fn stage_parallel<T: Sync, R: Send>(
+    entries: &[T],
+    stage: &(impl Fn(&T) -> R + Sync),
     threads: usize,
-) -> RawStageResults<'b> {
-    let first_failure = &std::sync::atomic::AtomicUsize::new(usize::MAX);
-    let chunk_size = frames.len().div_ceil(threads).max(1);
-    let mut out = Vec::with_capacity(frames.len());
+) -> Vec<R> {
+    let chunk_size = entries.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(entries.len());
     std::thread::scope(|scope| {
-        let handles: Vec<_> = frames
+        let handles: Vec<_> = entries
             .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|&(position, payload)| {
-                            stage_raw_in_phase_two(
-                                batch,
-                                position,
-                                payload,
-                                uses,
-                                budget,
-                                first_failure,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
+            .map(|chunk| scope.spawn(move || chunk.iter().map(stage).collect::<Vec<_>>()))
             .collect();
         for handle in handles {
             out.extend(handle.join().expect("pack unpack worker thread panicked"));
@@ -2887,7 +3160,7 @@ fn stage_raw_entries_parallel<'b>(
 }
 
 fn stage_raw_in_phase_two<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -2909,25 +3182,26 @@ fn stage_raw_in_phase_two<'b>(
 }
 
 fn prepare_and_stage_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
-) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+) -> Result<(Staged, Option<OwnedBytes<'b>>), PackError> {
     stage_decoded_raw(batch, position, payload.decode(budget)?, uses, budget)
 }
 
 fn stage_decoded_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: ResidentBytes<'_, 'b>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
-) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+) -> Result<(Staged, Option<OwnedBytes<'b>>), PackError> {
     let obj = validate_storable_object(payload.as_ref())?;
     let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
-    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    let staged = Staged::of(stored_hash, &obj, payload.as_ref());
+    batch.stage(position, stored_hash, obj.object_type(), payload.as_ref())?;
     let retained = if let ResidentBytes::Owned(bytes) = payload {
         budget.record_owned(bytes.bytes.len());
         if uses
@@ -2941,7 +3215,7 @@ fn stage_decoded_raw<'b>(
     } else {
         None
     };
-    Ok((stored_hash, retained))
+    Ok((staged, retained))
 }
 
 /// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
@@ -2954,7 +3228,7 @@ fn stage_decoded_raw<'b>(
 /// reorders, or changes behavior.
 fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackError> {
     // 1. Length sanity: must fit header + trailer at minimum.
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     // 2. Magic.
@@ -3280,17 +3554,18 @@ impl<'a> Iterator for PackEntries<'a> {
 /// which also handles identity deltas whose target hash equals their base.
 fn stage_delta_target<'b, B: DeltaBaseSource>(
     bases: &mut B,
-    batch: &crate::batch::WriteBatch<'_>,
+    (batch, position): (&(impl UnpackSink + ?Sized), usize),
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'_, 'b>>,
     uses: &mut std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
     base_hash: Hash,
     stream: &[u8],
-) -> Result<Hash, PackError> {
+) -> Result<Staged, PackError> {
     if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
         let mut reservation = None;
         let bytes = bases
-            .base_with_admission(&base_hash, |len| {
+            .base_with_retry_admission(&base_hash, |len| {
+                drop(reservation.take());
                 reservation = Some(budget.charge(len)?);
                 Ok(())
             })?
@@ -3310,7 +3585,8 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
         delta::decode_preallocated(in_pack[&base_hash].as_ref(), stream, resolved.bytes)?;
     let obj = validate_storable_object(&resolved.bytes)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved.bytes);
-    batch.write_prehashed(stored_hash, &[&resolved.bytes])?;
+    let staged = Staged::of(stored_hash, &obj, &resolved.bytes);
+    batch.stage(position, stored_hash, obj.object_type(), &resolved.bytes)?;
     budget.record_owned(resolved.bytes.len());
     let usage = uses.get_mut(&base_hash).expect("counted delta base");
     usage.remaining -= 1;
@@ -3320,7 +3596,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     if has_remaining_uses(uses, &stored_hash) {
         in_pack.insert(stored_hash, ResidentBytes::Owned(resolved));
     }
-    Ok(stored_hash)
+    Ok(staged)
 }
 
 /// Resolve a delta's base (in-pack first, then the external
@@ -3414,11 +3690,14 @@ fn validate_delta_result_size(stream: &[u8]) -> Result<usize, PackError> {
 // =========================================================================
 
 #[cfg(test)]
+mod file_tests;
+#[cfg(test)]
 mod zstd_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::PACK_BODY_LIMIT;
     use tempfile::TempDir;
 
     /// Replay `entries` as one window and commit it.
@@ -3441,6 +3720,7 @@ mod tests {
             budget,
             &mut &*store,
             &batch,
+            true,
         )?;
         batch.commit()?;
         Ok(report)
@@ -3546,6 +3826,45 @@ mod tests {
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
             .unwrap();
+    }
+
+    #[test]
+    fn entry_len_matches_what_the_writer_writes() {
+        // The planner compares these lengths, so each must be exact for a
+        // body that compresses (the zstd frame) and one that does not.
+        let squeezes = vec![b'a'; 8 * 1024];
+        let mut noise = vec![0u8; 8 * 1024];
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        for b in &mut noise {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x.to_le_bytes()[0];
+        }
+        for body in [&squeezes[..], &noise[..], &noise[..10]] {
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_raw(hash::hash(body), body).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(raw_entry_len(body)).unwrap()
+            );
+        }
+        let base = noise.clone();
+        let mut grown = noise.clone();
+        grown.extend(vec![b'z'; 8 * 1024]);
+        let mut edited = noise.clone();
+        edited[100] ^= 1;
+        for target in [&grown, &edited] {
+            let stream = delta::encode(&base, target).unwrap();
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_delta(&hash::hash(&base), &stream).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(delta_entry_len(&stream)).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -3790,6 +4109,56 @@ mod tests {
     }
 
     #[test]
+    fn retrying_a_base_replaces_its_decode_and_resident_reservations() {
+        struct Source;
+        impl DeltaBaseSource for Source {
+            fn base(&mut self, _: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                unreachable!("this source admits before allocation")
+            }
+
+            fn base_with_retry_admission(
+                &mut self,
+                _id: &Hash,
+                mut admit: impl FnMut(usize) -> Result<(), PackError>,
+            ) -> Result<Option<Vec<u8>>, PackError> {
+                admit(8)?;
+                admit(12)?;
+                Ok(Some(vec![0; 12]))
+            }
+        }
+
+        let id = [0; 32];
+        let mut source = Source;
+        let mut budget = DecodeBudget { used: 0, max: 12 };
+        let mut charged = std::collections::HashMap::new();
+        let mut bases = ChargedBases {
+            inner: &mut source,
+            budget: &mut budget,
+            charged: &mut charged,
+        };
+        for cap in [11, 12] {
+            let resident = ResidentBudget::new(cap, None);
+            let mut reservation = None;
+            let result = bases.base_with_retry_admission(&id, |len| {
+                drop(reservation.take());
+                reservation = Some(resident.charge(len)?);
+                Ok(())
+            });
+            if cap == 12 {
+                assert_eq!(result.unwrap().unwrap().len(), 12);
+                assert_eq!(bases.budget.used, 12);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 12);
+            } else {
+                assert!(matches!(result, Err(PackError::PackfileTooLarge)));
+                assert_eq!(bases.budget.used, 0);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+            }
+            bases.release(&id);
+            drop(reservation);
+        }
+    }
+
+    #[test]
     fn provided_base_admission_preserves_existing_sources() {
         struct Source(Vec<u8>);
         impl DeltaBaseSource for Source {
@@ -3813,6 +4182,13 @@ mod tests {
             source.base_with_admission(&[0; 32], |_| Err(PackError::PackfileTooLarge)),
             Err(PackError::PackfileTooLarge)
         ));
+    }
+
+    #[test]
+    fn staging_a_small_window_uses_the_callers_thread() {
+        let caller = std::thread::current().id();
+        let workers = stage_independent(&[()], |()| std::thread::current().id());
+        assert_eq!(workers, vec![caller]);
     }
 
     #[test]
@@ -3852,7 +4228,20 @@ mod tests {
                 .is_none()
             );
             assert_eq!(first_failure.load(Ordering::Relaxed), usize::MAX);
-            let results = stage_raw_entries_parallel(&batch, &frames, &uses, &budget, threads);
+            let results = stage_parallel(
+                &frames,
+                &|(position, payload)| {
+                    stage_raw_in_phase_two(
+                        &batch,
+                        *position,
+                        *payload,
+                        &uses,
+                        &budget,
+                        &first_failure,
+                    )
+                },
+                threads,
+            );
             assert_eq!(results.len(), frames.len());
             assert!(results.iter().all(Option::is_none));
             drop(in_flight);
@@ -4286,14 +4675,15 @@ mod tests {
             assert_eq!(
                 stage_delta_target(
                     &mut &store,
-                    &batch,
+                    (&batch, 0),
                     &mut in_pack,
                     &mut uses,
                     &budget,
                     base_hash,
                     &stream
                 )
-                .unwrap(),
+                .unwrap()
+                .hash,
                 target_hash
             );
             assert_eq!(uses[&base_hash].remaining, remaining);
@@ -4321,7 +4711,7 @@ mod tests {
         assert!(matches!(
             stage_delta_target(
                 &mut &store,
-                &batch,
+                (&batch, 0),
                 &mut in_pack,
                 &mut uses,
                 &budget,
@@ -4589,7 +4979,7 @@ mod tests {
     }
 
     fn seals(fill: PackFill, add: Incoming) -> bool {
-        fill.seals_before(add, u64::MAX, None, usize::MAX)
+        fill.seals_before(add, u64::MAX, PACK_BODY_LIMIT, usize::MAX)
     }
 
     #[test]
@@ -4838,7 +5228,7 @@ mod tests {
                 if PackFill::of(&w).seals_within(
                     entry.incoming(&w),
                     u64::MAX,
-                    None,
+                    PACK_BODY_LIMIT,
                     usize::MAX,
                     BUDGET,
                 ) {
@@ -4882,49 +5272,38 @@ mod tests {
             )
         };
         // An empty pack takes any entry.
-        assert!(!seals(fill(0, 0), u64::MAX, 1, Some(1), 1));
+        assert!(!seals(fill(0, 0), u64::MAX, 1, 1, 1));
         // Entry bound: the caller's, and never above the writer's.
-        assert!(seals(fill(3, 0), 0, u64::MAX, None, 3));
-        assert!(!seals(fill(2, 0), 0, u64::MAX, None, 3));
+        let body = PACK_BODY_LIMIT;
+        assert!(seals(fill(3, 0), 0, u64::MAX, body, 3));
+        assert!(!seals(fill(2, 0), 0, u64::MAX, body, 3));
         assert!(!seals(
             fill(MAX_WRITE_ENTRIES - 1, 0),
             0,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
         assert!(seals(
             fill(MAX_WRITE_ENTRIES, 0),
             0,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
         // Payload cap.
-        assert!(!seals(fill(1, 10), 5, 15, None, usize::MAX));
-        assert!(seals(fill(1, 10), 6, 15, None, usize::MAX));
-        // Serialized limit: the advertised one, or the body limit without one.
+        assert!(!seals(fill(1, 10), 5, 15, body, usize::MAX));
+        assert!(seals(fill(1, 10), 6, 15, body, usize::MAX));
+        // The pack's length, header, trailer and frames included.
         let room = serialized_bound(0, 2);
-        assert!(!seals(
-            fill(1, 10),
-            5,
-            u64::MAX,
-            Some(room + 15),
-            usize::MAX
-        ));
-        assert!(seals(fill(1, 10), 6, u64::MAX, Some(room + 15), usize::MAX));
-        assert!(!seals(
-            fill(1, 0),
-            PACK_BODY_LIMIT - room,
-            u64::MAX,
-            None,
-            usize::MAX
-        ));
+        assert!(!seals(fill(1, 10), 5, u64::MAX, room + 15, usize::MAX));
+        assert!(seals(fill(1, 10), 6, u64::MAX, room + 15, usize::MAX));
+        assert!(!seals(fill(1, 0), body - room, u64::MAX, body, usize::MAX));
         assert!(seals(
             fill(1, 0),
-            PACK_BODY_LIMIT - room + 1,
+            body - room + 1,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
     }
@@ -5004,12 +5383,17 @@ mod tests {
     #[test]
     fn a_finished_pack_is_within_the_read_limits_up_to_each_limit() {
         let budget = DecodeLimits::default().max_decoded_bytes;
-        let over =
-            |len, decoded, bases, entries| match within_read_limits(len, decoded, bases, entries) {
-                Ok(()) => None,
-                Err(PackError::OverReadLimit(limit)) => Some(limit),
-                Err(other) => panic!("{other}"),
-            };
+        let over = |len, decoded, bases, entries| match within_read_limits(
+            len,
+            decoded,
+            bases,
+            entries,
+            PACK_BODY_LIMIT,
+        ) {
+            Ok(()) => None,
+            Err(PackError::OverReadLimit(limit)) => Some(limit),
+            Err(other) => panic!("{other}"),
+        };
         assert_eq!(over(100, budget, 0, MAX_WRITE_ENTRIES), None);
         assert_eq!(over(100, budget + 1, 0, 1), Some(ReadLimit::DecodedBytes));
         // The bases a reader holds count beside the decoded bytes.
@@ -5027,16 +5411,16 @@ mod tests {
         );
         #[cfg(target_pointer_width = "64")]
         {
-            use crate::protocol::PACK_BODY_LIMIT_USIZE;
-            assert_eq!(over(PACK_BODY_LIMIT_USIZE, 0, 0, 1), None);
+            let limit = usize::try_from(PACK_BODY_LIMIT).unwrap();
+            assert_eq!(over(limit, 0, 0, 1), None);
             assert_eq!(
-                over(PACK_BODY_LIMIT_USIZE + 1, 0, 0, 1),
-                Some(ReadLimit::BodyLimit)
+                over(limit + 1, 0, 0, 1),
+                Some(ReadLimit::BodyLimit(PACK_BODY_LIMIT))
             );
         }
         // Each error names its limit.
         for (limit, text) in [
-            (ReadLimit::BodyLimit, "body limit"),
+            (ReadLimit::BodyLimit(7), "the 7-byte body limit"),
             (ReadLimit::DecodedBytes, "decoded-byte budget"),
             (ReadLimit::Entries, "entries"),
         ] {
@@ -5067,17 +5451,10 @@ mod tests {
         let entries = w.entry_count();
         let decoded = w.total_decoded();
         assert!(matches!(
-            within_read_limits(100, decoded, bound, entries),
+            within_read_limits(100, decoded, bound, entries, PACK_BODY_LIMIT),
             Err(PackError::OverReadLimit(ReadLimit::DecodedBytes))
         ));
-        assert!(within_read_limits(100, decoded, peak, entries).is_ok());
-    }
-
-    #[test]
-    fn the_serialized_limit_is_the_advertised_one_never_above_the_body_limit() {
-        assert_eq!(serialized_limit(None), PACK_BODY_LIMIT);
-        assert_eq!(serialized_limit(Some(7)), 7);
-        assert_eq!(serialized_limit(Some(u64::MAX)), PACK_BODY_LIMIT);
+        assert!(within_read_limits(100, decoded, peak, entries, PACK_BODY_LIMIT).is_ok());
     }
 
     #[test]

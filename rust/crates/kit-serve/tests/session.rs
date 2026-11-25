@@ -14,9 +14,10 @@ use kit_rpc::kit::common::v1::RefExpectation;
 use kit_rpc::kit::rpc::v1::ErrorCode;
 use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
 use kit_serve::{
-    DOWNLOAD_CHUNK_MAX, FRAME_BUDGET_EXCEEDED, FrameIoError, MAX_BYTES_PER_CONN,
-    MAX_FRAMES_PER_CONN, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig,
-    SessionEnd, UploadLimits, frame_byte_estimate, serve_session, upload_limits,
+    DOWNLOAD_CHUNK_MAX, FRAME_BUDGET_EXCEEDED, FrameIoError, LIST_NEEDS_PAGE_SIZE,
+    MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, MAX_LIST_PAGE_REFS, MAX_REF_NAME_BYTES,
+    REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig, SessionEnd, UploadLimits,
+    frame_byte_estimate, serve_session, upload_limits,
 };
 use kit_transport_file::FileTransport;
 
@@ -175,24 +176,30 @@ fn frame_budget_exceeded_ends_protocol_error() {
     assert_error(&frames[n], ErrorCode::InvalidRequest, FRAME_BUDGET_EXCEEDED);
 }
 
-/// The requests of a fetch that finds `branches` branches unchanged: one
-/// listing, then a packmap read and a pack list node download per branch.
+/// The requests of a fetch that finds `branches` branches unchanged and no
+/// tags: a page of the branch listing for each 1,000 branches, a packmap read
+/// and a pack list node download per branch, then the tag listing.
 fn unchanged_fetch(branches: usize, node: &[u8]) -> Vec<Option<Body>> {
-    let mut bodies = vec![list_refs(Some("refs/heads/"))];
+    let pages = branches.div_ceil(MAX_LIST_PAGE_REFS).max(1);
+    let mut bodies = vec![list_refs(Some("refs/heads/")); pages];
     for _ in 0..branches {
         bodies.push(read_ref("refs/kit/packmap/b"));
         bodies.push(download(Some(node)));
     }
+    bodies.push(list_refs(Some("refs/tags/")));
     bodies
 }
 
-/// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,999 branches fits one
-/// session (9,999 frames); one of 5,000 branches (10,001 frames) is refused
-/// with the budget reply, and the session ends.
+/// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,997 branches fits one
+/// session (10,000 frames: 5 listing pages, 9,994 branch frames and the tag
+/// listing); one of 4,998 branches (10,002 frames) is refused with the budget
+/// reply, and the session ends.
 #[test]
 fn the_largest_unchanged_fetch_fits_one_session_and_one_more_branch_does_not() {
-    let largest = (MAX_FRAMES_PER_CONN as usize - 1) / 2;
-    assert_eq!(largest, 4_999);
+    let largest = 4_997;
+    let frames_of = |branches: usize| branches.div_ceil(MAX_LIST_PAGE_REFS) + 2 * branches + 1;
+    assert_eq!(frames_of(largest), MAX_FRAMES_PER_CONN as usize);
+    assert_eq!(frames_of(largest + 1), MAX_FRAMES_PER_CONN as usize + 2);
     let fx = Fixture::new();
     let (pack, id) = valid_pack();
     fx.seed(&[("refs/kit/packmap/b", id)], &[&pack]);
@@ -333,7 +340,7 @@ fn update_ref_field_errors_keep_their_messages() {
         update(main, &[1; 32], None, None),
         update(main, &[1; 32], Some(RefExpectation::Match), None),
         update(main, &[1; 32], Some(RefExpectation::Match), Some(&[2; 31])),
-        // `new_id` is checked before the expectation.
+        // An empty `new_id` is a delete, which needs an expectation.
         update(main, &[], None, None),
         update(
             "refs/heads/.hidden",
@@ -348,7 +355,7 @@ fn update_ref_field_errors_keep_their_messages() {
         "UpdateRef.expectation is required",
         "MATCH expectation requires a 32-byte expected_id",
         "MATCH expectation requires a 32-byte expected_id",
-        "new_id must be 32 bytes",
+        "UpdateRef.expectation is required",
         "update ref failed",
     ];
     assert_eq!(frames.len(), want.len());
@@ -417,6 +424,118 @@ fn read_and_list_refs() {
     assert_error(&frames[5], ErrorCode::Internal, "list refs failed");
 }
 
+/// A listing pages in name order. The token is the last name of the page
+/// before, so a token for a name that has gone starts after that name.
+#[test]
+fn a_listing_pages_in_name_order() {
+    let fx = Fixture::new();
+    let names = ["a", "b", "c", "d", "e"];
+    let refs: Vec<(String, [u8; 32])> = names
+        .iter()
+        .map(|n| (format!("refs/heads/{n}"), [1; 32]))
+        .collect();
+    let refs: Vec<(&str, [u8; 32])> = refs.iter().map(|(n, id)| (n.as_str(), *id)).collect();
+    fx.seed(&refs, &[]);
+    let heads = Some("refs/heads/");
+    let (end, frames) = fx.run([
+        list_refs_page(heads, Some(2), None),
+        list_refs_page(heads, Some(2), Some("b")),
+        list_refs_page(heads, Some(2), Some("d")),
+        list_refs_page(heads, Some(2), Some("bb")),
+        list_refs_page(heads, Some(2), Some("e")),
+        list_refs_page(heads, Some(10), None),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(listed_names(&frames[0]), ["a", "b"]);
+    assert_eq!(next_token(&frames[0]).as_deref(), Some("b"));
+    assert_eq!(listed_names(&frames[1]), ["c", "d"]);
+    assert_eq!(next_token(&frames[1]).as_deref(), Some("d"));
+    assert_eq!(listed_names(&frames[2]), ["e"]);
+    assert_eq!(
+        next_token(&frames[2]),
+        None,
+        "the last page ends the listing"
+    );
+    assert_eq!(listed_names(&frames[3]), ["c", "d"]);
+    assert!(listed_names(&frames[4]).is_empty());
+    assert_eq!(next_token(&frames[4]), None);
+    assert_eq!(listed_names(&frames[5]), names);
+    assert_eq!(
+        next_token(&frames[5]),
+        None,
+        "a page that holds all ends it"
+    );
+}
+
+/// A page size above the cap gets a page of the cap, and a listing of 1,001
+/// refs takes two pages. A page of the longest names still fits one frame.
+#[test]
+fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
+    let fx = Fixture::new();
+    let count = MAX_LIST_PAGE_REFS + 1;
+    // A ref file as the transport writes it, copied to each name: a durable
+    // write per ref would take minutes. The names are of the longest length,
+    // in two components that a file name holds.
+    let seed = fx.root().join("refs/heads/seed");
+    FileTransport::new(fx.root())
+        .update_ref("refs/heads/seed", RefWriteCondition::Any, &[2; 32])
+        .unwrap();
+    let wire = std::fs::read(&seed).unwrap();
+    std::fs::remove_file(&seed).unwrap();
+    let first = "x".repeat(250);
+    let second = "y".repeat(MAX_REF_NAME_BYTES - "refs/heads/0000/".len() - first.len() - 1);
+    for i in 0..count {
+        let dir = fx
+            .root()
+            .join("refs/heads")
+            .join(format!("{i:04}"))
+            .join(&first);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&second), &wire).unwrap();
+    }
+    let heads = Some("refs/heads/");
+    let (_, frames) = fx.run([list_refs_page(heads, Some(u32::MAX), None)]);
+    assert_eq!(listed_names(&frames[0]).len(), MAX_LIST_PAGE_REFS);
+    let token = next_token(&frames[0]).unwrap();
+    let mut encoded = Vec::new();
+    kit_rpc::write_frame(&mut encoded, &frames[0]).unwrap();
+    assert!(encoded.len() < kit_rpc::MAX_FRAME_BYTES as usize);
+    let (_, frames) = fx.run([list_refs_page(heads, Some(u32::MAX), Some(&token))]);
+    assert_eq!(listed_names(&frames[0]).len(), 1);
+    assert_eq!(next_token(&frames[0]), None);
+}
+
+/// A listing without a page size is refused, so a client from before
+/// listings paged fails loudly and never takes a first page for the whole.
+#[test]
+fn a_listing_without_a_page_size_is_refused() {
+    let fx = Fixture::new();
+    fx.seed(&[("refs/heads/main", [1; 32])], &[]);
+    let (end, frames) = fx.run([
+        list_refs_page(Some("refs/heads/"), None, None),
+        list_refs_page(Some("refs/heads/"), Some(0), None),
+        list_refs(Some("refs/heads/")),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
+    assert_error(&frames[1], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
+    assert_eq!(listed_names(&frames[2]), ["main"]);
+}
+
+/// A page token over the name limit cannot be a name, so it is refused.
+#[test]
+fn a_page_token_over_the_name_limit_is_refused() {
+    let fx = Fixture::new();
+    let long = "a".repeat(MAX_REF_NAME_BYTES + 1);
+    let fits = "a".repeat(MAX_REF_NAME_BYTES);
+    let (_, frames) = fx.run([
+        list_refs_page(None, Some(10), Some(&long)),
+        list_refs_page(None, Some(10), Some(&fits)),
+    ]);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "invalid page token");
+    assert!(listed_names(&frames[1]).is_empty());
+}
+
 /// Two writers race a create-only update. The loser's reply carries the
 /// winner's id in `details` and classifies as a conflict through the shared
 /// client mapping.
@@ -449,6 +568,79 @@ fn cas_conflict_carries_current_id_in_details() {
     );
     let tx = FileTransport::new(fx.root());
     assert_eq!(tx.read_ref(main).unwrap(), Some(winner));
+}
+
+/// SPEC-TRANSPORT §4.2.1: an empty `new_id` deletes the ref under `MATCH`
+/// only. Another value is a conflict whose `details` is the current id; an
+/// absent ref is a conflict with empty `details`. Nothing else deletes.
+#[test]
+fn an_empty_new_id_deletes_under_match_only() {
+    let fx = Fixture::new();
+    let (current, stale) = ([0x11u8; 32], [0x22u8; 32]);
+    let (main, tag) = ("refs/heads/main", "refs/tags/v1");
+    fx.seed(&[(main, current), (tag, current)], &[]);
+    let (end, frames) = fx.run([
+        update(main, &[], Some(RefExpectation::Any), None),
+        update(main, &[], Some(RefExpectation::Missing), None),
+        update(main, &[], Some(RefExpectation::Match), Some(&[1; 5])),
+        update(main, &[], Some(RefExpectation::Match), Some(&stale)),
+        update(main, &[], Some(RefExpectation::Match), Some(&current)),
+        update(main, &[], Some(RefExpectation::Match), Some(&current)),
+        update("main", &[], Some(RefExpectation::Match), Some(&current)),
+        read_ref(main),
+        read_ref(tag),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(
+        &frames[0],
+        ErrorCode::InvalidRequest,
+        kit_serve::DELETE_NEEDS_MATCH,
+    );
+    assert_error(
+        &frames[1],
+        ErrorCode::InvalidRequest,
+        kit_serve::DELETE_NEEDS_MATCH,
+    );
+    assert_error(
+        &frames[2],
+        ErrorCode::InvalidRequest,
+        "MATCH expectation requires a 32-byte expected_id",
+    );
+    let stale_reply = error(&frames[3]);
+    assert_eq!(stale_reply.details.as_deref(), Some(&current[..]));
+    assert!(matches!(
+        kit_rpc::map_update_ref_error(stale_reply.clone(), RefWriteCondition::Match(stale), "ssh"),
+        TransportError::RefConflict
+    ));
+    assert!(matches!(frames[4].body, Some(Body::UpdateRefResponse(_))));
+    let absent = error(&frames[5]);
+    assert!(absent.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert!(absent.details.as_deref().unwrap_or_default().is_empty());
+    assert_error(&frames[6], ErrorCode::InvalidRequest, REF_NAME_OUTSIDE_REFS);
+    let read = |f: &kit_rpc::kit::rpc::v1::ssh::SshFrame| match &f.body {
+        Some(Body::ReadRefResponse(r)) => r.object_id.clone(),
+        other => panic!("expected ReadRefResponse, got {other:?}"),
+    };
+    assert_eq!(read(&frames[7]), Some(Vec::new()), "main is deleted");
+    assert_eq!(read(&frames[8]), Some(current.to_vec()), "the tag stays");
+}
+
+/// A read-only server refuses a delete as it refuses any write.
+#[test]
+fn a_read_only_server_refuses_a_delete() {
+    let fx = Fixture::with_policy(kit_serve::WritePolicy::ReadOnly);
+    let main = "refs/heads/main";
+    FileTransport::new(fx.root())
+        .update_ref(main, RefWriteCondition::Any, &[0x11; 32])
+        .unwrap();
+    let (_, frames) = fx.run([
+        update(main, &[], Some(RefExpectation::Match), Some(&[0x11; 32])),
+        read_ref(main),
+    ]);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "write not permitted");
+    assert!(
+        matches!(&frames[1].body, Some(Body::ReadRefResponse(r)) if r.object_id.as_deref() == Some(&[0x11; 32][..]))
+    );
 }
 
 #[test]
@@ -851,7 +1043,7 @@ fn invalid_upload_is_rejected_before_storage() {
     );
     assert!(
         !FileTransport::new(fx.root())
-            .pack_exists(&PackKey::new(bogus))
+            .pack_exists(&PackKey::new(bogus), None)
             .unwrap()
     );
     assert!(
@@ -866,7 +1058,11 @@ fn rejected_upload_does_not_overwrite_an_existing_pack() {
     let fx = Fixture::new();
     let (bytes, id) = valid_pack();
     FileTransport::new(fx.root())
-        .upload_pack(&bytes, &PackKey::new(id))
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &PackKey::new(id),
+            None,
+        )
         .unwrap();
     let (end, frames) = fx.run([
         upload_header(&id, Some(5)),

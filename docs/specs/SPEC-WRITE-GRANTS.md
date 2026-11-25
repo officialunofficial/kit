@@ -203,9 +203,11 @@ flag       = "c" / "u" / "f" / "d"
 - A **prefix pattern** is a valid ref name `P` followed by `/*`. It
   matches every ref whose name begins with `P/`, at any depth. The single
   trailing `*` is the only wildcard; a bare `*` is not a pattern.
-- A pattern MUST NOT be, or begin with, `refs/kit/packmap/`. Packmap
-  refs are never matched directly; §8.3 covers them through their
-  branch.
+- A pattern MUST NOT be, or begin with, `refs/kit/packmap/` or
+  `refs/kit/tagmap/`. Packmap and tag map refs are never matched
+  directly; §8.3 covers them through their branch or their tag.
+- `refs/kit/attestmap` requires an exact, not prefix, pattern, authorized
+  independently of branch and tag scopes. It is not a packmap alias.
 - Flags: `c` create, `u` update, `f` force, `d` delete. §8 defines what
   each permits.
 
@@ -260,8 +262,8 @@ repair it:
   duplicated;
 - ref scopes that are not `-` for a `read` grant, or `-` for a grant with
   `write`;
-- a pattern outside §3.3, a pattern under `refs/kit/packmap/`, an
-  unknown flag, flags out of the `cufd` order or repeated, more than 16
+- a pattern outside §3.3, a pattern under `refs/kit/packmap/` or
+  `refs/kit/tagmap/`, an unknown flag, flags out of the `cufd` order or repeated, more than 16
   entries, entries out of order, or two entries with one pattern;
 - `expiry <= created`, or a lifetime above `GRANT_MAX_LIFETIME_MS`;
 - a statement longer than `MAX_STATEMENT_BYTES`.
@@ -709,7 +711,9 @@ authority source are not limited by ref scopes.
 ### 8.1 Effective flags
 
 The **effective flags** of a grant for a ref `R` are the union of the
-flags of every entry whose pattern matches `R` (§3.3). A ref that no
+flags of every entry whose pattern matches `R` (§3.3).
+For `refs/kit/attestmap`, only the exact pattern contributes flags;
+prefix patterns, including `refs/*` and `refs/kit/*`, grant it nothing. A ref that no
 pattern matches has no flags, and every change to it is
 `permission_denied`.
 
@@ -740,10 +744,20 @@ determines the required flag from the request and the ref's state at
   `permission_denied` with nothing committed.
 - The `d` flag governs ref deletion through `UpdateRef` and
   `AdvanceRefs`. A deployment MAY refuse deletion outright
-  (SPEC-TRANSPORT-CONNECT §7.8).
+  (SPEC-TRANSPORT-CONNECT §7.8). A client that deletes a head with its
+  chain ref (SPEC-TRANSPORT §7.3) selects a grant with `d` on the head;
+  the chain ref adds no flag (§8.3).
 - `BeginUpload` names the ref its ticket will advance. It needs `write`
   and a ref-scope entry that matches that ref, with any flag. It changes
   no ref, so no flag is required.
+
+For `refs/kit/attestmap`, an indexed server treats a `Match` update as
+`u` when the new chain lists every old pack in its original oldest-first
+order. This includes append and re-baseline without compaction. Compaction
+replaces pack ids and requires `f`, like a branch rewrite. Any other
+replacement also needs `f`. A server that cannot check this inclusion MUST require `f`.
+Creation and deletion retain the `c` and `d` rules. Attestation scopes do
+not authorize changes to branch heads.
 
 ### 8.3 Packmap coverage
 
@@ -752,13 +766,32 @@ A branch's packmap ref travels with its head. For a grantee:
 - A scope that matches `refs/heads/<x>` covers `refs/kit/packmap/<x>`.
 - An `AdvanceRefs` is authorized only when its head ref is
   `refs/heads/<x>` and its packmap ref is exactly
-  `refs/kit/packmap/<x>`. The flags are evaluated on the head change
-  only.
+  `refs/kit/packmap/<x>`, or it is the tag pairing below. The flags are
+  evaluated on the head change only.
 - Packmap writes are allowed only together with the covered head, in
   one `AdvanceRefs`. A direct `UpdateRef` on any ref under
   `refs/kit/packmap/` is `permission_denied`.
 - A head-only `UpdateRef` on `refs/heads/<x>` is authorized under the
   head's flags. It consumes no ticket and needs no packmap scope.
+
+A tag's tag map travels with its tag in the same way:
+
+- A scope that matches `refs/tags/<x>` covers `refs/kit/tagmap/<x>`. A
+  pattern MUST NOT begin with `refs/kit/tagmap/`.
+- An `AdvanceRefs` whose head ref is `refs/tags/<x>` and whose packmap
+  ref is exactly `refs/kit/tagmap/<x>` is authorized under the tag's
+  flags: a create needs `c`, any `REF_EXPECTATION_MATCH` move of the tag
+  needs `f`, and a deletion needs `d`.
+- A repair writes `REF_EXPECTATION_MATCH v → v` on the tag together with
+  a tag map create (SPEC-TRANSPORT §7.2). It changes no tag, so it needs
+  `c`, the flag of the tag map it creates, and not `u` or `f`.
+- A tag-only `UpdateRef` on `refs/tags/<x>` is authorized under the tag's
+  flags. A forced update makes one under `REF_EXPECTATION_MATCH` when the
+  tag map already rebuilds the new value, which needs `f`; a push makes one
+  under `REF_EXPECTATION_MISSING` when the tag map already holds its node,
+  which needs `c`.
+- A direct `UpdateRef` on any ref under `refs/kit/tagmap/` is
+  `permission_denied`.
 
 Why the packmap is not checked as its own ref: a push normally appends
 one node to the packmap chain, but a re-baseline and a reset write a

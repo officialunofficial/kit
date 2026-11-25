@@ -192,8 +192,10 @@ impl PackReader {
     }
 }
 
-/// Whether `name` is an upload's temp file name: `.kit.tmp.<pid>.<seq>`
-/// with a decimal `u32` pid and `u64` sequence.
+/// Whether `name` is an upload's temp file name: `.kit.tmp.<pid>.<seq>` with
+/// a decimal `u32` pid and `u64` sequence, and, for a temp file that
+/// `kit_core::durable` made, the six random letters and digits that
+/// `tempfile` appends.
 fn is_upload_temp_name(name: &str) -> bool {
     let decimal = |s: &str, max: usize| {
         !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_digit())
@@ -203,6 +205,14 @@ fn is_upload_temp_name(name: &str) -> bool {
         .and_then(|r| r.split_once('.'))
     else {
         return false;
+    };
+    let seq = match seq.len().checked_sub(6).map(|at| seq.split_at(at)) {
+        Some((digits, random))
+            if decimal(digits, 20) && random.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+        {
+            digits
+        }
+        _ => seq,
     };
     decimal(pid, 10) && decimal(seq, 20)
 }
@@ -386,6 +396,12 @@ mod tests {
     fn temp_names_are_exact() {
         let hex = "a".repeat(64);
         assert!(is_upload_temp_name(".kit.tmp.1.2"));
+        // A temp file of `kit_core::durable` has six random characters after
+        // its sequence.
+        assert!(is_upload_temp_name(".kit.tmp.123.0aB3xQz"));
+        assert!(is_upload_temp_name(".kit.tmp.123.17zzzzzz"));
+        assert!(!is_upload_temp_name(".kit.tmp.123.aB3xQz"));
+        assert!(!is_upload_temp_name(".kit.tmp.123.0aB3x-"));
         assert!(!is_upload_temp_name("kit.tmp.1.2"));
         assert!(!is_upload_temp_name(".kit.tmp.1"));
         assert!(!is_upload_temp_name(".kit.tmp.x.2"));

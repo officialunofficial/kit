@@ -38,12 +38,14 @@ internal `Mutex` so the trait object remains object-safe.
 
 | Verb | Purpose |
 |---|---|
-| `upload_pack(bytes, key)` | Store a packfile keyed by its 32-byte BLAKE3 digest (`PackKey`). |
-| `download_pack(key)` | Fetch a packfile by digest. |
-| `pack_exists(key)` | HEAD-check a pack by digest. |
-| `upload_blob(bytes, key)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
-| `download_blob(key)` | Fetch an auxiliary blob by digest. Default impl delegates to `download_pack`. |
+| `upload_pack(pack, key, head_ref)` | Store a packfile keyed by its 32-byte BLAKE3 digest (`PackKey`). `pack` is a `PackBody` (§1.1). `head_ref` names the branch the pack is for, a hint for a transport that authorizes uploads by ref. |
+| `download_pack(key, ref_hint, sink)` | Fetch a packfile by digest into a `PackSink` (§1.1). `ref_hint` names the ref the caller reads it for. |
+| `pack_exists(key, ref_hint)` | HEAD-check a pack by digest. |
+| `upload_blob(bytes, key, head_ref)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
+| `download_blob(key, ref_hint, max)` | Fetch an auxiliary blob of at most `max` bytes. The default runs `download_pack` into an in-memory sink of limit `max`, so a blob whose length the transport knows first is refused before any byte of it is read. |
 | `update_ref(name, condition, hash)` | CAS ref write. |
+| `delete_ref(name, expected)` | Delete `name` while it holds `expected`. An absent ref or another value is `RefConflict`, with nothing deleted. There is no unconditional delete. |
+| `delete_refs(head, head_expected, map, map_expected)` | Delete a head and its chain ref (§7.3). The default deletes the head, then the chain ref, each under its own `Match`; once the head is gone the delete has happened, so a failure on the chain ref still reports `Committed`. A head that does not match is `HeadConflict`, with nothing deleted. With no `map_expected` the head goes alone. |
 | `advance_refs(head, head_condition, head_value, packmap, packmap_condition, packmap_value)` | Move a branch head and its packmap together (§7.2). The default writes the packmap, then the head, each under its own condition. |
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
@@ -57,29 +59,61 @@ returned byte sequence, including a pack's trailer. A transport's internal
 checks, a valid pack trailer, or a content-addressed lookup URL do not replace
 this consumer-boundary check. Mismatch is `InvalidResponse` and is not retryable.
 
-### 1.1 Streaming pack transfer (additive, opt-in)
+### 1.1 Pack bodies and sinks
 
-`upload_pack_streaming(key, total_bytes, chunks)` and
-`download_pack_streaming(key)` are additive verbs alongside
-`upload_pack`/`download_pack`: they move a pack as a sequence of
-bounded-size `PackChunk { offset, data, last }` segments (the same
-shape `ssh.proto`'s `PackChunk` already defines) instead of one
-`Vec<u8>`, so a transport that forwards chunks straight to its own
-wire never holds more than roughly one chunk in memory regardless of
-total pack size. Both have default trait implementations expressed in
-terms of the whole-buffer verbs &mdash; buffer-then-delegate for upload,
-delegate-then-wrap-as-one-chunk for download &mdash; so **no transport is
-required to change**; a caller may always use the streaming entry
-point, even against a transport that has not opted into real
-streaming.
+`upload_pack` reads a pack from a `PackBody` and `download_pack` writes one
+to a `PackSink`, so neither verb needs the whole pack in memory. A push
+seals each pack into an unnamed spool file in `.kit/tmp/` and hands that
+file to the transport as the body. A fetch hands the transport a sink that
+spools the pack into an unnamed file in `.kit/tmp/` and checks its length,
+key and trailer as it arrives (Pack-chain fetch, below).
 
-The SSH transport overrides both methods to expose the
-`PackChunk` frame loop it already ran internally for the
-whole-buffer path (§4.2, §6). The Connect transport streams packs through a
-client-streaming `UploadPack` and a server-streaming `DownloadPack` RPC
-on the `kit.transport.v1` service
-([SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) §6), which reuses
-this same `PackChunk` shape on the wire.
+A `PackBody` has a length, and its bytes can be read from any offset as
+often as the transport needs: once per attempt, per part, per hash pass.
+Every read sees the same bytes, so every attempt sends the same pack.
+
+A `PackSink` takes one body:
+
+- `begin(declared)` starts a body, or starts it again after a failed
+  attempt; bytes taken earlier are discarded. A declared length over the
+  sink's limit is refused with `PayloadTooLarge` before any byte. A
+  transport that writes the body to the sink as it arrives and learns the
+  length first (a file's size, the SSH `DownloadPackHeader.total_bytes`, an
+  HTTP `Content-Length`) MUST pass it to `begin` before it reads the body.
+- `write(bytes)` appends. A byte past the declared length or the limit is
+  refused with `PayloadTooLarge`.
+- `failed()` names the local I/O error that ended the sink, a full disk say.
+  It stays set: after it, `begin` and `write` return `ProtocolError`, which
+  no transport retries. A caller checks `failed()` before it retries, falls
+  back to another location or maps an error, and reports the local error,
+  not a transport failure.
+
+The memory and file transports copy bodies in chunks of `SPOOL_BUFFER`
+(1 MiB). SSH sends a body as `PackChunk` frames read from it one at a time
+(§4.2), and S3 streams it in one sized `PUT` (§6.7); both read it again
+from offset 0 on every attempt. On download, SSH passes the header's
+`total_bytes` to `begin` and writes each `PackChunk` frame to the sink as
+it arrives; S3 passes a `200` answer's `Content-Length` to `begin` and
+writes its body to the sink as it arrives (§6.7). Connect reads the body as
+it builds each chunk or part, and passes `total_bytes` to `begin` and each
+`PackChunk`, or a pack location's bytes, to the sink as they arrive,
+holding one frame of at most 4 MiB (SPEC-TRANSPORT-CONNECT §6).
+
+Spool files have no name on Unix (`O_TMPFILE`, or unlinked on creation); on
+Windows they are `.tmp` files deleted on close. Only the handle that wrote
+one reaches it, and a crash on Unix leaves nothing on disk. Fetch, push and
+gc remove every spool file (named `.tmp` and a random suffix) in `.kit/tmp/`
+when they start, which clears what a power loss leaves on Windows. A spool that
+another process holds open is left alone.
+
+A fetch keeps a verified pack whose apply failed, in `.kit/tmp/retained/`
+as `<key>.pack`, so a retry reads it from disk instead of downloading it. The
+file is a disposable cache and is never trusted: a retry reads it again through
+a spool, which checks its length, its trailer and its key, and a file that fails
+is deleted. The cache holds at most four packs and none older than seven days,
+and the sweep that fetch, push and gc run when they start enforces both. A pack
+leaves the cache when a retry records it as applied. A directory or file in the
+cache that is a symlink is never followed.
 
 `update_ref`'s condition is one of:
 
@@ -124,12 +158,25 @@ correct.
 
 **Reference-client behavior.** A fetch reads the cursor before it lists the
 refs and records it after a complete fetch. A later fetch returns without
-another request when the cursor, the remote-tracking refs and the signature
-policy are as that fetch recorded them, and the object of every tracked tip is
-in the local store. It checks the tips and not the closure below them. An
+another request when the cursor, the remote-tracking refs, the signature
+policy, the tag setting and the local tags are as that fetch recorded them,
+and the object of every tracked tip and every local tag is in the local store.
+A fetch that refused a tag or could not list the tags (§1.4) records nothing. It checks the tips and not the closure below them. An
 object below a tip that the local store lost stays missing through such a
-fetch. The next fetch that does its full work, because the cursor changed or
-no record matches it, checks the closure and fetches the chain again.
+fetch. A fetch that does its full work, because the cursor changed or no
+record matches it, checks the closure down to its anchors (see "Pack-chain
+fetch"). If the local store loses an object below a tracking tip, run
+`kit closure verify <ref> --history`, then fetch the affected remote. A
+local closure verification, gc mark, or restore that finds
+`ObjectNotFound` identifies configured remotes with incomplete tracking
+histories. When any are affected, the command tries the exclusive
+`format` lock (SPEC-CONCURRENCY §3.4). It clears the affected remotes'
+signature anchors and applied-pack records, and clears object fetch
+cursors and checkpoints across repository addresses, which may have
+changed. Attestation records retain their own lifetime. On lock contention
+or invalidation failure, the command warns to repeat the diagnostic
+before fetching. After successful invalidation, the next fetch downloads
+the affected pack chain again and checks its closure before publication.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file
@@ -160,6 +207,262 @@ no ref of another remote.
 Pruning is local. It uses `list_refs` and `read_ref` and sends no write, so no
 transport verb or wire format changes.
 
+### 1.4 Fetching tags
+
+A fetch takes every remote tag after it has published the branches, unless the
+caller turns tags off (`--no-tags`). A tag is published to `refs/tags/<t>`
+only whole and proved. A tag that fails is refused alone: it never fails a
+branch or another tag.
+
+- **Transfer chain.** The objects of remote tag `refs/tags/<t>` travel in the
+  pack list chain that `refs/kit/tagmap/<t>` names (SPEC-REFS §2), shaped like
+  a packmap chain. Its first node may graft on a node of a branch chain.
+- **Listing.** The fetch lists `refs/tags/` once. It lists
+  `refs/kit/tagmap/` once, and only when some tag cannot be proved from local
+  objects. A tag that this listing lacks is read again with `read_ref` of both
+  refs. A tag that is gone is skipped, and a tag with no tag map is refused.
+- **Names.** A remote tag whose name cannot be pushed (SPEC-REFS §3) is
+  skipped with a warning and no read. It is not a refusal.
+- **Local tags.** A local tag with the same value is up to date. A local tag
+  with another value is refused ("would clobber existing tag"): no fetch moves
+  a tag. A remote tag whose name is a directory of a local tag's name, or the
+  reverse, as `v1` and `v1/rc` are, is refused too ("conflicts with existing
+  tag"). Of two such remote tags, the later in listing order is refused when
+  the earlier one proved. A file system that folds case can report the clash
+  only when the tag is read or written, as for `V1/rc` beside `v1`, and that
+  tag is refused the same way. No fetch deletes a tag, with or without
+  `--prune`.
+- **Proof.** A tag is proved when all of these hold:
+  - its peel reaches a commit, remix, tree or blob through at most 16 tags;
+  - the name of its outermost tag object equals `<t>`;
+  - with signature checking on, every commit, remix and tag object in its
+    history passes its signature check, down to history already verified;
+  - every object of its closure is in the local store.
+
+  History already verified means the tips recorded as verified, as for a
+  branch, plus every history walk of this fetch. Tags and branches share the
+  record and the walk. A tip that a local ref reaches counts as present for the
+  closure check. It counts as verified only when a signed fetch recorded it. A
+  proof that would visit more than 10,000,000 objects refuses only that tag.
+  A failed proof proves nothing, and a later tag over the same failed object is
+  refused without another walk. A proof that finds an object missing records
+  the walk path to it, so a later tag over the same incomplete history stops
+  there without another walk, until a pack brings the object.
+- **Download.** A tag that is not proved from local objects downloads its tag
+  map chain. The walk stops at a node that this fetch already applied for a
+  branch or a tag, or at a checkpoint head. So a grafted tag downloads only its
+  own nodes and packs. This stop set holds at most 100,000 nodes. The packs
+  apply as for a branch (Pack-chain fetch), and the tag is proved again.
+- **Retry and self-heal.** When the proof finds an object missing, the fetch
+  reads both refs again with `read_ref` and tries once more. If a run skipped a
+  pack that the applied-pack record lists, or stopped at a node of the stop
+  set, the fetch clears the record and applies the whole chain again. The tag
+  phase of one fetch does this at most once, whatever the number of tags. A
+  pack that this fetch refused for one tag refuses every later tag whose chain
+  holds it, with no second download.
+- **Failure scope.** A refusal names the tag and its reason. The fetch reports
+  it and goes on. A failed tag listing stops the tag phase with "tag listing
+  failed: `<error>`", and the branches stay
+  published. An interrupt, a transport failure other than a bad reply to a
+  node or pack download, or a local I/O error, including one while a tag's
+  pack is written, fails the fetch, as for a branch. The tags proved before
+  such a failure still publish, unless the fetch was interrupted.
+- **Publish.** The tags publish under the worktree lock, each with a create
+  that fails when the tag exists. A tag that appears locally during the fetch
+  with the same value is up to date, and one with another value is refused
+  as one that would clobber.
+
+The CLI prints `! [rejected] <t> -> <t> (<reason>)` for each refused tag. It
+exits 1 after everything else is published. `clone` and `pull` do the same.
+A refused tag is tried and reported again by the next fetch.
+
+### 1.5 Attestation synchronization
+
+The repository-wide `refs/kit/attestmap` ref points to an unchanged KPKL
+v1 pack-list chain. Its entries name SPEC-PACKFILE v1 or v2 attestation
+packs (SPEC-ATTESTATIONS §7.3).
+
+Fetch defaults on. The client snapshots the ref before listing branches
+and tags, then processes attestations after publishing fetched objects.
+An unchanged repository cursor permits skipping the read only when the
+recorded attestation mode and attestmap head also match. Connect always
+reads the ref. Without an advertised Connect capability, clients MUST
+warn and skip attestations. They MUST NOT use branch pack lists instead.
+
+Readers MUST bound each node by `packlist_node_bound(4096)` bytes and
+verify its content address. A walk MUST stop at 100,000 nodes or 100,000
+listed packs and enforce a 16 MiB total node-byte budget. It MUST detect cycles.
+Walk only new nodes, stopping at the last processed head or a baseline.
+Record a structurally unwalkable head (including missing, oversized or malformed nodes)
+so an unchanged head costs no further walk and permits cursor no-op.
+A changed head can resume from that checkpoint. Transport and I/O failures
+and cancellation MUST retain the preceding checkpoint and retry later. Before downloading a pack, check its
+declared length against `max_pack_bytes`; check the actual length, pack
+key, and trailer too. Stream entries, rejecting the pack at its first
+delta, non-blob object, or envelope over 1 MiB. Check compressed entries'
+uncompressed length before allocation or inflation; at most 1 MiB plus
+the ten-byte canonical blob header. The wire payload is bounded by the
+Zstandard compress bound of that maximum plus the four-byte claim.
+Strict-decode each envelope as in-toto DSSE and derive its first subject.
+Envelopes remain provisional until the whole pack verifies. Download to a
+file and verify its key and trailer before streaming the entries, or spool
+provisional entries to disk until verification; do not stage a whole pack's
+decoded envelopes in memory.
+
+Readers MUST enforce a 64 MiB total decoded-byte budget per pack and a
+512 MiB total per attestation fetch. Applications MAY lower these budgets.
+The effective per-pack decoded cap MUST NOT exceed the fetch's starting
+allowance. A pack above that cap is rejected and recorded as processed,
+rather than repeatedly deferred by a fresh but insufficient fetch budget.
+Count canonical blob bytes, including the ten-byte header, for raw entries and the declared uncompressed length
+for zstd-raw entries. Check both totals before allocating or decoding the
+entry. Never refund charges from a rejected pack. The limits allow roughly
+20,000 to 65,000 typical 1–3 KB envelopes per pack and 170,000 to 500,000
+per fetch, while bounding repeated 1 MiB claims. Writers MUST split at
+both the wire cap and the 64 MiB decoded cap. A pack over its decoded cap
+is rejected. Exhausting the fetch budget stops only the attestation work
+with a warning: do not mark the deferred pack processed, and do not publish
+a complete cursor no-op record. Retain already processed packs still listed
+by the current chain; a later fetch resumes the deferred work with a fresh budget.
+
+Save only envelopes whose subject exists in the local store, under the
+worktree lock. Record absent subjects by pack, at most 100,000 distinct
+pack-subject pairs per record. Retry a pending pack only when at least one
+recorded subject becomes local, even when the head is unchanged. Replace
+that pack's pending subjects after retry. Never save an absent subject.
+
+A client MUST bound cumulative new saves for each configured remote name
+to 100,000 envelopes and 512 MiB of envelope bytes in the common directory.
+These match the attestation pack-walk count and per-fetch decoded-byte
+limits. When an envelope would exceed either limit, skip it and emit one
+storage-limit warning per fetch. Preserve existing envelopes and complete
+the code fetch. An envelope that already exists takes no allowance.
+Only absent subjects of envelopes with a reservation or room for one
+qualify as pending. A pack with another pending subject may be read again
+when that subject arrives. Check the same limits on retry and record the
+pack as processed
+even when the limit prevents saving any envelope. A new chain can offer
+those envelopes again, and explicit refetch can replay them, both subject
+to the same allowance.
+
+Reserve allowance durably before publishing fetched provenance. Serialize
+reservations and fetched writes across worktrees. A retry uses the
+reservation already tied to a provenance marker. If a write stops before
+publishing a marker, the client recovers that reservation. When the
+allowance cannot be read, skip new writes and checkpoint each processed
+pack with a warning.
+
+The allowance record is private implementation state. Persist it across
+cache resets, log replacement, and changes to the URL of the same
+configured remote name. Existing provenance provides no remote name,
+so only new reservations are charged. Envelope expiry is a separate
+policy.
+
+Explicit refetch clears the remote's processed record. Count stored, dropped, and rejected entries.
+A rejected pack or envelope warns and MUST NOT fail the code fetch.
+Record rejected packs as processed so they are not downloaded repeatedly.
+A build lacking compressed-entry support MUST defer a compressed pack with
+a warning, never classify it as invalid. Compaction MUST stop with a warning
+on that condition and preserve the published chain. Deferred compressed
+packs retry on each fetch until compression support is available; the run
+keeps the preceding checkpoint and cannot record cursor no-op. Other packs
+in that walk are still processed.
+
+Push is opt-in. It sends only envelopes made locally, excluding every id
+marked fetched from any remote. Select subjects in the remote's closure
+after code publication and exclude ids in its push cache. This also runs
+when code refs are up to date.
+
+Before adding an envelope to a new or compacted pack, check the exact
+envelope bytes for private Git locators. Check `predicate.mirror` on
+Git bridge predicates and `predicate.remoteUrl` on Git import predicates.
+Accept the literal `local`. Skip envelopes with local paths, ambiguous
+locators, URL queries or fragments, or possible user information. The
+latter includes malformed network authorities and percent escapes in the
+authority. Report the envelope digest and the reason without printing the
+locator. Other predicates do not take this locator check.
+
+Split packs at `max_pack_bytes`, upload them,
+and append a node using `Missing` or `Match(old)` CAS. On conflict, re-read
+and retry within the existing budget without re-uploading the pack.
+Re-baseline past depth 64. Above 4,096 listed packs, the next writer with
+force permission automatically compacts the listed envelopes into bounded
+packs and publishes one baseline node with no predecessor by CAS against
+the head whose envelopes it read. Include pending local envelopes in that
+baseline. Read unpublished local envelopes from local prepared packs,
+not by downloading unconsumed uploads from the server. Never append compacted packs to the old chain. A conflict requires
+re-reading and recompacting the new head, preserving concurrent appends.
+If the replacement needs more upload tickets than one atomic write allows,
+skip it with a warning and leave the chain unchanged. Compaction replaces pack ids and
+requires `f`; update permission `u` alone preserves every old pack id.
+There is no permission-discovery verb. The client attempts the compacted
+CAS using the transport's existing write path. If a grant refuses it,
+skip attestations with one `warning:` saying a writer with force permission
+must compact. The code push still succeeds. A writer known to hold only
+`u` may skip the attempt and emit the same warning. No client falls back
+to branch pack lists. Unreferenced uploads from a refused CAS confer no
+membership or publication.
+An attestation failure warns without failing the code push.
+
+Publishing is permanent on remotes without pack gc. Warn once per remote
+after the first successful publication. Do not persist the warning flag or
+published-id cache for a refused publication. Removing published envelopes
+resets the whole
+log and requires force permission; deleting a local envelope cannot retract
+its published bytes.
+
+#### Synchronization records
+
+The common directory holds separate fetch and push records. Neither is
+an object `AppliedPacks` record, and branch self-heal MUST NOT clear them.
+Key each by the length-prefixed remote name, exact configured remote URL,
+repository address, and origin. The URL is hashed, never stored as text.
+Files use that digest with `.attest-fetch` and `.attest-push` suffixes in
+`applied-packs/.cursors`. Invalidate disposable cursor and attestation
+records on any remote configuration change, including set-url, removal,
+and rename; never reuse a record for another repository.
+
+A record contains LF-separated fields: `kit-attestation-record-v2`, the
+processed head as lowercase hex or `-`, the warning flag (`0` or `1`),
+then sorted unique lowercase 64-hex ids, a `pending` line, and sorted unique
+`<pack> <subject>` lines with lowercase 64-hex hashes. Pending packs MUST be
+in the processed set. Push records have no pending pairs. Fetch ids name
+processed packs;
+push ids name published envelopes and its head is absent. The decoder's
+role comes from the cache path, never from head presence. A deferred fetch
+can have no completed head yet and still retains its processed pack ids;
+it remains subject to the fetch bounds. A push record MUST have no head. Append the
+lowercase BLAKE3 of all preceding bytes, including the final LF, without
+a final newline. Readers reject corruption, duplicates, unsorted ids,
+and fetch records over `192 + 195 * 100000` bytes or 100,000 pack ids.
+An absent remote head clears processed ids and pending pairs, including
+records without a completed head. On a walk reaching a baseline, retain only
+processed ids and pending pairs listed by that chain, and discard queued
+retries of replaced packs. Incremental walks retain earlier processed ids; prune
+non-pending ids above 100,000. Pending pairs also have a 100,000 limit;
+excess pending subjects are rejected with a warning, while present subjects
+are still stored. Structurally failed chain walks record the observed head without processing any partial listing. Payload interruptions
+retain the preceding checkpoint and already processed packs.
+
+Push records have no pack-walk bound. Retain up to 1,000,000 sorted
+published ids, pruning higher ids when needed, while preserving the warning
+flag. Decode checks the full checksum and ordering even for pruned ids,
+without copying the input or allocating more than the retained set.
+Encode prunes to the same bound; file loaders MUST bound reads to the
+encoded maximum (`192 + 65 * 1000000` bytes), or stream and prune an
+oversized cache while retaining its header and warning flag. Pruning may
+repeat publication, never invalidate the permanent-publication warning.
+Losing a disposable cache only causes duplicate work.
+
+Before saving a fetched envelope, durably create its provenance marker at
+`attestations/.fetched/<att-id>` in the common directory. A marker's
+presence excludes the id from locally made envelopes. Remote removal and
+rename MUST retain markers. An unreadable marker MUST NOT confer local
+authorship. Unlike caches, provenance MUST NOT be discarded on corruption.
+The fetch cursor record must include attestation mode and observed head;
+changing mode or an incomplete attestation run invalidates cursor no-op.
+
+
 ## 2. Error taxonomy
 
 Implementations MAY wrap transport-specific errors internally but
@@ -176,7 +479,8 @@ TransportError::ConnectionFailed    // DNS / TCP / TLS / SSH spawn / mutex poiso
 TransportError::ServerError{status} // unexpected status code (transports without a status integer use 0)
 TransportError::InvalidResponse     // truncated frame, unknown opcode, bad JSON, mismatched server-returned digest
 TransportError::ProtocolError       // malformed frame, failed handshake
-TransportError::PayloadTooLarge(n)  // payload exceeded a transport-specific cap (see §4.4)
+TransportError::PayloadTooLarge(n)  // payload exceeded a size cap
+TransportError::Unsupported(reason) // local refusal before sending the request (see §4.4)
 TransportError::InsecureScheme      // plain http:// supplied for a non-loopback host
 ```
 
@@ -285,6 +589,17 @@ server sees an unambiguous end-of-stream. The server emits
 `UploadPackResponse{}` once `last=true` is observed and the bytes
 verify against the announced digest.
 
+The reference client reads each chunk from the pack's body (§1.1) as it
+sends it, so it holds one chunk, not the pack. `total_bytes` is the body's
+length. A body longer than `PACK_BODY_LIMIT` is refused with
+`PayloadTooLarge` before any byte of it is read and before any frame. A
+retried upload reconnects (§4.5) and reads the body again from offset 0, so
+every attempt sends the same bytes. A body that cannot be read, or ends
+before its length, is a local failure: the upload ends with
+`ProtocolError`, which is not retried. The client opens the body before it
+sends the header; once the header is sent, a failure makes it close the
+connection, since the server still waits for the rest of the upload.
+
 The server MUST reject malformed upload streams before storing bytes:
 `total_bytes` is required and MUST be within the server upload cap;
 every `PackChunk.pack_id` MUST match the `UploadPack.pack_id`; every
@@ -318,6 +633,26 @@ the `kit.repo.v1` multiplayer protocol uses for its own `UpdateRef`.
 A conforming server MUST treat `REF_EXPECTATION_UNSPECIFIED` (the
 zero value, sent when the client omits the field) as a protocol
 error and reply with `ERROR_CODE_INVALID_REQUEST`.
+
+An empty (or absent) `new_id` deletes the ref, and only under
+`REF_EXPECTATION_MATCH`:
+
+| Request | Reply |
+|---|---|
+| empty `new_id`, `MATCH h`, ref holds `h` | The ref is deleted; `UpdateRefResponse`. |
+| empty `new_id`, `MATCH h`, ref holds another value | CAS mismatch, as below: the current value in `details`. |
+| empty `new_id`, `MATCH h`, ref absent | CAS mismatch with empty `details`. |
+| empty `new_id`, `ANY` or `MISSING` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "a delete (empty new_id) requires a MATCH expectation" }` |
+
+A delete runs the same checks as any other write: the name grammar, the
+`refs/` prefix and the server's write policy. An absent ref has no current
+value to put in `details`, so a delete refused with empty `details` is
+ambiguous; the client reads the ref, and treats an absent ref as a
+`RefConflict` and a present one as the server's refusal, surfaced with its
+message. A server that predates deletes refuses an empty `new_id` with
+"new_id must be 32 bytes"; when the ref exists, that refusal reaches the
+user as "deleting `<ref>` failed: remote error: new_id must be 32 bytes",
+and nothing is deleted.
 
 A server serves only ref names under `refs/` (SPEC-REFS §2). An
 `UpdateRef` or `ReadRef` whose name passes the SPEC-REFS §3 grammar but
@@ -387,7 +722,7 @@ refs (§1.2). It treats the reply strictly:
   does its full work. Any other `Error` is an error.
 
 **Older peers.** A client that predates the request never sends it, so a new
-server serves it as before, and the golden sessions 1 to 3 are unchanged. A
+server serves it as before. A
 server that predates the request answers the unknown body with `Error {
 ERROR_CODE_INVALID_REQUEST }` and keeps the session open, so the client
 offers no cursor and its fetch works as it did. The failed request costs one
@@ -397,6 +732,50 @@ frame of the budget. Neither side needs a version or a capability field.
 listing. A server that holds back a changed cursor can equally hold back a
 changed ref. The fetch verifies every object and signature it applies, so a
 stale cursor can only leave the client at a state the server once offered.
+
+#### 4.2.3 `ListRefs` paging
+
+`ListRefs` lists one page of the refs under a prefix, in name order
+(SPEC-REFS §4.1). It carries the fields that Connect's `ListRefs` carries
+(SPEC-TRANSPORT-CONNECT §7.9), with the same field numbers:
+
+| Field | Message | Meaning |
+|---|---|---|
+| `page_size = 2` | `ListRefs` | The most refs the reply may hold. Required: an absent or zero value is refused. |
+| `page_token = 3` | `ListRefs` | The `next_page_token` of the page before. Empty starts the listing. |
+| `next_page_token = 2` | `ListRefsResponse` | Empty ends the listing. Any other value is the `page_token` of the next request. |
+
+The server answers with the refs after `page_token`, at most `page_size`
+and at most 1,000 (`MAX_LIST_PAGE_REFS`). Its `next_page_token` is the last
+name of the page, and it is set only when more refs follow. A page of 1,000
+names of the longest length (512 bytes) is about 560,000 bytes, so a page
+always fits one frame (SPEC-RPC §1). The token names no state of the session:
+it is a name, and the next page holds the refs that sort after it, whether
+the ref of that name still exists or not. So a listing carries on across a
+reconnect, and a ref that is created or deleted while the listing runs is
+shown or not, as in any listing that pages (§1.2). A token over 512 bytes is
+`Error { ERROR_CODE_INVALID_REQUEST, "invalid page token" }`.
+
+The client requests 1,000 refs a page and takes pages until one has no
+`next_page_token`. It checks each page as the Connect client does
+(SPEC-TRANSPORT-CONNECT §7.9): the names are in strict order, within a page
+and across pages, a token never repeats, and the listing is bounded in pages
+and in bytes. A listing that breaks a rule is an `InvalidResponse`. Each page
+is a request frame and a response frame of the per-connection budget (§4.4).
+
+**Older peers.** A server that predates paging ignores the two new request
+fields and sends the listing in one frame with no `next_page_token`, which
+the client takes as a listing of one page. It still fails, as before, when
+the listing does not fit one frame. A client that predates paging sends no
+`page_size`. A new server refuses it with `Error { ERROR_CODE_INVALID_REQUEST,
+"list refs needs a page_size; upgrade the client" }` and keeps the session
+open. It does not answer with a first page, because that client would take
+the page for the whole listing and could prune against it. Every listing of
+such a client fails, so the client has to be upgraded: kit keeps no fallback
+for it. A client of this version that pushes tags to a server that predates
+paging no longer bounds the remote's tag listing to one frame, so a listing
+that grows past one frame fails for every client of that server until the
+server is upgraded.
 
 ### 4.3 Trust model
 
@@ -431,8 +810,8 @@ The `kit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
 [`kit-serve/src/budget.rs`](../../rust/crates/kit-serve/src/budget.rs)):
 
-- `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
-- `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
+- `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on top-level frames after `Hello`.
+- `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on estimated request bytes.
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
 closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
@@ -440,28 +819,37 @@ names it: `per-connection frame budget exceeded: at most 10000 frames per
 session (SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
-frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+frame cap. A fetch costs the `ListRefs` frames of the branch listing (one per
+1,000 branches, §4.2.3), then per branch a `ReadRef` of
 the packmap and a `DownloadPack` of each node of its packmap chain, even when no
 branch changed: the SSH transport names no repository, so a fetch keeps no
-per-branch checkpoint for it and walks each packmap chain again. With one node
-per packmap chain that is one frame plus two per branch, so one session fetches
-at most 4,999 branches; a fetch of more fails closed with the reply above.
+per-branch checkpoint for it and walks each packmap chain again. The tag phase
+(§1.4) adds one `ListRefs` of `refs/tags/`, and one of `refs/kit/tagmap/` only
+when some tag is not yet proved from local objects. With one node per packmap
+chain and no new tag, 4,997 branches use all 10,000 frames: five listing pages,
+two frames per branch and the tag listing. Additional
+requests require a fresh session. A clone of many individually pushed
+annotated tags can also take multiple sessions as it downloads their nodes
+and packs. Tags pushed together share a node and pack.
 When the served repository offers a cursor (§4.2.2), a fetch that finds the
 cursor it recorded after its last complete fetch costs one frame, the
-`ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A
-fetch that finds another cursor, or none, works as above. A server that
-predates the request makes every fetch work as above, plus one frame.
-`kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole packmap chain over its session. A push re-baselines the
-chain (§7.2), so the walk stays within the re-baseline depth while one node
-can list the chain's packs. Past that, a push's frames grow with the number
-of pushes the branch has had. The cap is not raised: it is what bounds
-a client that sends requests without end.
+`ReadRepoCursor` request. A fetch that finds another cursor, finds none, or
+uses a server that predates the request can use the full session budget.
+A push walks the branch's packmap chain. Re-baselining (§7.2) keeps the
+chain short while one node can list its packs. A push that walks a longer
+chain or an attestation transfer that walks a long log can need more than
+one session. Each page of a ref listing is one request, so a listing of
+100,000 refs is 100 frames of the budget, and paging itself leaves the budget
+to the per-branch requests.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
+
+The byte count starts after `Hello`. An upload header costs its declared
+pack length and covers the chunks that follow. Each other request costs
+64 bytes. A request that takes the count exactly to 1 GiB fits.
 
 The budgets bound how much a client can make the server do; an idle
 timeout bounds a client that goes silent. `kit serve` ends a session after `--idle-timeout-secs`
@@ -480,16 +868,29 @@ The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;
 pack data flows through `PackChunk` streams to stay under that limit.
 
+For a pack over the 1 GiB upload limit, the SSH client returns
+`TransportError::Unsupported` with the limit in the message. It refuses
+before opening the pack body or sending its header.
+
 Client side, the SSH transport applies the
 `PACK_BODY_LIMIT = 4 GiB` cap on `download_pack`. A server-advertised
 `DownloadPackHeader.total_bytes` greater than 4 GiB is rejected
-before any allocation; if the announced size is honest but the
-streamed chunks overshoot, the running total check terminates the
-read mid-stream rather than letting the `Vec` grow without bound.
-Both paths surface as `TransportError::RemoteError` with a message
-mentioning the client cap.
+before the sink's `begin`, as `TransportError::RemoteError` with a
+message mentioning the client cap. The header's length goes to
+`begin`, so a sink with a smaller limit refuses the pack before any
+chunk is read; chunks past the declared length or the sink's limit
+stop at the sink as `TransportError::PayloadTooLarge`.
 
 ### 4.5 Retry / reconnect
+
+When the next request would exceed either session budget in §4.4, the
+client closes the current session and starts a new one with `Hello` before
+sending that request. An upload counts as one top-level frame and stays
+on one session. At the 1 GiB byte limit, the client needs at most 1,311
+chunk frames, within the server's separate upload chunk cap. The client
+refuses a larger upload before reading the pack or sending its header.
+A reconnect for budget rollover continues with the next request. The push
+publishes its refs after uploading all required data packs and the packlist.
 
 `SshTransport` is connection-oriented (a single long-lived `ssh(1)`
 child), so honoring the §7 retry ladder for `ConnectionFailed` takes
@@ -503,6 +904,7 @@ that finds the connection `closed` first respawns `ssh` from the
 original `target`/`options` and redoes the `Hello` handshake before
 re-issuing the verb against the fresh child. `upload_pack` is
 content-addressed and safe to resend in full on the new connection;
+each new attempt reads the pack's body again from offset 0.
 `update_ref` is not idempotent across retries per §7, so a CAS write
 that returns `RefConflict` still requires the caller's `read_ref`
 disambiguation.
@@ -591,33 +993,29 @@ surfaces `TransportError::AccessDenied`.
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
 | `Missing`    | `If-None-Match: *` | The store MUST honor this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. Multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. |
 
 `409` and `412` → `RefConflict`; never retried.
 
+`delete_ref` and `delete_refs` are refused with "the s3 transport cannot
+delete a ref conditionally", before any request. `push --delete` reads the
+refs first, so it sends reads but no write. The transport does not
+probe whether a store honors `If-Match` on `DELETE`, and a store that
+ignored it would delete without a check. So `push --delete` to an S3 remote
+deletes nothing, branch or tag.
+
 `upload_pack` carries no `RefWriteCondition` &mdash; packs are content-addressed
-and every write is either a plain unconditional `PUT` (below the
-single-PUT cap) or the multipart path of §6.7, which uses
-`If-None-Match: *` on `CompleteMultipartUpload` rather than any
-`Match(h)`-style condition. See §7.1 for the resulting CAS-guarantee
-note on large packs.
+and every write is one plain unconditional `PUT` (§6.7).
 
 ### 6.4 Limits
 
-- `S3_SINGLE_PUT_MAX = 5 GiB` &mdash; packs at or below this go through a
-  single `PUT`; anything larger goes through the multipart path (§6.7).
 - `PACK_BODY_LIMIT = 4 GiB` &mdash; the absolute pack-body ceiling enforced
   on both `upload_pack` and `download_pack` (every transport that
   ingests or emits pack bytes shares this limit; see
   [`kit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/kit-core/src/protocol.rs)).
-  On a 64-bit target this is smaller than `S3_SINGLE_PUT_MAX`, so in
-  today's builds it &mdash; not the single-PUT cap &mdash; is what actually bounds
-  a pack's size; §6.7's multipart path exists for API correctness and
-  for targets/future revisions where `PACK_BODY_LIMIT` is raised or
-  not the binding constraint (for example a 32-bit target, where
-  `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
-  becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
-  streaming/constant-memory `Transport` redesign, which is out of scope here.
+  `upload_pack` refuses a longer body with `PayloadTooLarge` before it
+  reads it. The limit is below S3's 5 GiB cap on one `PUT`, so every pack
+  goes up in one `PUT` (§6.7).
   A writer applies the limit whether or not the remote advertises
   `max_pack_bytes`: it seals no pack above `min(advertised, PACK_BODY_LIMIT)`,
   so a pack that was uploaded can be fetched. The `kit+file://` transport
@@ -626,7 +1024,16 @@ note on large packs.
   body other than the 65-byte ref wire is rejected after it.
 - `REF_LIST_BODY_LIMIT = 16 MiB` for the `ListObjectsV2` XML
   response.
-- HTTP timeout: 60 s per request.
+- These limits bound a success's body. An error answer's body is never
+  read: the status alone gives the error. A store's error document can be
+  longer than the success it stands for (a missing ref's `NoSuchKey`
+  document names the key, the request and the host), and a limit must not
+  turn a `404` into `PayloadTooLarge`.
+- HTTP timeout: 60 s for a request up to its response headers, and 60 s
+  for each read of a response body. A pack `PUT` has no total bound: it
+  fails once 60 s pass with no byte of its body taken and no answer, and is
+  retried like a lost connection. A slow upload that keeps moving finishes
+  a pack of any size.
 
 ### 6.5 Retry
 
@@ -660,44 +1067,46 @@ bucket. The client runs `verify_sparse` on the decoded result.
 The object key already encodes the filter hash, so the client sends no
 `?sparse=<filter-hex>` query. The SigV4 canonical request stays tight.
 
-### 6.7 Multipart upload
+### 6.7 Pack transfer
 
-`upload_pack` for a pack larger than `S3_SINGLE_PUT_MAX` (§6.4) uses
-the standard S3 multipart-upload API instead of a single `PUT`:
+Neither direction holds a pack in memory.
 
-1. `POST <key>?uploads` &mdash; `CreateMultipartUpload`. The response body's
-   `<UploadId>` addresses the rest of the sequence.
-2. `PUT <key>?partNumber=<n>&uploadId=<id>` once per fixed-size part
-   (`n` starting at 1), body = that part's raw bytes. The response
-   `ETag` header is recorded for step 3. Each part is retried
-   independently through the same backoff ladder as every other S3
-   call (§6.5/§7) &mdash; a transient failure on one part does not require
-   restarting the upload from part one.
-3. `POST <key>?uploadId=<id>` &mdash; `CompleteMultipartUpload`, body a
-   `<CompleteMultipartUpload>` manifest listing every part number and
-   its `ETag`. Carries `If-None-Match: *` (see §6.3's note on why
-   `Match(h)` doesn't apply here).
-4. On any terminal failure in steps 2–3 &mdash; a part exhausting its
-   retries, or `CompleteMultipartUpload` failing for a reason other
-   than `409`/`412` &mdash; `DELETE <key>?uploadId=<id>` (`AbortMultipartUpload`)
-   before returning the error, so a partial attempt does not leave
-   orphaned parts (and their storage cost) in the bucket. `409`/`412`
-   on `CompleteMultipartUpload` also triggers the abort (the object
-   was never materialized), but is not itself an error &mdash; see below.
+**Upload.** `upload_pack` makes one pass over the pack's body (§1.1) to
+compute its SHA-256, the SigV4 payload hash (`x-amz-content-sha256`). It
+then sends one `PUT` of `Content-Length` equal to the body's length, whose
+body streams from the pack's body read again from offset 0. Every attempt
+of the §6.5 ladder reads the body again from offset 0 and sends the same
+bytes under the same payload hash. The store checks the bytes it receives
+against that hash, so a body that changed between the hash pass and the
+send is refused (`400`), and nothing is stored. A body that cannot be read,
+or ends before its length, during either pass is a local failure:
+`upload_pack` returns `ProtocolError`, which is not retried, and a `PUT`
+in progress ends unfinished. The reference client reads the body in
+256 KiB chunks and keeps at most two queued ahead of the request.
 
-Every part except the last MUST be at least 5 MiB (an S3 API
-requirement); the implementation's fixed part size (64 MiB in
-production) satisfies this for any part but the last.
+**Download.** `download_pack` sends one `GET`. Only a `200` answer's body
+reaches the sink: its `Content-Length`, when present, goes to `begin`
+before any byte is read, so a pack over `PACK_BODY_LIMIT` or the sink's
+limit is refused unread, and each piece of the body is written to the sink
+as it arrives. Any other answer's body is never read (§6.4). A retried
+attempt begins the sink again, unless it continues the body.
+`download_blob` is the same `GET` into a sink limited to the caller's bound.
 
-**Idempotency and the `409`/`412` case:** because pack objects are
-content-addressed and immutable, an existing object at the target key
-is guaranteed to hold identical bytes to whatever this upload would
-have produced. A `409`/`412` on `CompleteMultipartUpload` (the
-`If-None-Match: *` precondition losing a race against an earlier,
-identical upload of the same digest) is therefore treated as the
-idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
-not a caller-visible error &mdash; matching the single-PUT path's
-unconditional-overwrite behavior for the same scenario.
+**Continuing a download.** When an attempt fails after some bytes and the
+sink still holds them (`PackSink::retained`), a client MAY ask for the rest
+instead of reading the pack again from its start, if the `200` answer had a
+strong `ETag` (not starting `W/`) and a `Content-Length`. The retry is a
+`GET` with `Range: bytes=<n>-` for the `n` bytes held and `If-Match` with that
+`ETag`. The client MUST take the body only from a `206` whose `ETag` is the
+first answer's, whose `Content-Range` is `bytes <n>-<total-1>/<total>` for the
+first answer's length, whose `Content-Length` is `total - n`, and that has no
+content coding. A `200`, a `412`, a `416` or a `206` that fails a check reads the
+pack again from its start: a `200` is taken whole and begins the sink again, and
+the others are followed at once by a `GET` with neither header. Any other status
+is handled as for a first request, and a retry may continue again. The sink keeps the prefix and its hash, and
+the caller still checks the whole pack against its key, so a prefix that was not
+the pack's own fails there. A transport reports a continuation, and why it read
+again from the start, to the sink (`PackSink::note_resume`).
 
 ### 6.8 Repository cursor
 
@@ -774,7 +1183,9 @@ caller obligations are therefore:
 - On `HeadConflict` or `PackmapConflict` from `advance_refs`, the caller
   MUST likewise read the ref whose precondition failed. A packmap that
   already holds the caller's node means only the head write remains; a
-  head that already holds the caller's value means the advance landed.
+  head that already holds the caller's value can indicate the advance
+  landed. A branch push also checks that the corresponding packmap exists
+  before treating the advance as complete.
 - `update_ref` with `Any` may be re-issued freely: it writes the same
   value again. Like any `Any` write, it can overwrite a value another
   writer stored between the two attempts.
@@ -794,6 +1205,17 @@ that ledger.
 same bytes produces the same digest and is a no-op on the server
 side).
 
+A transport stores a pack whole or not at all: a file or ssh remote renames
+a finished temporary file into place, and an S3 `PUT` takes effect when it
+completes. A pack key is the digest of the pack's bytes, so `pack_exists`
+true names a complete pack with those bytes. A push to a remote that issues
+no upload tickets (S3, file, ssh) therefore checks a sealed pack of 8 MiB or
+more with `pack_exists` first and does not upload one the remote holds; a
+re-run of a failed push sends only the packs it missed. A check that fails
+for any reason counts as "not stored", and the push uploads. Kit deletes no
+pack on these remotes, so no cleanup can run between the check and the ref
+write.
+
 `download_pack` and `pack_exists` are pure reads; no idempotency
 concerns.
 
@@ -803,22 +1225,14 @@ concerns.
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
 | File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive lock on the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock` (via `std::fs::File::lock`), with the repo lock `<root>/.kit/refs/.lock` held shared, wraps a read-then-`write_atomic` (SPEC-REFS §5.1.1); in-process locks keep multi-threaded callers within one process from contending on the OS locks | Yes |
-| S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes (S3 multipart breaks `Match` &mdash; see §6.3) |
+| S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
 `upload_pack` itself carries no `RefWriteCondition` (it addresses
 content by digest, not by a caller-supplied CAS condition), so the
 table above &mdash; `Missing`/`Match(h)` &mdash; describes `update_ref` only.
-For packs large enough to cross `S3_SINGLE_PUT_MAX` (§6.4), the S3
-transport's multipart path (§6.7) downgrades even the informal
-CAS-adjacent guarantee the single-PUT path gets for free: a plain
-`PUT` is atomic (the object either fully exists with the uploaded
-bytes or doesn't exist at all), while a multipart upload's
-`CompleteMultipartUpload` only supports `If-None-Match: *`
-(existence-only) &mdash; never `If-Match(h)` &mdash; because a multipart `ETag`
-is not the body MD5. This is an accepted downgrade specific to large
-S3 packs; content-addressing (§8) makes it safe (see §6.7's
-idempotency note).
+An S3 pack is one `PUT` (§6.7), which is atomic: the object either holds
+all the uploaded bytes or does not exist.
 
 ### 7.2 Two-ref advance and the packmap reset
 
@@ -849,7 +1263,11 @@ condition, as an append is. Its packmap write is conditioned on the chain
 head the push read, and a push that loses that write reads the chain and
 decides again. A re-baseline lists at most 4,096 packs
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md)). A chain that
-holds more with the new packs keeps appending.
+holds more with the new packs keeps appending. A branch push MUST NOT
+append a node that makes the chain longer than a fetch walks: more than
+100,000 nodes or 1,000,000 listed packs, a pack listed twice counted twice
+([SPEC-PACKFILE](SPEC-PACKFILE.md#fetch-resource-limits)). It refuses that
+advance before it uploads the node. Tag map writes are not bounded this way.
 
 A reset replaces a chain with a node that does not list every pack of that
 chain, so it is not a superset. The reference push driver resets only a
@@ -871,26 +1289,147 @@ plan may send an object the remote holds. It never omits one the remote lacks.
 A push conditioned on `Missing` or `Match` MUST plan only
 against a head its condition holds for. When the head it reads fails the
 condition, the push is refused as a non-fast-forward before it plans,
-unless that head is already the new head, in which case an earlier
-attempt landed and the push writes nothing. A retry that plans the full
+unless that head is already the new head and its packmap exists. In that
+case the previous advance can be treated as complete. A retry that plans the full
 closure of the new head depends on no head and reads none. A condition that differs from
 the planned head could hold again after the head moves away and back while
 a reset drops what the plan left out, and the advance would then publish a
 head its chain cannot reconstruct, on every kind of advance.
 
-A force push (`Any`) never requests a reset. On a serialized or an atomic
-advance it uses the guarded force driver: it conditions the packmap write
-on the chain its plan read, and plans again when that chain no longer
-contains the node the plan depended on, so it never appends packs whose
-bases a concurrent reset dropped. A re-baseline replaces that node too, so
-a force push plans again after one. On an ordered advance no reset happens
-except over a broken chain, and a force push appends on the ordered path.
+A force push (`Any`) never resets a valid chain. On a serialized or atomic
+advance it conditions the packmap write on the chain its plan read. If
+that chain no longer contains the node the plan depended on, the push plans
+again. A reset or re-baseline can remove that node. On an ordered or
+serialized advance, a force push leases the head it read and plans again
+if another writer moves it. A plan that depends on a previous head cannot
+start a new packmap chain.
+
+A push that recreates a missing branch MUST publish a new packmap value
+before or atomically with the head. When the existing chain already lists
+every required pack, publish a node with that chain as its predecessor
+and an empty pack list. A pending delete's compare-and-swap on the old
+packmap then fails. If the head already equals the pushed tip but has no
+packmap, push rebuilds the tip's full closure and publishes its packmap
+under a lease on the observed head.
+
+**Tag maps.** A tag push moves `refs/tags/<t>` and its tag map
+`refs/kit/tagmap/<t>` (§1.4) as a branch push moves a head and its
+packmap: the tag map first, then the tag, with `advance_refs` on the
+transport's advance kind. When the tag resolves to `v`, the tag map's
+chain rebuilds the closure of `v`. Every tag map write is a create
+(`Missing`) or an append whose node's `prev` is the value it replaces,
+written under `Match` on that value, and covers both the remote tag's
+current value and its new value. A tag map is therefore a superset of
+every value its tag held, a reader of an earlier value is still served in
+whatever order the two refs land, and a crash between the writes leaves
+nothing to clean up. That holds against tag pushes. On an ordered advance,
+a tag written without its tag map by anything else between the two writes
+is not covered, the same window a branch push has. A tag map is never
+re-baselined or reset.
+
+A tag map create may **graft**: its node's `prev` names the packmap node
+of one of the remote's branches, and several tag maps may name the same
+node. A tag chain never grafts on another tag chain. The push finds the
+base by walking each tag's peeled commit backward to the nearest commit
+that is the local tracking tip of one of this remote's branches, at most
+100,000 commits not seen before per tag. Unless the tag's commit is itself
+such a tip, the push first walks the tips' own histories, once per push and
+at most 100,000 commits, so that the walk back stops at the first commit a
+branch holds: a tag below a branch tip, or on a fork of that branch's
+history, grafts on that branch. It reads that branch stably: its
+head, then its packmap `p`, then its head again, up to eight times, and
+uses the base only when both head reads agree on a commit the local store
+holds. A branch whose read gives no base is passed over for the next
+branch at the same tip or below the tag, and the tips' histories are walked
+again without it, at most eight times per push. Two equal head reads do not
+rule out a head that moved away and back
+around a reset of its chain: a fetch then refuses a tag grafted in that
+window, and loses nothing. Tags that share a base form one group. A group is planned once,
+against that head, under one node `{prev: p, packs}` that every tag of the
+group takes as its tag map, or takes `p` itself when the plan is empty.
+Without a base the node has no `prev` and lists the full closure. The
+base changes only how much is sent, never what a reader can rebuild.
+
+For each tag with local value `v`, from the remote tag `T` and tag map
+`M` it reads:
+
+| Remote `T` | Remote `M` | Push |
+|---|---|---|
+| absent | absent | Create: tag map `Missing`, then tag `Missing`. |
+| absent | present | Append to `M` a node of the full closure of `v` under `Match(M)`, then tag `Missing`. |
+| `v` | present | Up to date. |
+| `v` | absent | Repair: tag map `Missing`, then tag `Match(v) → v`. |
+| other | any | Refused, unless forced. |
+| other, forced | present | Append to `M` a node planned against `T` when the local store holds `T`'s whole closure, else the full closure of `v`, under `Match(M)`; then tag `Match(T)`. When that plan is empty, `T`'s history holds all of `v`'s and `M` already rebuilds `v`, so the tag moves alone under `Match(T)`. |
+| other, forced | absent | Tag map `Missing` on a node whose plan includes `T`, then tag `Match(T)`. Refused when the local store lacks `T` or its closure. |
+
+A forced update conditions on the value it read, never `Any`. When a tag
+map write reports a conflict and a read shows the tag map already holds the
+push's own node with the tag absent, as after a retried write whose answer
+was lost, a push whose tag condition is `Missing` writes the tag alone
+under `Missing`. A tag read back at the pushed value with no tag map is a
+conflict, so the next decision repairs it. A push
+refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
+would not be a valid ref name, an annotated tag whose object names
+another tag, and an unsigned annotated tag. A
+conflict reads that tag again and decides again, at most eight times.
+
+### 7.3 Deleting a head and its chain ref
+
+`push --delete` removes a branch `refs/heads/<b>` with its packmap
+`refs/kit/packmap/<b>`, or a tag `refs/tags/<t>` with its tag map
+`refs/kit/tagmap/<t>`. Both go under `Match`, the head first:
+
+- **Branch.** The head's expected value is the tracking ref, the lease a
+  push uses. A branch with no tracking ref is refused: fetch first. After
+  the delete, the tracking ref and its fetch record go too.
+- **Tag.** A tag has no tracking ref, so its expected value is the one just
+  read. The delete removes whatever the remote held a moment earlier, like
+  git's `push --delete`; the `Match` still stops it from removing a value
+  written in between.
+- **Chain ref.** Its expected value is the one just read. A tag whose tag
+  map name is no valid ref has no tag map and goes alone.
+- **A short name.** `push --delete <remote> <n>` deletes the remote's branch
+  or tag named `<n>`. A name the remote holds as both is refused; name
+  `refs/heads/<n>` or `refs/tags/<n>`. A name it holds as neither is still
+  a branch when a tracking ref names it, so that the tracking ref goes.
+
+A head that holds another value is a conflict, and nothing is deleted. A
+tag the remote does not hold is refused before any write, and so is a branch
+with no tracking ref. A head that is absent when the delete reaches it, a
+leased branch or a tag read a moment earlier, is gone, as asked: the delete
+reports it with no value, and drops a branch's tracking ref. This covers
+another writer's delete and a retried delete whose answer was lost; in the
+second case the chain ref may stay behind, as after a crash.
+
+Once the head is gone the delete has happened. A crash before the chain ref
+goes, or a lost CAS on it, leaves a chain ref without its head. A fetch reads
+it as a stale listing and publishes nothing for it. A branch push that
+recreates the head moves the packmap as specified in §7.2, so a pending
+delete cannot remove the new value with its old lease. A tag push uses the
+leftover row of §7.2. Deleting the head first preserves the chain while
+the head is published.
+
+A transport that deletes both refs in one transaction (Connect, one
+`AdvanceRefs` with `delete`, SPEC-TRANSPORT-CONNECT §7.8) deletes both or
+neither. When the chain ref moved, it reports `PackmapConflict`; the client
+reads the chain ref again and retries, at most eight times. S3 refuses every
+delete (§6.3).
+
+| Transport | `delete_ref` |
+|---|---|
+| Memory | `Mutex`-protected compare and remove |
+| File | Under the exclusive repo lock `<root>/.kit/refs/.lock`, which also lets it prune the empty directories the ref leaves; bumps the ref's stripe, so the cursor changes |
+| SSH | `UpdateRef` with an empty `new_id` under `MATCH` (§4.2.1) |
+| S3 | Refused before any request of its own (§6.3) |
+| Connect | `UpdateRef` with `delete`; `delete_refs` is one `AdvanceRefs` with `delete` |
 
 ---
 
 ## 8. Pack format
 
-`upload_pack` and `download_pack` move opaque pack bytes. The pack
+`upload_pack` and `download_pack` move opaque pack bytes, through a
+`PackBody` and a `PackSink` (§1.1). The pack
 format itself (object index, delta encoding, and chunk store) is
 defined in [SPEC-PACKFILE](SPEC-PACKFILE.md). Transport
 implementations MUST NOT inspect or rewrite pack bytes.
@@ -940,24 +1479,64 @@ These hold for every conformant transport, regardless of scheme:
 | Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §6.3); conflict → `RefConflict`; 409/412 never retried (§6.5, §7.1) |
 | A retry never duplicates a conditional ref write | a landed attempt falsifies the precondition its re-issue carries; 4xx is not retryable; on `RefConflict` (or an `advance_refs` conflict outcome) callers MUST `read_ref` before reporting a conflict (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
-| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` used by the SSH frame loop (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §6.4); ref/list body caps (§6.4) |
-| `*_streaming` is additive &mdash; no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |
-| A `PackChunk` stream never ends silently without a `last = true` item | `upload_pack_streaming` (all overrides) rejects a stream that ends without one; `download_pack_streaming` overrides read the server's own `last` flag (§1.1, §4.2, §6) |
+| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` used by the SSH frame loop (§4.4); `PACK_BODY_LIMIT` 4 GiB checked before the body and against the bytes taken (§4.4, §6.4); ref/list body caps (§6.4) |
+| A body over a sink's limit is refused before its first byte when its length is known | transports pass a known length to `PackSink::begin` before they read the body (§1.1) |
+| A download never ends silently short | a sink takes exactly the declared length; SSH reads the server's `last` flag (§1.1, §4.2) |
+| A local disk error is never retried and never falls back | `PackSink::failed()` stays set and `begin` refuses after it with `ProtocolError`, which is not retryable (§1.1, §7) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 
-Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
-the normative summary is the table in §7.1.
+Per-transport CAS strength differs; the normative summary is the table
+in §7.1.
 
 ### Pack-chain fetch
 
 Fetch MUST authenticate each requested pack and pack-list node before decoding
 or applying it. The CLI downloads the missing packs of a chain one at a time
-in chain order. It authenticates each pack, unpacks it into the object store,
-checks the signatures of the objects it wrote, records it as applied, and
-drops it before the next download. Nothing is staged on disk, and no
-repository lock is held while the packs download and apply, so other commands
-run during a fetch of any size. The CLI limits chain packs to one million and
-pack-list nodes to 100,000.
+in chain order. It spools each pack into an unnamed file in `.kit/tmp/`,
+checking its length, its digest and its trailer as the bytes arrive. Only a
+pack that passes all three is read. Close its spool before downloading
+the next pack. A partial spool is never read. On Unix a killed fetch
+leaves nothing in `.kit/tmp/`. On Windows a power loss can leave a
+spool there until the next fetch, push or gc removes it (§1.1).
+Downloads and apply hold no worktree lock. The CLI limits chain packs
+to one million and pack-list nodes to 100,000.
+
+Fetch and clone pack every fetched object whose serialized size is at
+most 262,154 bytes, whatever its kind or its use as a chunk. That is the
+largest FastCDC chunk, 262,144 bytes (SPEC-FASTCDC), plus the ten-byte
+blob prologue, so every chunk a kit writer cuts is packed. A larger object
+stays loose: a whole-file blob of more than 262,144 content bytes, a large
+tree or manifest, and a larger chunk of a fixed-size layout. The limit is
+writer policy. Readers accept any storable object in a pack
+([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)). Local creation
+and import write loose objects, and reuse an existing loose or packed copy
+instead of writing a second one (SPEC-OBJECTS §10.1).
+
+Fetch stages accepted objects in publication windows. The current writer
+seals at 64 MiB of decoded serialized bytes or 65,536 entries. These
+limits are writer policy. A window can span several remote packs. Seal
+the current window before adding an object that would pass either limit.
+A larger loose object occupies a window by itself. Seal a final partial
+window before closing the branch or tag batch.
+Respect the local pack caps and any lower staging-memory bound. Publish
+one local pack for the window's eligible objects when `P` is active and
+commit its loose writes using [SPEC-OBJECTS §10.1](SPEC-OBJECTS.md#101-durability).
+A window with no eligible objects needs no local pack. In loose storage,
+a window may also close when it completes a wire pack. The cadence fixes
+when progress is durable. Flush batching and decode-window sizes remain
+implementation choices.
+
+The writer includes each eligible id once per local pack, even if
+another location holds that id. During private decoding, resolve delta
+bases from the store, accepted objects in the open publication window,
+and earlier decoded objects in the same remote pack. Verify the
+type-dependent id of a base read back from pending storage before
+using it. Required signature checks see the same combined view. Before
+publishing any window, enforce SPEC-PACKFILE §6.1 for each remote pack
+that contributes objects to it. Keep
+provisional data private and discard it on refusal. Private staging or
+a verification pass over the spool can meet this rule without holding
+all decoded bytes in memory.
 
 The fetch takes the repository's prune guard, a shared lock on the `format`
 file, before it reads its record of applied packs, and holds it until after
@@ -969,16 +1548,51 @@ ref write and the checkpoint. It waits for that lock with no deadline, tells
 its observer once that it waits, and stops on an interrupt, because its
 downloads are done and a timeout would discard them.
 
-The applied-pack record gains a line for each pack as the pack is applied,
-after the pack's objects are committed and its signatures are checked. A
-fetch that dies resumes after its last applied pack. A failed, interrupted or
-killed fetch leaves the packs it applied in the store and in the record, with
-no ref naming their objects. A later `gc` may prune those objects. The record
-is then stale, and the next fetch repairs the store: when a run that skipped
-a recorded pack finds an object missing, whether a delta base during unpack
-or an object of the tip's closure, it clears the record and applies the whole
-chain again, once. Every other failure propagates. A failed download, digest
-check, write or apply publishes no ref.
+Record the **remote** pack key as applied once every window of that
+pack, including its loose writes, is durable and its required signature
+checks pass. Record every remote pack a window completes before
+proceeding. The last object of a small pack can wait for a shared window
+to seal. A fetch or resumed clone can skip recorded packs. A crash can
+leave published windows of a remote pack with no record entry for it.
+A retry can download and apply that pack again.
+A closing closure or tip-history error leaves accepted windows in the
+store and publishes no ref for the failed tip. Objects in completed
+packs can remain unreferenced. Gc can prune their loose entries.
+If a run skipped a recorded pack and finds a missing delta base or a
+missing object in the tip's closure, it clears the stale record and
+applies the whole chain again once. This retry handles missing objects
+found during fetch. Local diagnostics invalidate fetch shortcuts under
+§1.2. An unresolved local integrity error propagates with repair information. Other failures also propagate.
+A local spool or store write error ends the fetch as a local I/O error
+and is never retried at another location. A spool error names
+`.kit/tmp/`.
+
+After a successful remote ref advance, push records its own data-pack
+keys as applied for that remote once it holds their objects durably.
+Before adding a key to the object `AppliedPacks` record, push MUST verify the
+pack's commits, remixes, and tags under the same checks a fetch applies
+with signature checking enabled. If the pack cannot pass those checks,
+omit its key. A later fetch with signature checking enabled therefore
+cannot skip an unchecked push. If persisting that record fails, the next
+fetch can download the pack again. The remote ref advance still stands.
+Push produces wire packs using the existing transport encoding.
+
+The closure check before ref publication stops at its anchors. With
+signature checking on, an anchor is the tip of a tracking ref of the fetched
+remote when the record of verified tips names that tip for the same branch
+and the store holds it, read once the prune guard is held. A tip the fetch
+has published is one too. A fetch writes that record only right after it
+published the ref over a checked closure; a push, a `git import` or a fetch
+with the opt-out moves the ref and not the record. gc keeps what a ref
+reaches, and the guard keeps gc from deleting anything after the read, so an
+anchor's closure is in the store. The check walks the commit history of the
+tip and of the anchors together, newest first, and stops when every commit
+still queued is an ancestor of an anchor; those ancestors are not checked. It
+also skips each ID listed by a tree of an anchor's closure that it reads
+while comparing each new commit's tree with its parents' trees, by path.
+Every other object of the tip's closure is checked. A clone, or a fetch with
+signature checking off, starts with no anchor and checks the first branch's
+whole closure; the retry of a repair always checks the whole closure.
 
 Stored-object ID lists are checked per pack and are not accumulated over the
 chain. The closure check before ref publication reads the type of each chunk
@@ -987,6 +1601,16 @@ commits, trees, blobs and chunked-blob manifests only. It remembers at most
 2,097,152 checked chunk IDs; past that, a chunk is checked again for each
 manifest that names it.
 
-Unpack working memory remains bounded by one pack, rather than total
-chain payload size. This is not a chunk-streaming pack parser and does not
-claim a small fixed RSS ceiling.
+A tag map chain (§1.4) applies the same way. Its walk stops at the nodes of
+the chains this fetch applied and at checkpoint heads, so a chain that grafts
+on a branch chain downloads only its own nodes and packs. The tag phase
+self-heals at most once per fetch, so a remote whose every tag lacks an object
+costs one full walk, not one per tag.
+
+A fetch bounds resident decoding to one decode window of one remote pack,
+except over a transport that buffers the body (§1.1). Pending publication
+data can live on disk. The signature check
+reads only the commits, remixes and tags a pack supplies, in runs whose
+objects together stay within 256 MiB, charged twice their size; one object
+over that is checked alone. What still grows with a pack is per-object
+bookkeeping, a few hundred bytes for each entry.

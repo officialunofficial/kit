@@ -21,4 +21,4 @@ pub use refs::{MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, is_
 pub use repo::{OpenError, RefUpdate, Repo, WritePolicy};
 pub use session::{FrameIoError, FrameSink, FrameSource, SessionConfig, SessionEnd, serve_session};
 pub use upload::UploadLimits;
-pub use verbs::cas_conflict_body;
+pub use verbs::{DELETE_NEEDS_MATCH, LIST_NEEDS_PAGE_SIZE, MAX_LIST_PAGE_REFS, cas_conflict_body};

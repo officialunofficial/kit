@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
-use super::{LenCache, Tuning, chunk_blob_len, walk_chunks};
+use super::{LenCache, Tuning, chunk_blob_len, try_each_in_order, walk_chunks};
 use crate::hash::{self, Hash};
 use crate::object::{Blob, ChunkedBlob, KitError, Object, Tree};
 use crate::serialize;
@@ -57,7 +57,7 @@ fn serial(
 /// Chunks a manifest can list: blobs of known length, a tree (not a blob), and
 /// an id the store lacks.
 struct Pool {
-    _dir: TempDir,
+    dir: TempDir,
     store: ObjectStore,
     blobs: Vec<(Hash, u64)>,
     tree: Hash,
@@ -65,9 +65,19 @@ struct Pool {
 }
 
 /// The pool the random walks share: 64 blobs, so a round holds many reads.
-fn shared_pool() -> &'static Pool {
-    static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| pool(64))
+fn with_shared_pool<R>(use_pool: impl FnOnce(&Pool) -> R) -> R {
+    thread_local! {
+        static POOL: Pool = pool(64);
+    }
+    POOL.with(use_pool)
+}
+
+#[test]
+fn shared_pool_is_removed_when_the_thread_ends() {
+    let path = std::thread::spawn(|| with_shared_pool(|pool| pool.dir.path().to_path_buf()))
+        .join()
+        .unwrap();
+    assert!(!path.exists(), "shared pool left at {}", path.display());
 }
 
 /// A pool of `count` distinct blobs.
@@ -86,7 +96,7 @@ fn pool(count: usize) -> Pool {
         .write(&serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap())
         .unwrap();
     Pool {
-        _dir: dir,
+        dir,
         store,
         blobs,
         tree,
@@ -183,52 +193,54 @@ proptest! {
         skip_every in 0usize..4,
         visit_fails_at in proptest::option::of(0u32..240),
     ) {
-        let pool = shared_pool();
-        let blob = manifest(pool, &picks);
-        let primed: Vec<(Hash, u64)> = primed
-            .into_iter()
-            .map(|(n, honest)| (pool.blobs[n].0, pool.blobs[n].1 + u64::from(!honest)))
-            .collect();
-        let visit = |visit_fails_at: Option<u32>| {
-            move |_: &mut Cache, index: u32, chunk: Hash| {
-                if visit_fails_at == Some(index) {
-                    return Err(StoreError::ObjectNotFound(hash::to_hex(&chunk)));
+        with_shared_pool(|pool| {
+            let blob = manifest(pool, &picks);
+            let primed: Vec<(Hash, u64)> = primed
+                .into_iter()
+                .map(|(n, honest)| (pool.blobs[n].0, pool.blobs[n].1 + u64::from(!honest)))
+                .collect();
+            let visit = |visit_fails_at: Option<u32>| {
+                move |_: &mut Cache, index: u32, chunk: Hash| {
+                    if visit_fails_at == Some(index) {
+                        return Err(StoreError::ObjectNotFound(hash::to_hex(&chunk)));
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        };
-        let expected = run(
-            |cache, wants, visited| {
-                let fail = visit(visit_fails_at);
-                serial(&pool.store, &blob, cache, wants, |c, i, h| {
-                    visited.push((i, h));
-                    fail(c, i, h)
-                })
-            },
-            limit,
-            &primed,
-            skip_every,
-        );
-        let actual = run(
-            |cache, wants, visited| {
-                let fail = visit(visit_fails_at);
-                walk_chunks(
-                    &pool.store,
-                    &blob,
-                    cache,
-                    wants,
-                    |c, i, h| {
+            };
+            let expected = run(
+                |cache, wants, visited| {
+                    let fail = visit(visit_fails_at);
+                    serial(&pool.store, &blob, cache, wants, |c, i, h| {
                         visited.push((i, h));
                         fail(c, i, h)
-                    },
-                    Tuning { window, min_parallel_reads },
-                )
-            },
-            limit,
-            &primed,
-            skip_every,
-        );
-        prop_assert_eq!(actual, expected);
+                    })
+                },
+                limit,
+                &primed,
+                skip_every,
+            );
+            let actual = run(
+                |cache, wants, visited| {
+                    let fail = visit(visit_fails_at);
+                    walk_chunks(
+                        &pool.store,
+                        &blob,
+                        cache,
+                        wants,
+                        |c, i, h| {
+                            visited.push((i, h));
+                            fail(c, i, h)
+                        },
+                        Tuning { window, min_parallel_reads },
+                    )
+                },
+                limit,
+                &primed,
+                skip_every,
+            );
+            prop_assert_eq!(actual, expected);
+            Ok(())
+        })?;
     }
 }
 
@@ -311,5 +323,40 @@ fn a_round_reads_each_distinct_chunk_once() {
     assert_eq!(
         crate::ops::graph::CHUNK_TYPE_READS.with(std::cell::Cell::get),
         300
+    );
+}
+
+/// The checks of `try_each_in_order` run once per item, across windows and on
+/// the parallel path, and the error returned is the first in item order.
+#[test]
+fn try_each_in_order_reports_the_first_error_in_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let n = 2 * Tuning::DEFAULT.window + 100;
+    let items: Vec<usize> = (0..n).collect();
+    let ran = AtomicUsize::new(0);
+    try_each_in_order(&items, |_| {
+        ran.fetch_add(1, Ordering::Relaxed);
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    assert_eq!(ran.load(Ordering::Relaxed), n);
+
+    let window = Tuning::DEFAULT.window;
+    for bad in [0, 1, 63, 64, window - 1, window, n - 1] {
+        let error = try_each_in_order(&items, |&i| {
+            if i == bad || i == bad + 3 || i == n - 1 {
+                Err(i)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, bad);
+    }
+    // A short list runs on the calling thread.
+    assert_eq!(
+        try_each_in_order(&items[..3], |&i| if i > 0 { Err(i) } else { Ok(()) }),
+        Err(1)
     );
 }

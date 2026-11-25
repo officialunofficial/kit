@@ -484,3 +484,47 @@ pub(crate) fn conflicted(verb: &str) -> Repo {
     );
     repo
 }
+
+/// Push `branch` with an explicit chain depth and the default pack bound.
+pub(crate) fn push_branch_with_depth(
+    transport: &dyn kit_core::protocol::Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: kit_core::refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+) -> Result<(), libkit::transfer::Error> {
+    push_branch_with_limits(
+        transport,
+        store,
+        branch,
+        tip,
+        condition,
+        rebaseline_threshold,
+        kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP,
+    )
+}
+
+/// Push `branch` with an explicit chain depth and bound on one pack's payload.
+pub(crate) fn push_branch_with_limits(
+    transport: &dyn kit_core::protocol::Transport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: kit_core::refs::RefWriteCondition,
+    rebaseline_threshold: usize,
+    pack_payload_cap: u64,
+) -> Result<(), libkit::transfer::Error> {
+    libkit::transfer::push_branch_steps(
+        transport,
+        store,
+        branch,
+        tip,
+        condition,
+        rebaseline_threshold,
+        pack_payload_cap,
+        &libkit::transfer::PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .map(drop)
+}

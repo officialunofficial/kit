@@ -106,6 +106,11 @@ pub enum TransportError {
     /// transported in the clear.
     #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
     InsecureScheme,
+
+    /// The transport cannot do this operation safely, so it refused it
+    /// before it wrote anything. The text says which operation.
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 /// One opaque challenge advertised by the remote.
@@ -383,14 +388,14 @@ pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "64"))]
 pub const PACK_BODY_LIMIT: u64 = usize::MAX as u64;
 
-/// `usize`-typed mirror of [`PACK_BODY_LIMIT`] for `Vec`-shaped buffer
-/// caps. The assertion below prevents silent truncation on any target.
-#[allow(clippy::cast_possible_truncation)]
-pub const PACK_BODY_LIMIT_USIZE: usize = PACK_BODY_LIMIT as usize;
-const _: () = assert!(
-    (PACK_BODY_LIMIT_USIZE as u64) == PACK_BODY_LIMIT,
-    "PACK_BODY_LIMIT does not fit in usize on this target",
-);
+/// The most bytes one pack may take on a remote that advertises `advertised`,
+/// header and trailer included: the advertised limit, never above
+/// [`PACK_BODY_LIMIT`]. Every fetch refuses a longer pack, so a writer seals
+/// under this even when the remote advertises no limit.
+#[must_use]
+pub fn max_pack_bytes(advertised: Option<u64>) -> u64 {
+    advertised.map_or(PACK_BODY_LIMIT, |limit| limit.min(PACK_BODY_LIMIT))
+}
 
 /// Exponential-backoff iterator used by all transports.
 ///
@@ -500,36 +505,225 @@ pub fn retrying<T>(
 }
 
 // ---------------------------------------------------------------------------
-// PackChunk — transport-agnostic streaming segment
+// Pack bodies and sinks
 // ---------------------------------------------------------------------------
 
-/// One bounded-size segment of a streamed pack transfer.
+/// The bytes of a sealed pack, readable from any offset as often as a
+/// transport needs: once per attempt, per part, per hash pass. A push hands a
+/// transport a pack spooled to disk ([`crate::pack::SpooledPack`]), so no
+/// transport needs the whole pack in memory to send it.
+pub trait PackBody: Send + Sync {
+    /// Length of the pack in bytes.
+    fn len(&self) -> u64;
+
+    /// Whether the pack holds no bytes.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A reader of the pack's bytes from `offset` to the end. Each call
+    /// starts a reader of its own, so a retry reads the same bytes again.
+    ///
+    /// # Errors
+    /// An I/O error, or `UnexpectedEof` for an offset past the end.
+    fn read_from(&self, offset: u64) -> std::io::Result<Box<dyn std::io::Read + Send + '_>>;
+}
+
+/// A pack held in memory, for tests, small host pushes and blobs.
+#[derive(Debug, Clone, Copy)]
+pub struct SliceBody<'a>(pub &'a [u8]);
+
+impl PackBody for SliceBody<'_> {
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    fn read_from(&self, offset: u64) -> std::io::Result<Box<dyn std::io::Read + Send + '_>> {
+        let start = usize::try_from(offset)
+            .ok()
+            .filter(|&start| start <= self.0.len())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))?;
+        Ok(Box::new(&self.0[start..]))
+    }
+}
+
+/// All of `body`'s bytes in one buffer, for a transport that cannot yet send
+/// a pack from a reader. It refuses a body over [`PACK_BODY_LIMIT`].
 ///
-/// Mirrors the wire-level `PackChunk` shape shared by the SSH and enc
-/// transports (`offset`, `data`, `last` — see
-/// `kit-rpc/proto/kit/rpc/v1/ssh/ssh.proto`) and the `kit.transport.v1`
-/// Connect proto used by HTTP servers, without this crate depending on any
-/// protobuf-generated type: `kit-core` is the dependency root that
-/// `kit-rpc` builds on, not the reverse (see this module's header
-/// comment), so the canonical protobuf `PackChunk` cannot be named here.
-/// Transports convert 1:1 between this type and their own wire
-/// representation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackChunk {
-    /// Byte offset of `data` within the pack. Consecutive chunks in one
-    /// transfer MUST have ascending, contiguous offsets starting at 0 —
-    /// i.e. chunk *n*'s `offset` equals the sum of every prior chunk's
-    /// `data.len()`.
-    pub offset: u64,
-    /// Chunk payload. Transports typically bound this to a fixed
-    /// per-frame maximum (e.g. `kit_rpc::CHUNK_DATA_MAX`, 800 KiB for
-    /// SSH/enc) so no single chunk forces a large allocation.
-    pub data: Vec<u8>,
-    /// `true` on the final chunk of the stream. An empty pack is still
-    /// represented as exactly one chunk with `last = true` and empty
-    /// `data` — a stream MUST NOT end silently without a `last = true`
-    /// chunk.
-    pub last: bool,
+/// # Errors
+/// [`TransportError::PayloadTooLarge`] over the limit, and
+/// [`TransportError::ProtocolError`] when the body cannot be read: a local
+/// failure, never retried.
+pub fn read_body(body: &dyn PackBody) -> TransportResult<Vec<u8>> {
+    let len = body.len();
+    if len > PACK_BODY_LIMIT {
+        return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(saturating_usize(len))
+        .map_err(|_| TransportError::PayloadTooLarge(saturating_usize(len)))?;
+    let mut reader = body
+        .read_from(0)
+        .map_err(|_| TransportError::ProtocolError)?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(&mut reader, len), &mut bytes)
+        .map_err(|_| TransportError::ProtocolError)?;
+    if bytes.len() as u64 != len {
+        return Err(TransportError::ProtocolError);
+    }
+    Ok(bytes)
+}
+
+/// `n` as a `usize`, or `usize::MAX` when it does not fit.
+#[must_use]
+pub fn saturating_usize(n: u64) -> usize {
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// Where a downloaded pack goes. A transport calls [`Self::begin`] once per
+/// attempt, then [`Self::write`] with the bytes as they arrive. The consumer
+/// keeps the bytes and checks them: a sink takes a body, and nothing it
+/// takes is trusted until the consumer verifies it.
+pub trait PackSink: Send {
+    /// Start a body, or start over after a failed attempt: bytes taken
+    /// earlier are discarded. `declared` is the length the sender
+    /// announced, if any.
+    ///
+    /// # Errors
+    /// [`TransportError::PayloadTooLarge`] for a declared length over the
+    /// sink's limit, before any byte. [`TransportError::ProtocolError`] once
+    /// the sink has failed: a local error is never retried.
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()>;
+
+    /// Append `bytes` to the body.
+    ///
+    /// # Errors
+    /// [`TransportError::PayloadTooLarge`] for a byte past the declared
+    /// length or the limit. After a local I/O error,
+    /// [`TransportError::ProtocolError`], which no transport retries.
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()>;
+
+    /// The local I/O error that ended this sink, if any. A caller checks it
+    /// before it retries, falls back or maps an error, and reports this
+    /// error instead. It stays set: [`Self::begin`] never clears it.
+    fn failed(&self) -> Option<std::io::ErrorKind>;
+
+    /// The bytes of the current body this sink holds and can continue from
+    /// after an interrupted attempt: zero unless the body began with a
+    /// declared length and no byte has failed. A transport may ask the
+    /// remote for the rest of the body only when this is not zero. The
+    /// default keeps nothing, so a transport reads the body again from its
+    /// start.
+    fn retained(&self) -> u64 {
+        0
+    }
+
+    /// Continue the body at `offset`, which is [`Self::retained`], of a
+    /// body whose full length is `total`. The bytes that follow are the
+    /// body from `offset` on. Unlike [`Self::begin`], nothing taken is
+    /// discarded.
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when this sink holds no such
+    /// prefix, or `total` is not the declared length.
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        let _ = (total, offset);
+        Err(TransportError::ProtocolError)
+    }
+
+    /// Learn how a transport answered the sink's request to continue a body.
+    /// Called at most once per attempt that held a prefix.
+    fn note_resume(&mut self, _outcome: ResumeOutcome) {}
+}
+
+pub mod resume;
+pub use resume::{RestartReason, ResumeOutcome, Validator};
+
+/// A sink that keeps a body of at most `limit` bytes in memory, for small
+/// transfers such as packlist nodes.
+#[derive(Debug)]
+pub struct MemorySink {
+    bytes: Vec<u8>,
+    limit: u64,
+    declared: Option<u64>,
+    begun: bool,
+}
+
+impl MemorySink {
+    /// A sink that takes at most `limit` bytes.
+    #[must_use]
+    pub fn new(limit: u64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            declared: None,
+            begun: false,
+        }
+    }
+
+    /// The body taken.
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when no body was begun, and
+    /// [`TransportError::InvalidResponse`] when it is shorter than declared.
+    pub fn into_bytes(self) -> TransportResult<Vec<u8>> {
+        if !self.begun {
+            return Err(TransportError::ProtocolError);
+        }
+        if self
+            .declared
+            .is_some_and(|declared| declared != self.bytes.len() as u64)
+        {
+            return Err(TransportError::InvalidResponse);
+        }
+        Ok(self.bytes)
+    }
+}
+
+impl PackSink for MemorySink {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        self.begun = false;
+        self.bytes.clear();
+        if declared.is_some_and(|len| len > self.limit) {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(
+                declared.unwrap_or(u64::MAX),
+            )));
+        }
+        self.declared = declared;
+        self.begun = true;
+        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        if !self.begun {
+            return Err(TransportError::ProtocolError);
+        }
+        let end = (self.bytes.len() as u64).saturating_add(bytes.len() as u64);
+        if end > self.limit || self.declared.is_some_and(|declared| end > declared) {
+            self.begun = false;
+            return Err(TransportError::PayloadTooLarge(saturating_usize(end)));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        None
+    }
+}
+
+/// Write `bytes` to `sink` as one body of declared length, in reads of at
+/// most [`crate::pack::SPOOL_BUFFER`] bytes. For a transport that holds a
+/// pack in memory.
+///
+/// # Errors
+/// The sink's error.
+pub fn write_body(sink: &mut dyn PackSink, bytes: &[u8]) -> TransportResult<()> {
+    sink.begin(Some(bytes.len() as u64))?;
+    for piece in bytes.chunks(crate::pack::SPOOL_BUFFER) {
+        sink.write(piece)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +794,24 @@ impl fmt::Debug for RepoCursor {
 }
 
 pub trait Transport: Send + Sync {
+    /// Whether the remote supports the attestation log. Unknown sources refuse.
+    fn supports_attestations(&self) -> bool {
+        false
+    }
+
+    /// Publish the attestation log under Missing or Match, consuming uploaded
+    /// pack and node keys. A key without a session reservation must already
+    /// belong to the repository. Any is refused.
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> TransportResult<()> {
+        let _ = (condition, tip, keys);
+        Err(TransportError::ProtocolError)
+    }
+
     /// Repository identity and origin used for remote error context, if available.
     /// Existing transports carry no addressing context by default.
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
@@ -612,175 +824,80 @@ pub trait Transport: Send + Sync {
         Ok(None)
     }
 
-    /// Upload a pack. The digest is computed by the caller (BLAKE3 of
-    /// the full pack bytes) and used as the object key — servers MAY
-    /// dedupe on this key.
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()>;
+    /// Upload a sealed pack. The key is BLAKE3 of the whole pack, computed
+    /// by the caller before the first byte is sent; servers MAY dedupe on
+    /// it. `head_ref` is the head the pack is for: transports with upload
+    /// tickets authorize by it, and the others ignore it. A retry reads
+    /// `pack` again from its start.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        head_ref: Option<&str>,
+    ) -> TransportResult<()>;
 
-    /// Upload a pack for an intended head ref. Transports without upload
-    /// tickets ignore the hint and retain their existing upload behavior.
-    fn upload_pack_via_ref(
+    /// Download a pack by its key into `sink`: [`PackSink::begin`] once per
+    /// attempt, with the length when the remote declares one, then the
+    /// bytes. The caller checks them against the key. `ref_hint` is a
+    /// read-your-writes hint, ignored where it means nothing.
+    ///
+    /// Returns [`TransportError::PackNotFound`] if the remote does not hold
+    /// this key. A transport never retries an attempt after
+    /// [`PackSink::failed`] is set.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()>;
+
+    /// HEAD-check a pack. Cheaper than [`Self::download_pack`] on network
+    /// transports. `ref_hint` as for [`Self::download_pack`].
+    fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool>;
+
+    /// The length in bytes of the pack stored under `key`, read without
+    /// fetching it, or `None` when it is not stored or this transport cannot
+    /// tell the length cheaply. A caller that wants to know a stored pack is
+    /// whole compares this with the length it expects, and treats `None` as
+    /// "not known to be whole". One attempt: no retry ladder. The default
+    /// is `None`.
+    ///
+    /// # Errors
+    /// The transport's error when the check itself fails.
+    fn pack_len(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let _ = (key, ref_hint);
+        Ok(None)
+    }
+
+    /// Upload a content-addressed **auxiliary blob**: transfer metadata
+    /// that is NOT a packfile, such as a packlist chain node. The key is
+    /// BLAKE3 of `bytes`, exactly like a pack.
+    ///
+    /// Auxiliary blobs share the key-addressed store with packs, so the
+    /// default uploads `bytes` as a pack. The distinct verb keeps the kind
+    /// explicit at the call site.
+    fn upload_blob(
         &self,
         bytes: &[u8],
         key: &PackKey,
-        _head_ref: &str,
+        head_ref: Option<&str>,
     ) -> TransportResult<()> {
-        self.upload_pack(bytes, key)
+        self.upload_pack(&SliceBody(bytes), key, head_ref)
     }
 
-    /// Download a pack by its digest.
-    ///
-    /// Returns [`TransportError::PackNotFound`] if the remote does not
-    /// hold this digest.
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>>;
-
-    /// Download a pack with a read-your-writes ref hint. Defaults to ignoring it.
-    fn download_pack_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
-        self.download_pack(key)
-    }
-
-    /// Upload a pack by streaming bounded-size [`PackChunk`]s instead of
-    /// requiring the whole pack materialized as one `&[u8]` up front.
-    ///
-    /// `total_bytes` is the caller-declared pack length — the wire
-    /// header most streaming transports send before the first chunk.
-    /// `chunks` MUST yield its segments in ascending contiguous `offset`
-    /// order and end with exactly one item whose `last` field is `true`
-    /// (an empty pack still yields one `last = true` chunk with empty
-    /// `data`); the accumulated `data` length across every yielded chunk
-    /// MUST equal `total_bytes`. The digest (`key`) is still computed by
-    /// the caller up front, exactly as for [`Self::upload_pack`] — this
-    /// method does not hash the stream itself.
-    ///
-    /// This is an additive, opt-in entry point: no existing transport is
-    /// forced to implement real streaming. The default impl buffers
-    /// `chunks` into one `Vec` (bounded by [`PACK_BODY_LIMIT_USIZE`]) and
-    /// delegates to [`Self::upload_pack`], so every transport gets a
-    /// working implementation with zero code — callers may always use
-    /// this entry point, even against a transport that has not opted
-    /// into streaming. Transports that can forward chunks directly to
-    /// their own wire (SSH, enc — see `kit-transport-ssh`'s existing
-    /// `PackChunk` frame loop) SHOULD override this to avoid the buffer
-    /// and stay in bounded memory regardless of pack size.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransportError::ProtocolError`] if `chunks` never
-    /// yields a `last = true` item, or if the accumulated byte count
-    /// does not equal `total_bytes`. Returns
-    /// [`TransportError::PayloadTooLarge`] if `total_bytes` (or the
-    /// accumulated count) would exceed [`PACK_BODY_LIMIT`]. Propagates
-    /// any error yielded by `chunks` itself (e.g. the caller's own I/O
-    /// error while reading a pack off disk).
-    fn upload_pack_streaming(
+    /// Download an auxiliary blob of at most `max` bytes. A longer blob is
+    /// [`TransportError::PayloadTooLarge`], refused from its declared length
+    /// before its body is read where the remote declares one. The default
+    /// downloads it as a pack into a [`MemorySink`].
+    fn download_blob(
         &self,
         key: &PackKey,
-        total_bytes: u64,
-        chunks: &mut dyn Iterator<Item = TransportResult<PackChunk>>,
-    ) -> TransportResult<()> {
-        if total_bytes > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
-        }
-        // `total_bytes` comes from the peer. Do not size the buffer from it.
-        // The buffer grows as chunks arrive, under the checked limit below.
-        let mut buf = Vec::new();
-        let mut saw_last = false;
-        for chunk in chunks {
-            let c = chunk?;
-            if c.data.len() > PACK_BODY_LIMIT_USIZE.saturating_sub(buf.len()) {
-                return Err(TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE));
-            }
-            buf.extend_from_slice(&c.data);
-            if c.last {
-                saw_last = true;
-                break;
-            }
-        }
-        if !saw_last || buf.len() as u64 != total_bytes {
-            return Err(TransportError::ProtocolError);
-        }
-        self.upload_pack(&buf, key)
-    }
-
-    /// Download a pack as a lazy stream of bounded-size [`PackChunk`]s
-    /// instead of one big `Vec<u8>`.
-    ///
-    /// This is an additive, opt-in entry point mirroring
-    /// [`Self::upload_pack_streaming`]. The default impl calls
-    /// [`Self::download_pack`] eagerly (so it does not save memory by
-    /// itself) and wraps the whole result as a single `last = true`
-    /// chunk — every transport gets a working implementation with zero
-    /// code. Transports that can read their own wire incrementally (SSH,
-    /// enc) SHOULD override this to yield each wire chunk as it arrives,
-    /// keeping memory bounded to roughly one chunk at a time regardless
-    /// of total pack size.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransportError::PackNotFound`] immediately if the
-    /// remote does not hold `key` — a conforming implementation never
-    /// returns a stream that then fails its first item with
-    /// `PackNotFound`. Errors surfacing mid-stream (a malformed frame, a
-    /// connection drop) are yielded as `Err` items from the returned
-    /// iterator rather than failing this call itself, since an
-    /// overridden implementation may not know the transfer will fail
-    /// until partway through.
-    fn download_pack_streaming(
-        &self,
-        key: &PackKey,
-    ) -> TransportResult<Box<dyn Iterator<Item = TransportResult<PackChunk>> + '_>> {
-        let bytes = self.download_pack(key)?;
-        Ok(Box::new(core::iter::once(Ok(PackChunk {
-            offset: 0,
-            data: bytes,
-            last: true,
-        }))))
-    }
-
-    /// HEAD-check a pack. Cheaper than [`Self::download_pack`] on
-    /// network transports.
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool>;
-
-    /// Check a pack with a read-your-writes ref hint. Defaults to ignoring it.
-    fn pack_exists_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<bool> {
-        self.pack_exists(key)
-    }
-
-    /// Upload a content-addressed **auxiliary blob** — transfer metadata
-    /// that is NOT a packfile (e.g. a packlist chain node, SPEC-PACKFILE is
-    /// silent on these). The key is BLAKE3 of `bytes`, exactly like a pack.
-    ///
-    /// Auxiliary blobs share the digest-keyed content-addressed store with
-    /// packs (the store is a general blob store; "pack" is just the primary
-    /// content kind), so the default impl delegates to [`Self::upload_pack`].
-    /// The distinct verb keeps the *kind* explicit at the call site so a
-    /// caller never has to infer "is this blob a packfile or metadata?".
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.upload_pack(bytes, key)
-    }
-
-    /// Upload auxiliary content for an intended head ref. The default keeps
-    /// the transport's existing blob behavior.
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        _head_ref: &str,
-    ) -> TransportResult<()> {
-        self.upload_blob(bytes, key)
-    }
-
-    /// Download an auxiliary blob by digest. Counterpart to
-    /// [`Self::upload_blob`]; default impl delegates to
-    /// [`Self::download_pack`]. Returns [`TransportError::PackNotFound`] if
-    /// the remote does not hold this digest.
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.download_pack(key)
-    }
-
-    /// Download auxiliary metadata with a ref hint. Defaults to ignoring it.
-    fn download_blob_via_ref(&self, key: &PackKey, _ref_name: &str) -> TransportResult<Vec<u8>> {
-        self.download_blob(key)
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> TransportResult<Vec<u8>> {
+        let mut sink = MemorySink::new(max);
+        self.download_pack(key, ref_hint, &mut sink)?;
+        sink.into_bytes()
     }
 
     /// Unconditional ref write — equivalent to
@@ -805,6 +922,49 @@ pub trait Transport: Send + Sync {
         hash: &Hash,
     ) -> TransportResult<()>;
 
+    /// Delete `name` if it holds `expected` (SPEC-TRANSPORT §1). A ref that
+    /// is absent or holds another value is [`TransportError::RefConflict`],
+    /// and nothing is deleted. No transport offers an unconditional delete;
+    /// one that cannot condition a delete refuses every delete before it
+    /// writes anything.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()>;
+
+    /// Delete a head ref, then its chain ref (`refs/kit/packmap/<b>` or
+    /// `refs/kit/tagmap/<t>`), each under `Match` (SPEC-TRANSPORT §7.3).
+    /// With `map_expected` `None` the head has no chain ref, and only the
+    /// head is deleted.
+    ///
+    /// [`AdvanceOutcome::HeadConflict`] means the head did not hold
+    /// `head_expected` and nothing was deleted. A transport that deletes both
+    /// refs in one transaction reports a moved chain ref as
+    /// [`AdvanceOutcome::PackmapConflict`], with nothing deleted.
+    ///
+    /// The default deletes the head and then the chain ref, one
+    /// [`Self::delete_ref`] each. Once the head is gone the delete has
+    /// happened, so a failed chain-ref delete, a lost CAS or any other
+    /// error, still reports [`AdvanceOutcome::Committed`], as a crash
+    /// between the two would. The chain ref it leaves behind is harmless: a
+    /// fetch reads it as a stale listing, and the next push of that name
+    /// appends to it.
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> TransportResult<AdvanceOutcome> {
+        match self.delete_ref(head, head_expected) {
+            Ok(()) => {}
+            Err(TransportError::RefConflict) => return Ok(AdvanceOutcome::HeadConflict),
+            Err(e) => return Err(e),
+        }
+        if let Some(expected) = map_expected {
+            // The head is gone: a chain ref left behind is a leftover.
+            let _ = self.delete_ref(map, expected);
+        }
+        Ok(AdvanceOutcome::Committed)
+    }
+
     /// Read the current value of a ref, or `None` if it does not exist.
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>>;
 
@@ -812,6 +972,22 @@ pub trait Transport: Send + Sync {
     /// have `prefix` stripped per SPEC-REFS §4. An empty prefix lists
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
+
+    /// Whether a push may send a replacement chunk manifest as a delta against
+    /// the manifest the remote holds (SPEC-PACKFILE §3.2). `false`, the
+    /// default, sends every manifest in full. Only a transport whose remote
+    /// kit controls and reads with this crate's pack reader says `true`: a
+    /// managed or hosted remote may admit only full manifests and refuse a
+    /// delta one, so it must never be asked for one.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
+    }
+
+    /// How [`Self::list_refs`] answers: an ordered read that pages, by
+    /// default. A transport whose listing may lag a write says so.
+    fn ref_listing(&self) -> RefListing {
+        RefListing::Ordered
+    }
 
     /// Advance a branch by updating its **head ref and its packmap ref
     /// together**, each under its own CAS precondition.
@@ -989,6 +1165,17 @@ pub enum CommitOutcome {
     PacklistNotInRepository,
 }
 
+/// How a remote's ref listing answers, which a tag push needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefListing {
+    /// The listing reflects every write that completed before it, and it
+    /// pages, so its size has no bound of its own.
+    Ordered,
+    /// The listing may lag a completed write, as a Connect server's may. A
+    /// strong `read_ref` is the authority.
+    Eventual,
+}
+
 /// Server limits relevant to splitting a push into packs and advances.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct UploadLimits {
@@ -1010,6 +1197,23 @@ pub struct UploadLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
+
+    #[test]
+    fn a_sink_that_does_not_continue_holds_nothing_and_refuses_to_resume() {
+        let mut sink = MemorySink::new(64);
+        sink.begin(Some(8)).unwrap();
+        sink.write(b"abcd").unwrap();
+        assert_eq!(sink.retained(), 0);
+        assert!(matches!(
+            sink.resume(8, 4),
+            Err(TransportError::ProtocolError)
+        ));
+        sink.note_resume(ResumeOutcome::Resumed { bytes: 4 });
+        // Nothing about the body changed.
+        sink.write(b"efgh").unwrap();
+        assert_eq!(sink.into_bytes().unwrap(), b"abcdefgh");
+    }
 
     #[test]
     fn a_repo_cursor_holds_its_bytes_within_the_bound_and_hides_them_in_debug() {
@@ -1109,39 +1313,74 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // upload_pack_streaming / download_pack_streaming default impls
+    // Default verbs, bodies and sinks
     // -----------------------------------------------------------------
 
-    /// Minimal in-memory [`Transport`] that only implements the
-    /// required whole-buffer methods, so its `*_streaming` behavior is
-    /// entirely the trait's default impl under test.
+    /// The bytes, key and head ref of the last upload.
+    type Upload = (Vec<u8>, PackKey, Option<String>);
+
+    /// Minimal in-memory [`Transport`] that implements only the required
+    /// verbs, so the defaults are under test.
     #[derive(Default)]
     struct RecordingTransport {
-        uploaded: std::sync::Mutex<Option<(Vec<u8>, PackKey)>>,
+        uploaded: std::sync::Mutex<Option<Upload>>,
         stored: std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>,
         atomic: bool,
+        /// Every ref a delete removed, in order.
+        deleted: std::sync::Mutex<Vec<String>>,
+        /// A ref whose delete loses its CAS.
+        conflict_on: Option<&'static str>,
+        /// A ref whose delete fails with another error.
+        fail_on: Option<&'static str>,
+    }
+
+    #[test]
+    fn unknown_transports_refuse_attestations_without_a_write() {
+        let transport = RecordingTransport::default();
+        assert!(!transport.supports_attestations());
+        assert!(matches!(
+            transport.write_attestmap(RefWriteCondition::Missing, &[1; 32], &[]),
+            Err(TransportError::ProtocolError)
+        ));
+        assert!(transport.uploaded.lock().unwrap().is_none());
+        assert!(transport.stored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_transport_sends_full_manifests_unless_it_opts_in() {
+        assert!(!RecordingTransport::default().accepts_manifest_deltas());
     }
 
     impl Transport for RecordingTransport {
-        fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-            *self.uploaded.lock().unwrap() = Some((bytes.to_vec(), *key));
-            self.stored
-                .lock()
-                .unwrap()
-                .insert(*key.as_bytes(), bytes.to_vec());
+        fn upload_pack(
+            &self,
+            pack: &dyn PackBody,
+            key: &PackKey,
+            head_ref: Option<&str>,
+        ) -> TransportResult<()> {
+            let bytes = read_body(pack)?;
+            *self.uploaded.lock().unwrap() = Some((bytes.clone(), *key, head_ref.map(Into::into)));
+            self.stored.lock().unwrap().insert(*key.as_bytes(), bytes);
             Ok(())
         }
 
-        fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-            self.stored
+        fn download_pack(
+            &self,
+            key: &PackKey,
+            _ref_hint: Option<&str>,
+            sink: &mut dyn PackSink,
+        ) -> TransportResult<()> {
+            let bytes = self
+                .stored
                 .lock()
                 .unwrap()
                 .get(key.as_bytes())
                 .cloned()
-                .ok_or(TransportError::PackNotFound)
+                .ok_or(TransportError::PackNotFound)?;
+            write_body(sink, &bytes)
         }
 
-        fn pack_exists(&self, _key: &PackKey) -> TransportResult<bool> {
+        fn pack_exists(&self, _key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
             unimplemented!("not exercised by these tests")
         }
 
@@ -1152,6 +1391,17 @@ mod tests {
             _hash: &Hash,
         ) -> TransportResult<()> {
             unimplemented!("not exercised by these tests")
+        }
+
+        fn delete_ref(&self, name: &str, _expected: &Hash) -> TransportResult<()> {
+            if self.conflict_on == Some(name) {
+                return Err(TransportError::RefConflict);
+            }
+            if self.fail_on == Some(name) {
+                return Err(TransportError::ConnectionFailed);
+            }
+            self.deleted.lock().unwrap().push(name.to_owned());
+            Ok(())
         }
 
         fn read_ref(&self, _name: &str) -> TransportResult<Option<Hash>> {
@@ -1167,6 +1417,80 @@ mod tests {
         }
     }
 
+    const HEAD: &str = "refs/heads/main";
+    const MAP: &str = "refs/kit/packmap/main";
+
+    fn delete_pair(transport: &RecordingTransport, map: Option<&Hash>) -> AdvanceOutcome {
+        transport.delete_refs(HEAD, &[1; 32], MAP, map).unwrap()
+    }
+
+    /// The default delete removes the head, then its chain ref.
+    #[test]
+    fn default_delete_removes_the_head_then_its_chain_ref() {
+        let transport = RecordingTransport::default();
+        assert_eq!(
+            delete_pair(&transport, Some(&[2; 32])),
+            AdvanceOutcome::Committed
+        );
+        assert_eq!(*transport.deleted.lock().unwrap(), [HEAD, MAP]);
+    }
+
+    /// A head without a chain ref is deleted alone.
+    #[test]
+    fn default_delete_of_a_head_without_a_chain_ref_deletes_the_head_only() {
+        let transport = RecordingTransport::default();
+        assert_eq!(delete_pair(&transport, None), AdvanceOutcome::Committed);
+        assert_eq!(*transport.deleted.lock().unwrap(), [HEAD]);
+    }
+
+    /// A head that lost its CAS is a conflict, and the chain ref is never
+    /// touched.
+    #[test]
+    fn default_delete_with_a_stale_head_deletes_nothing() {
+        let transport = RecordingTransport {
+            conflict_on: Some(HEAD),
+            ..RecordingTransport::default()
+        };
+        assert_eq!(
+            delete_pair(&transport, Some(&[2; 32])),
+            AdvanceOutcome::HeadConflict
+        );
+        assert!(transport.deleted.lock().unwrap().is_empty());
+    }
+
+    /// Once the head is gone the delete has happened: a lost CAS or another
+    /// failure on the chain ref leaves it behind and still reports success.
+    #[test]
+    fn default_delete_succeeds_once_the_head_is_gone() {
+        for (conflict_on, fail_on) in [(Some(MAP), None), (None, Some(MAP))] {
+            let transport = RecordingTransport {
+                conflict_on,
+                fail_on,
+                ..RecordingTransport::default()
+            };
+            assert_eq!(
+                delete_pair(&transport, Some(&[2; 32])),
+                AdvanceOutcome::Committed
+            );
+            assert_eq!(*transport.deleted.lock().unwrap(), [HEAD]);
+        }
+    }
+
+    /// A head delete that fails for another reason is surfaced, and the
+    /// chain ref is never touched.
+    #[test]
+    fn default_delete_surfaces_a_failed_head_delete() {
+        let transport = RecordingTransport {
+            fail_on: Some(HEAD),
+            ..RecordingTransport::default()
+        };
+        assert!(matches!(
+            transport.delete_refs(HEAD, &[1; 32], MAP, Some(&[2; 32])),
+            Err(TransportError::ConnectionFailed)
+        ));
+        assert!(transport.deleted.lock().unwrap().is_empty());
+    }
+
     /// Every atomic advance is serialized; an ordered one is neither.
     #[test]
     fn serialized_advance_defaults_to_atomic_advance() {
@@ -1180,17 +1504,26 @@ mod tests {
     }
 
     #[test]
-    fn ticket_hooks_default_to_existing_transport_behavior() {
+    fn a_blob_goes_up_as_a_pack_and_comes_back_within_its_bound() {
         let transport = RecordingTransport::default();
         let bytes = b"test pack";
         let key = PackKey::new(crate::hash::hash(bytes));
         transport
-            .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+            .upload_blob(bytes, &key, Some("refs/heads/main"))
             .unwrap();
-        assert_eq!(transport.download_pack(&key).unwrap(), bytes);
-        transport
-            .upload_blob_via_ref(bytes, &key, "refs/heads/main")
-            .unwrap();
+        let (sent, _, head_ref) = transport.uploaded.lock().unwrap().clone().unwrap();
+        assert_eq!(sent, bytes);
+        assert_eq!(head_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            transport
+                .download_blob(&key, None, bytes.len() as u64)
+                .unwrap(),
+            bytes
+        );
+        assert!(matches!(
+            transport.download_blob(&key, None, bytes.len() as u64 - 1),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
         assert_eq!(transport.upload_limits(), UploadLimits::default());
     }
 
@@ -1207,127 +1540,57 @@ mod tests {
         );
     }
 
-    fn chunks_of(data: &[u8], chunk_len: usize) -> Vec<PackChunk> {
-        if data.is_empty() {
-            return vec![PackChunk {
-                offset: 0,
-                data: Vec::new(),
-                last: true,
-            }];
+    #[test]
+    fn a_slice_body_reads_from_any_offset_as_often_as_asked() {
+        let body = SliceBody(b"0123456789");
+        for _ in 0..2 {
+            let mut tail = Vec::new();
+            body.read_from(4).unwrap().read_to_end(&mut tail).unwrap();
+            assert_eq!(tail, b"456789");
         }
-        let mut out = Vec::new();
-        let mut offset = 0usize;
-        while offset < data.len() {
-            let end = core::cmp::min(offset + chunk_len, data.len());
-            out.push(PackChunk {
-                offset: offset as u64,
-                data: data[offset..end].to_vec(),
-                last: end == data.len(),
-            });
-            offset = end;
-        }
-        out
+        assert_eq!(read_body(&body).unwrap(), b"0123456789");
+        assert!(body.read_from(11).is_err());
     }
 
     #[test]
-    fn upload_pack_streaming_default_delegates_to_upload_pack() {
-        let t = RecordingTransport::default();
-        let payload = b"hello kit pack bytes".repeat(100);
-        let key = PackKey::new([0x11; 32]);
-        let mut it = chunks_of(&payload, 7).into_iter().map(Ok);
-
-        t.upload_pack_streaming(&key, payload.len() as u64, &mut it)
-            .expect("streaming upload via default impl");
-
-        let (got_bytes, got_key) = t.uploaded.lock().unwrap().clone().expect("upload recorded");
-        assert_eq!(got_bytes, payload);
-        assert_eq!(got_key, key);
+    fn a_memory_sink_refuses_a_declared_length_over_its_limit_before_any_byte() {
+        let mut sink = MemorySink::new(4);
+        assert!(matches!(
+            sink.begin(Some(5)),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+        assert!(matches!(
+            sink.write(b"a"),
+            Err(TransportError::ProtocolError)
+        ));
     }
 
     #[test]
-    fn upload_pack_streaming_default_rejects_missing_last_chunk() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x22; 32]);
-        // No chunk at all — total_bytes = 0 still requires one `last =
-        // true` chunk per the trait contract.
-        let mut it = core::iter::empty();
-
-        let err = t
-            .upload_pack_streaming(&key, 0, &mut it)
-            .expect_err("must reject a stream with no last=true chunk");
-        assert!(matches!(err, TransportError::ProtocolError));
+    fn a_memory_sink_refuses_bytes_past_its_declared_length_or_its_limit() {
+        let mut sink = MemorySink::new(4);
+        sink.begin(Some(2)).unwrap();
+        assert!(sink.write(b"abc").is_err());
+        sink.begin(None).unwrap();
+        sink.write(b"abcd").unwrap();
+        assert!(sink.write(b"e").is_err());
     }
 
     #[test]
-    fn upload_pack_streaming_default_rejects_total_bytes_mismatch() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x33; 32]);
-        let mut it = core::iter::once(Ok(PackChunk {
-            offset: 0,
-            data: vec![1, 2, 3],
-            last: true,
-        }));
-
-        // Declared total (10) does not match the 3 bytes actually
-        // streamed.
-        let err = t
-            .upload_pack_streaming(&key, 10, &mut it)
-            .expect_err("must reject a total_bytes/accumulated-length mismatch");
-        assert!(matches!(err, TransportError::ProtocolError));
-    }
-
-    #[test]
-    fn upload_pack_streaming_default_propagates_chunk_error() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x44; 32]);
-        let mut it = core::iter::once(Err(TransportError::ConnectionFailed));
-
-        let err = t
-            .upload_pack_streaming(&key, 0, &mut it)
-            .expect_err("must propagate an error yielded mid-stream");
-        assert!(matches!(err, TransportError::ConnectionFailed));
-    }
-
-    #[test]
-    fn upload_pack_streaming_default_rejects_oversize_total() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x55; 32]);
-        let mut it = core::iter::empty();
-
-        let err = t
-            .upload_pack_streaming(&key, PACK_BODY_LIMIT + 1, &mut it)
-            .expect_err("must reject total_bytes above PACK_BODY_LIMIT");
-        assert!(matches!(err, TransportError::PayloadTooLarge(_)));
-    }
-
-    #[test]
-    fn download_pack_streaming_default_wraps_whole_pack() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x66; 32]);
-        let payload = vec![9u8; 4096];
-        t.upload_pack(&payload, &key).unwrap();
-
-        let mut stream = t.download_pack_streaming(&key).expect("stream opens");
-        let first = stream.next().expect("one chunk").expect("no error");
-        assert_eq!(first.data, payload);
-        assert!(first.last);
-        assert!(
-            stream.next().is_none(),
-            "default impl yields exactly one chunk"
-        );
-    }
-
-    #[test]
-    fn download_pack_streaming_default_propagates_not_found() {
-        let t = RecordingTransport::default();
-        let key = PackKey::new([0x77; 32]);
-        // `Box<dyn Iterator<..>>`'s `Ok` type isn't `Debug`, so match
-        // instead of `expect_err`.
-        match t.download_pack_streaming(&key) {
-            Err(TransportError::PackNotFound) => {}
-            Err(other) => panic!("expected PackNotFound, got {other:?}"),
-            Ok(_) => panic!("missing pack must fail before any chunk is produced"),
-        }
+    fn a_memory_sink_starts_over_on_begin_and_checks_the_declared_length() {
+        let mut sink = MemorySink::new(16);
+        sink.begin(Some(3)).unwrap();
+        sink.write(b"xy").unwrap();
+        sink.begin(Some(3)).unwrap();
+        sink.write(b"abc").unwrap();
+        assert_eq!(sink.into_bytes().unwrap(), b"abc");
+        let mut short = MemorySink::new(16);
+        short.begin(Some(3)).unwrap();
+        short.write(b"ab").unwrap();
+        assert!(matches!(
+            short.into_bytes(),
+            Err(TransportError::InvalidResponse)
+        ));
+        assert!(MemorySink::new(16).into_bytes().is_err());
     }
 
     // -----------------------------------------------------------------

@@ -345,7 +345,8 @@ fn build_vectors() -> Vec<Vector> {
     v.push(vector(
         "chunked_blob_cs0_3chunks_range1to3",
         "`chunked_blob_cs0_3chunks` from ../objects/, range proof over all 3 chunks.",
-        merkle::build_chunks_range_proof(&cb, 1, 3)
+        // A run of positions proves with the bytes of a range proof.
+        merkle::build_chunks_multi_proof(&cb, 1..=3)
             .unwrap()
             .encode(),
         &id_cb,
@@ -730,7 +731,7 @@ fn verify_vector(name: &str, want_digest: &str) {
             let manifest =
                 kit_core::object::ChunkedBlob::new(total_size, chunk_size, entries).unwrap();
             assert_eq!(
-                merkle::build_chunks_range_proof(&manifest, start, last)
+                merkle::build_chunks_multi_proof(&manifest, start..=last)
                     .unwrap()
                     .encode(),
                 bin

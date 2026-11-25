@@ -17,8 +17,8 @@
 //!   (`CHERRY_PICK_HEAD`), rebase (`onto` + every `todo`/`done` commit),
 //!   the `ORIG_HEAD` saved by those ops and by `reset`, and the conflict
 //!   sidecar's base/ours/theirs blob hashes.
-//! - **Attestations** — every `attestations/<commit>/` directory pins
-//!   its commit so an attested commit is never orphaned.
+//! - **Attestations** — a stored envelope pins its subject while the
+//!   whole closure is available.
 //! - **Recovery log** — every commit recorded as superseded by a
 //!   history-rewriting op (see [`super::recovery`]); retained so it stays
 //!   recoverable until `recovery::expire` drops it past the window.
@@ -27,6 +27,21 @@
 //! `rebase` are unrecoverable from the opaque-digest history journal, so
 //! [`super::recovery`] logs them (the commands record the old tip before
 //! moving the ref) and they are roots here.
+
+mod maintenance;
+mod soft;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use maintenance::fuzz_maintenance_stamp;
+pub use maintenance::{Collection, MaintenanceReport, maintain_packs, maintain_packs_after_write};
+
+/// Basename of the advisory stamp and lock for automatic maintenance.
+#[doc(hidden)]
+pub const AUTO_MAINTENANCE_STAMP: &str = "gc-auto";
+
+/// Default grace before an unreachable object or pack leftover can be removed.
+pub const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -46,7 +61,6 @@ use super::graph::{ClosureMode, MAX_REACHABLE, children};
 use super::rebase;
 use super::recovery;
 use super::stash;
-use crate::layout::ATTESTATIONS_DIR_NAME;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 
 /// Longest ref or root file that gc reads: one hex hash plus whitespace.
@@ -157,7 +171,7 @@ pub enum GcRootsError {
 /// [`GcRootsError`] if any source (refs, stash, op state, attestation
 /// dir) cannot be read — the caller must then abort, never prune.
 pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError> {
-    let (mut roots, soft) = collect_root_sets(layout)?;
+    let (mut roots, soft) = collect_root_sets(layout, &mut |_| {})?;
     roots.extend(soft.into_iter().map(|root| root.hash));
     Ok(roots)
 }
@@ -166,13 +180,17 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
 /// older gc did not keep. If the object is gone, the state file is stale: gc
 /// skips the root and says which file named it. Every other root is a ref or
 /// a state an older gc already kept, so a missing object under it is damage.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct SoftRoot {
     hash: Hash,
     state_file: PathBuf,
 }
 
 /// [`collect_roots`], with the [`SoftRoot`]s held apart from the rest.
-fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoot>), GcRootsError> {
+fn collect_root_sets(
+    layout: &RepoLayout,
+    empty_attestation: &mut dyn FnMut(PathBuf),
+) -> Result<(BTreeSet<Hash>, Vec<SoftRoot>), GcRootsError> {
     let mut roots: BTreeSet<Hash> = BTreeSet::new();
     let mut soft: Vec<SoftRoot> = Vec::new();
     let add = |h: Hash, set: &mut BTreeSet<Hash>| {
@@ -217,10 +235,8 @@ fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoo
         })?;
     }
 
-    // Attested commits — pinned so an attestation never dangles.
-    for h in attested_commits(layout.common_dir())? {
-        add(h, &mut roots);
-    }
+    // An attestation retains a complete subject closure, if still available.
+    collect_attestation_roots(&layout.attestations_dir(), &mut soft, empty_attestation)?;
 
     // A crash may leave a history intent before its target ref is published.
     // Retain both sides even on builds without the history-mmr feature.
@@ -278,6 +294,12 @@ fn collect_tree_roots(
     if let Some(state) = super::pull_state::PullState::read(tree)? {
         add(state.target, roots);
         add(state.before_tree, roots);
+    }
+
+    match refs::read_previous_head(tree) {
+        Ok(refs::Head::Detached(h)) => add(h, roots),
+        Ok(refs::Head::Branch(_)) | Err(refs::RefError::NoHead) => {}
+        Err(e) => return Err(e.into()),
     }
 
     // ORIG_HEAD (written by reset and by the in-progress ops below).
@@ -524,34 +546,92 @@ impl ChunkIds {
 /// This function reads nothing for deletion and deletes nothing. A caller must
 /// run it to the end, every type read included, before it lists or deletes
 /// any object.
+#[cfg(test)]
 fn mark_live(
     store: &ObjectStore,
     roots: &BTreeSet<Hash>,
     limits: MarkLimits,
 ) -> Result<LiveSet, GcRootsError> {
+    mark_live_observed(store, roots, limits, &mut |_, _, _| {})
+}
+
+/// Take a bounded FIFO window without probing ids the serial walk skips.
+fn take_probe_window(queue: &mut VecDeque<Hash>, objects: &BTreeSet<Hash>) -> Vec<Hash> {
+    let mut seen = BTreeSet::new();
+    let count = queue.len().min(16 * 1024);
+    queue
+        .drain(..count)
+        .filter(|h| !objects.contains(h) && seen.insert(*h))
+        .collect()
+}
+
+fn mark_live_observed(
+    store: &ObjectStore,
+    roots: &BTreeSet<Hash>,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+) -> Result<LiveSet, GcRootsError> {
+    mark_live_checked(store, roots, limits, progress, &|| Ok(()), &|| Ok(()))
+}
+
+fn mark_live_checked(
+    store: &ObjectStore,
+    roots: &BTreeSet<Hash>,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+    checkpoint: &dyn Fn() -> Result<(), GcRootsError>,
+    probe: &(dyn Fn() -> Result<(), GcRootsError> + Sync),
+) -> Result<LiveSet, GcRootsError> {
+    let mut last_progress = std::time::Instant::now();
+    progress("gc_mark", 0, 0);
     let mut objects: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
     let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
-    while let Some(h) = queue.pop_front() {
-        if objects.contains(&h) {
-            continue;
-        }
-        if objects.len() >= limits.cap {
-            return Err(GcRootsError::Truncated);
-        }
-        objects.insert(h);
-        // A blob or delta is a leaf. Its type is all gc needs, so its
-        // content is not read or verified (see `live_objects_with`).
-        if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
-            continue;
-        }
-        let object = store.read_object(&h)?;
-        let edges = children(&object, ClosureMode::History);
-        if matches!(object, Object::ChunkedBlob(_)) {
-            drop(object);
-            ids.extend(&edges)?;
-        } else {
-            queue.extend(edges);
+    while !queue.is_empty() {
+        checkpoint()?;
+        let queued = queue.len();
+        // Probe a bounded breadth-first window. Apply all results on this
+        // thread so traversal, caps and errors keep their sequential order.
+        let window: Vec<_> = take_probe_window(&mut queue, &objects)
+            .into_iter()
+            .map(|h| (h, std::sync::OnceLock::new()))
+            .collect();
+        // Skipped ids must still leave the queue so every window progresses.
+        debug_assert!(queue.len() < queued, "each probe window drains the queue");
+        super::chunk_heads::try_each_in_order(&window, |(h, slot)| {
+            probe()?;
+            let _ = slot.set(store.gc_object_type(h));
+            Ok::<(), GcRootsError>(())
+        })?;
+        for (h, slot) in window {
+            checkpoint()?;
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                progress("gc_mark", objects.len(), 0);
+                last_progress = std::time::Instant::now();
+            }
+            if objects.contains(&h) {
+                continue;
+            }
+            if objects.len() >= limits.cap {
+                return Err(GcRootsError::Truncated);
+            }
+            objects.insert(h);
+            // A blob or delta is a leaf. Packed leaf probes verify the id
+            // before letting the reported type end the walk.
+            if matches!(
+                slot.into_inner().expect("each probe ran")?,
+                ObjectType::Blob | ObjectType::Delta
+            ) {
+                continue;
+            }
+            let object = store.read_object(&h)?;
+            let edges = children(&object, ClosureMode::History);
+            if matches!(object, Object::ChunkedBlob(_)) {
+                drop(object);
+                ids.extend(&edges)?;
+            } else {
+                queue.extend(edges);
+            }
         }
     }
     drop(queue);
@@ -559,14 +639,30 @@ fn mark_live(
     ids.compact()?;
     let mut chunks = ids.ids;
     chunks.retain(|c| !objects.contains(c));
-    for chunk in &chunks {
-        if store.object_type(chunk)? != ObjectType::Blob {
-            return Err(GcRootsError::ChunkNotBlob {
-                manifest: manifest_listing(store, &objects, chunk)?,
-                chunk: *chunk,
+    // Each check opens a chunk and reads its head, not its payload, so on a
+    // cold disk the checks wait on the disk, and run many at a time.
+    for window in chunks.chunks(16 * 1024) {
+        checkpoint()?;
+        let checked = super::chunk_heads::try_each_in_order(window, |chunk| {
+            probe().map_err(|error| (*chunk, Some(error)))?;
+            match store.gc_chunk_type(chunk) {
+                Ok(ObjectType::Blob) => Ok(()),
+                Ok(_) => Err((*chunk, None)),
+                Err(error) => Err((*chunk, Some(error.into()))),
+            }
+        });
+        checkpoint()?;
+        if let Err((chunk, error)) = checked {
+            return Err(match error {
+                Some(error) => error,
+                None => GcRootsError::ChunkNotBlob {
+                    manifest: manifest_listing(store, &objects, &chunk, checkpoint)?,
+                    chunk,
+                },
             });
         }
     }
+    progress("gc_mark", objects.len() + chunks.len(), 0);
     Ok(LiveSet { objects, chunks })
 }
 
@@ -576,8 +672,10 @@ fn manifest_listing(
     store: &ObjectStore,
     objects: &BTreeSet<Hash>,
     chunk: &Hash,
+    checkpoint: &dyn Fn() -> Result<(), GcRootsError>,
 ) -> Result<Hash, GcRootsError> {
     for h in objects {
+        checkpoint()?;
         if store.object_type(h)? != ObjectType::ChunkedBlob {
             continue;
         }
@@ -588,6 +686,15 @@ fn manifest_listing(
         }
     }
     Ok(hash::ZERO)
+}
+
+/// Classify one soft root as the soft mark does.
+#[cfg(test)]
+pub(crate) fn classify_soft_root(
+    store: &ObjectStore,
+    root: Hash,
+) -> Result<Option<Hash>, GcRootsError> {
+    soft::SoftGraph::new(store, MarkLimits::DEFAULT).classify(root)
 }
 
 /// `live_objects_with` at the default limits.
@@ -612,12 +719,9 @@ pub(crate) fn live_objects(
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
-/// Does not verify leaf (blob/delta) content integrity as part of the
-/// walk — see [`super::graph::reachable_objects`]'s "Content integrity
-/// of leaves" doc section. `gc` is therefore no longer an incidental
-/// corruption-detection pass over blob content the way it was before the
-/// object-type short-circuit; it still fails closed on a *missing* object, just not on a
-/// present-but-corrupted one.
+/// Loose leaves are probed by type. For packed leaves, verify the payload
+/// before trusting where the index points. A packed id that only a manifest
+/// lists is checked by its head and frame length, without hashing it.
 ///
 /// # Errors
 ///
@@ -626,54 +730,40 @@ pub(crate) fn live_objects(
 /// [`GcRootsError::Truncated`] past [`MAX_REACHABLE`] objects,
 /// [`GcRootsError::TooManyChunks`] past [`MAX_LIVE_CHUNKS`] distinct chunks,
 /// or [`GcRootsError::ChunkNotBlob`] for a chunk of another kind.
+#[cfg(test)]
 fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
     limits: MarkLimits,
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
-    let (hard, soft) = collect_root_sets(layout)?;
-    let mut skipped = BTreeSet::new();
-    let mut present = Vec::new();
-    for root in soft {
-        match store.object_type(&root.hash) {
-            Ok(_) => present.push(root),
-            Err(StoreError::ObjectNotFound(_)) => {
-                skipped.insert(root.state_file);
-            }
-            // A read that fails for another reason is not a missing object.
-            Err(error) => return Err(error.into()),
-        }
+    live_objects_observed(store, layout, limits, &mut |_, _, _| {}, &mut |_| {})
+}
+
+fn live_objects_observed(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+    empty_attestation: &mut dyn FnMut(PathBuf),
+) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
+    let (hard, soft) = collect_root_sets(layout, empty_attestation)?;
+    if soft.is_empty() {
+        return Ok((mark_live_observed(store, &hard, limits, progress)?, vec![]));
     }
-    let mut roots = hard.clone();
-    roots.extend(present.iter().map(|root| root.hash));
-    let live = match mark_live(store, &roots, limits) {
+    let mut all = hard.clone();
+    all.extend(soft.iter().map(|root| root.hash));
+    match mark_live_observed(store, &all, limits, progress) {
+        Ok(live) => Ok((live, vec![])),
         Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
-            // An object is missing. A soft root whose closure an older gc
-            // pruned in part is what this can be, so walk each alone. Only a
-            // root whose own closure misses an object is skipped. The walk of
-            // the roots that stay then fails on a missing object that a hard
-            // root reaches, as it did before.
-            let mut kept = hard;
-            for root in present {
-                match mark_live(store, &BTreeSet::from([root.hash]), limits) {
-                    Ok(_) => {
-                        kept.insert(root.hash);
-                    }
-                    Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
-                        skipped.insert(root.state_file);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            mark_live(store, &kept, limits)?
+            soft::mark(store, hard, soft, limits, progress)
         }
-        other => other?,
-    };
-    Ok((live, skipped.into_iter().collect()))
+        Err(error) => Err(error),
+    }
 }
 
 /// Outcome of a [`run_gc`] sweep.
 #[derive(Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct GcReport {
     /// Objects examined in the store.
     pub scanned: usize,
@@ -693,10 +783,60 @@ pub struct GcReport {
     pub bytes_reclaimed: u64,
     /// True if this was a dry run (nothing deleted).
     pub dry_run: bool,
-    /// State files of an unfinished merge, cherry-pick, revert, rebase or
+    /// Attestation subject directories or state files of an unfinished
+    /// merge, cherry-pick, revert, rebase or
     /// bisect that name an object, or a closure, that the store no longer
     /// holds in full, which an older gc pruned. Gc skipped those roots and went on. Each file is listed once.
     pub skipped_state_files: Vec<PathBuf>,
+    /// Unreachable payload bytes in packs with no live entries.
+    pub wholly_dead_bytes: u64,
+    /// Unreachable payload bytes in packs with at least one live entry.
+    pub mixed_dead_bytes: u64,
+    /// Unreachable payload bytes whose pack passes grace.
+    pub eligible_dead_bytes: u64,
+    /// Live payload bytes in mixed packs with eligible dead entries.
+    pub survivor_bytes: u64,
+    /// Published packs examined after the mark.
+    pub packs_scanned: usize,
+    /// Whole packs retired, or eligible for retirement in a dry run.
+    pub packs_retired: usize,
+    /// Packs rewritten: their surviving entries were copied to new packs, and
+    /// the old pair was retired. Counted in a dry run as well.
+    pub packs_rewritten: usize,
+    /// Small packs merged into larger ones by copy-then-retire.
+    pub packs_merged: usize,
+    /// New packs that copy-then-retire published.
+    pub packs_written: usize,
+    /// Packs retired with no copy, because a pair that stays holds a verified
+    /// copy of every entry the pack must keep.
+    pub packs_retired_covered: usize,
+    /// Payload bytes of surviving entries copied to new packs.
+    pub survivor_bytes_copied: u64,
+    /// Payload bytes of entries dropped from retired packs: unreachable
+    /// entries past grace, and live entries held by a verified copy in a pair
+    /// that stays.
+    pub duplicate_bytes_reclaimed: u64,
+    /// Abandoned staging files or lone pack and index files reclaimed.
+    pub pack_leftovers_pruned: usize,
+    /// Loose files reclaimed because a verified packed copy remains.
+    pub loose_duplicates_pruned: usize,
+    /// Why copy-then-retire stopped, such as a full disk. Gc kept every pack it
+    /// meant to copy and went on with the rest of the run.
+    pub pack_copy_error: Option<String>,
+    /// Retirement could not take the exclusive `format` lock, because a
+    /// fetch, push or add held it, so it stopped before the rest of its
+    /// batches. Earlier batches stay done. Survivors that gc already copied
+    /// stay as duplicates, and the next gc retires what is left.
+    pub pack_retirement_cut_short: bool,
+    /// Milliseconds that pack retirement or the drop of loose duplicates held
+    /// the exclusive `format` lock, from the successful try to the release;
+    /// the longest of the holds. A writer that starts then waits that long.
+    pub retire_hold_ms: u64,
+    /// How many exclusive holds retirement and the drop of loose duplicates
+    /// took: one per batch of at most 32 items (SPEC-GC).
+    pub retire_batches: usize,
+    /// Damage found in aged packs that were left in place because their body failed verification.
+    pub skipped_pack_errors: Vec<String>,
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
@@ -716,6 +856,10 @@ pub struct GcReport {
 /// The sweep lists one `objects/<2 hex>/` directory at a time, so it never
 /// holds the id of every loose object.
 ///
+/// `progress` receives a phase name, the objects completed so far and the
+/// bytes reclaimed so far. A caller with no use for it passes
+/// `&mut |_, _, _| {}`.
+///
 /// # Errors
 /// [`GcRootsError`] from `live_objects_with`, store enumeration, or a delete.
 /// An error from the sweep itself leaves the objects of earlier directories
@@ -726,8 +870,9 @@ pub fn run_gc(
     now_secs: u64,
     grace_secs: u64,
     dry_run: bool,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<GcReport, GcRootsError> {
-    run_gc_with_hook(
+    run_gc_with_progress_hook(
         store,
         layout,
         now_secs,
@@ -735,12 +880,14 @@ pub fn run_gc(
         dry_run,
         MarkLimits::DEFAULT,
         |_| {},
+        progress,
     )
 }
 
 /// [`run_gc`] with injected mark limits and a `before_prune` call for every
 /// candidate of the sweep: each unreachable object old enough to prune, in a
 /// dry run as well as in a real run.
+#[cfg(test)]
 fn run_gc_with_hook(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -748,7 +895,30 @@ fn run_gc_with_hook(
     grace_secs: u64,
     dry_run: bool,
     limits: MarkLimits,
+    before_prune: impl FnMut(&Hash),
+) -> Result<GcReport, GcRootsError> {
+    run_gc_with_progress_hook(
+        store,
+        layout,
+        now_secs,
+        grace_secs,
+        dry_run,
+        limits,
+        before_prune,
+        &mut |_, _, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gc_with_progress_hook(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    limits: MarkLimits,
     mut before_prune: impl FnMut(&Hash),
+    progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<GcReport, GcRootsError> {
     // Refuse to delete through a symlinked store: if `.kit` or
     // `.kit/objects` is a symlink, `remove_object` would unlink the
@@ -756,19 +926,47 @@ fn run_gc_with_hook(
     // safe but we reject uniformly so a preview matches the real run.)
     reject_symlink(layout.common_dir())?;
     reject_symlink(store.objects_root())?;
+    if !dry_run {
+        crate::pack::sweep_spool_dir(&store.spool_dir());
+    }
 
     // Compute the keep-set FIRST, to the end; if this fails we list and
     // delete nothing.
-    let (live, skipped_state_files) = live_objects_with(store, layout, limits)?;
-
+    let mut empty_attestations = Vec::new();
+    let (live, skipped_state_files) =
+        live_objects_observed(store, layout, limits, progress, &mut |path| {
+            if !dry_run {
+                empty_attestations.push(path);
+            }
+        })?;
     let mut report = GcReport {
         dry_run,
         skipped_state_files,
         ..GcReport::default()
     };
+    let pack_sweep = store.plan_pack_sweep(&live, now_secs, grace_secs, &mut report)?;
+    progress("gc", 0, 0);
+    let mut last_progress = std::time::Instant::now();
+
+    pack_sweep.run(store, &mut report)?;
+    for path in empty_attestations {
+        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
+    }
+    let previewed_duplicates = if report.packs_scanned == 0 {
+        BTreeSet::new()
+    } else {
+        store.sweep_loose_duplicates(&pack_sweep, &live, now_secs, grace_secs, &mut report)?
+    };
     for shard in 0..=u8::MAX {
-        for h in store.list_shard(shard)? {
+        for h in store.list_loose_shard(shard)? {
+            if previewed_duplicates.contains(&h) {
+                continue;
+            }
             report.scanned += 1;
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                progress("gc", report.scanned - 1, report.bytes_reclaimed);
+                last_progress = std::time::Instant::now();
+            }
             if live.contains(&h) {
                 report.live += 1;
                 report.live_chunks += usize::from(live.contains_chunk(&h));
@@ -800,6 +998,7 @@ fn run_gc_with_hook(
         }
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
+    progress("gc", report.scanned, report.bytes_reclaimed);
     Ok(report)
 }
 
@@ -887,29 +1086,74 @@ fn walk_ref_roots_strict(
     Ok(())
 }
 
-/// Commit hashes that have at least one attestation envelope, taken from
-/// the `attestations/<commit-hex>/` directory names. Non-hex directory
-/// names are ignored (defensive); a missing dir yields an empty set.
-fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
-    let dir = common_dir.join(ATTESTATIONS_DIR_NAME);
-    let mut out = Vec::new();
-    let rd = match fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
+/// An envelope file makes its subject a soft root. Other entries in a
+/// subject directory neither pin the subject nor qualify for removal.
+fn collect_attestation_roots(
+    dir: &Path,
+    roots: &mut Vec<SoftRoot>,
+    empty_attestation: &mut dyn FnMut(PathBuf),
+) -> Result<(), GcRootsError> {
+    reject_symlink(dir)?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
     };
-    for entry in rd {
+    for entry in entries {
         let entry = entry?;
+        let Some(subject) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| hash::from_hex(n).ok())
+        else {
+            continue;
+        };
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        if let Some(name) = entry.file_name().to_str()
-            && let Ok(h) = hash::from_hex(name)
-        {
-            out.push(h);
+        let path = entry.path();
+        let mut files = fs::read_dir(&path)?.peekable();
+        if files.peek().is_none() {
+            empty_attestation(path);
+            continue;
+        }
+        for file in files {
+            let file = file?;
+            // Match the envelope store's <64-hex-id>.dsse naming rule.
+            let envelope = file
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".dsse"))
+                .is_some_and(|id| hash::from_hex(id).is_ok());
+            if envelope && file.file_type()?.is_file() {
+                roots.push(SoftRoot {
+                    hash: subject,
+                    state_file: path,
+                });
+                break;
+            }
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+fn remove_old_empty_attestation(path: &Path, now_secs: u64, grace_secs: u64) -> io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if meta.is_dir()
+        && crate::store::old_enough(&meta, now_secs, grace_secs)
+        && let Err(error) = fs::remove_dir(path)
+        && !matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+        )
+    {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Read a single 64-hex object id from `path`, trimming trailing
@@ -986,6 +1230,39 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn probe_windows_skip_marked_and_duplicate_ids_in_first_occurrence_order() {
+        let (a, b, c) = ([1; 32], [2; 32], [3; 32]);
+        let marked = BTreeSet::from([a]);
+        let mut queue = VecDeque::from([a, b, a, c, b]);
+        assert_eq!(take_probe_window(&mut queue, &marked), vec![b, c]);
+        assert!(queue.is_empty());
+        queue.extend(std::iter::repeat_n(a, 16 * 1024));
+        queue.push_back(b);
+        assert!(take_probe_window(&mut queue, &marked).is_empty());
+        assert_eq!(take_probe_window(&mut queue, &marked), vec![b]);
+    }
+
+    #[test]
+    fn parallel_type_probes_keep_every_leaf_and_first_error_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let roots: BTreeSet<_> = (0u32..128)
+            .map(|i| write_blob(&store, &i.to_le_bytes()))
+            .collect();
+        let live = mark_live(&store, &roots, MarkLimits::DEFAULT).unwrap();
+        assert_eq!(live.objects, roots);
+        assert!(live.chunks.is_empty());
+        let missing = [[0x88; 32], [0xee; 32]];
+        let mut broken = roots;
+        broken.extend(missing);
+        let err = mark_live(&store, &broken, MarkLimits::DEFAULT).unwrap_err();
+        assert!(
+            err.to_string().contains(&hash::to_hex(&missing[0])),
+            "{err}"
+        );
+    }
+
     /// Commit a single-file tree; returns `(commit, blob)` hashes.
     fn commit_one(s: &ObjectStore, name: &[u8], data: &[u8], parents: Vec<Hash>) -> (Hash, Hash) {
         let blob = write_blob(s, data);
@@ -1047,14 +1324,14 @@ mod tests {
             before_tree: before.tree_hash,
         };
         fs::write(linked_layout.pull_head_file(), state.encode()).unwrap();
-        run_gc(&store, &main, u64::MAX, 0, false).unwrap();
+        run_gc(&store, &main, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for hash in [target, target_blob, before.tree_hash, before_blob] {
             assert!(store.contains(&hash), "linked pull root must survive");
         }
         assert!(!store.contains(&before_commit));
         let orphan = write_blob(&store, b"cannot prune through corrupt state");
         fs::write(linked_layout.pull_head_file(), b"invalid").unwrap();
-        assert!(run_gc(&store, &main, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&store, &main, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
         assert!(store.contains(&orphan));
     }
 
@@ -1091,17 +1368,306 @@ mod tests {
     }
 
     #[test]
+    fn gc_prunes_an_unreferenced_subject_and_its_empty_attestation_directory() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (subject, blob) = commit_one(&store, b"subject", b"payload", vec![]);
+        let dir = md.attestations_dir().join(hash::to_hex(&subject));
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(!collect_roots(&md).unwrap().contains(&subject));
+        run_gc(&store, &md, 0, 1, false, &mut |_, _, _| {}).unwrap();
+        assert!(dir.is_dir() && store.contains(&subject));
+        run_gc(&store, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
+        assert!(dir.is_dir() && store.contains(&subject));
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+        assert!(!dir.exists());
+        assert!(!store.contains(&subject) && !store.contains(&blob));
+    }
+
+    #[test]
+    fn gc_keeps_an_attested_subject_but_ignores_unrelated_directory_entries() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (attested, attested_blob) = commit_one(&store, b"attested", b"retained", vec![]);
+        let (orphan, orphan_blob) = commit_one(&store, b"orphan", b"unreachable", vec![]);
+        let orphan_dir = md.attestations_dir().join(hash::to_hex(&orphan));
+        fs::create_dir_all(&orphan_dir).unwrap();
+        fs::write(orphan_dir.join("notes.txt"), b"keep this file").unwrap();
+        fs::create_dir(orphan_dir.join(format!("{}.dsse", "22".repeat(32)))).unwrap();
+        let attested_dir = md.attestations_dir().join(hash::to_hex(&attested));
+        fs::create_dir_all(&attested_dir).unwrap();
+        let envelope = attested_dir.join(format!("{}.dsse", "11".repeat(32)));
+        fs::write(&envelope, b"envelope fixture").unwrap();
+
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+        assert!(store.contains(&attested) && store.contains(&attested_blob));
+        assert!(envelope.is_file() && orphan_dir.join("notes.txt").is_file());
+        assert!(!store.contains(&orphan) && !store.contains(&orphan_blob));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_roots_reports_an_attestations_path_that_is_a_file() {
+        let (d, _store) = repo();
+        let md = layout(&d);
+        fs::write(md.attestations_dir(), b"not a directory").unwrap();
+
+        let result = collect_roots(&md);
+        assert!(matches!(
+            result,
+            Err(GcRootsError::Io(error)) if error.kind() == io::ErrorKind::NotADirectory
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_attestation_cleanup_reports_metadata_errors_other_than_not_found() {
+        let d = TempDir::new().unwrap();
+        let parent = d.path().join("file");
+        fs::write(&parent, b"not a directory").unwrap();
+
+        let error = remove_old_empty_attestation(&parent.join("subject"), u64::MAX, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
+    fn gc_tolerates_empty_attestation_directories_that_vanish_or_gain_entries() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let gone = md.attestations_dir().join("11".repeat(32));
+        let populated = md.attestations_dir().join("22".repeat(32));
+        let newcomer = populated.join("notes.txt");
+        fs::create_dir_all(&gone).unwrap();
+        fs::create_dir(&populated).unwrap();
+
+        // Mark progress starts after GC has listed the empty directories
+        // and before it attempts to remove them.
+        let mut changed = false;
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |phase, _, _| {
+            if phase == "gc_mark" && !changed {
+                fs::remove_dir(&gone).unwrap();
+                fs::write(&newcomer, b"keep").unwrap();
+                changed = true;
+            }
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert!(!gone.exists());
+        assert_eq!(fs::read(newcomer).unwrap(), b"keep");
+    }
+
+    fn write_attestation_fixture(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(format!("{}.dsse", "11".repeat(32))),
+            b"envelope fixture",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn collect_roots_includes_orig_head_and_attested_commit() {
         let (d, s) = repo();
         let md = layout(&d);
         let (orig, _) = commit_one(&s, b"o", b"o", vec![]);
         let (att, _) = commit_one(&s, b"x", b"x", vec![]);
         fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&orig))).unwrap();
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&att))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&att)));
 
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&orig), "ORIG_HEAD must be a root");
         assert!(roots.contains(&att), "attested commit must be a root");
+    }
+
+    #[test]
+    fn invalid_previous_head_refuses_collection_instead_of_dropping_a_root() {
+        let (d, _s) = repo();
+        let md = layout(&d);
+        fs::write(md.worktree_state_dir().join("PREVIOUS_HEAD"), b"invalid").unwrap();
+        assert!(collect_roots(&md).is_err());
+    }
+
+    #[test]
+    fn previous_detached_head_is_a_gc_root() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (prev, _) = commit_one(&s, b"prev", b"prev", vec![]);
+        refs::write_previous_head(&md, &refs::Head::Detached(prev)).unwrap();
+        assert!(collect_roots(&md).unwrap().contains(&prev));
+    }
+
+    #[test]
+    fn previous_detached_head_stays_hard_with_missing_attestation_roots() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (previous, blob) = commit_one(&store, b"previous", b"previous", vec![]);
+        refs::write_previous_head(&md, &refs::Head::Detached(previous)).unwrap();
+        let missing = md.attestations_dir().join("99".repeat(32));
+        write_attestation_fixture(&missing);
+        let report = run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+        assert!(store.contains(&previous) && store.contains(&blob));
+        assert_eq!(report.skipped_state_files, [missing]);
+        fs::remove_file(store.path_for(&blob)).unwrap();
+        let orphan = write_blob(&store, b"must survive failed mark");
+        assert!(run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
+        assert!(store.contains(&previous) && store.contains(&orphan));
+    }
+
+    #[test]
+    fn complete_soft_roots_do_not_restart_the_mark() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (base, _) = commit_one(&store, b"base", b"base", vec![]);
+        let (hard, _) = commit_one(&store, b"hard", b"hard", vec![base]);
+        let (soft, _) = commit_one(&store, b"soft", b"soft", vec![base]);
+        write_ref(&md, "refs/heads/main", &hard);
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&soft)));
+        let mut starts = 0;
+        let (live, skipped) = live_objects_observed(
+            &store,
+            &md,
+            MarkLimits::DEFAULT,
+            &mut |phase, count, _| {
+                if phase == "gc_mark" && count == 0 {
+                    starts += 1;
+                }
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(live.contains(&hard) && live.contains(&soft) && live.contains(&base));
+        assert!(skipped.is_empty());
+        assert_eq!(starts, 1, "complete roots need one shared mark");
+    }
+
+    #[test]
+    fn soft_roots_count_distinct_objects_and_chunks_not_duplicate_edges() {
+        for chunked in [false, true] {
+            let (d, store) = repo();
+            let md = layout(&d);
+            let blob = write_blob(&store, b"x");
+            let object = if chunked {
+                Object::ChunkedBlob(
+                    crate::object::ChunkedBlob::new(64, 0, (1..=64).map(|end| (blob, end)))
+                        .unwrap(),
+                )
+            } else {
+                Object::Tree(Tree {
+                    entries: (0..64)
+                        .map(|n| TreeEntry {
+                            name: format!("f{n:03}").into_bytes(),
+                            mode: EntryMode::Blob,
+                            object_hash: blob,
+                        })
+                        .collect(),
+                })
+            };
+            let root = store
+                .write(&serialize::serialize(&object).unwrap())
+                .unwrap();
+            write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&root)));
+            let limits = MarkLimits {
+                cap: 4,
+                chunk_cap: 1,
+                compact_floor: 1,
+            };
+            let (live, skipped) = live_objects_with(&store, &md, limits).unwrap();
+            assert!(live.contains(&root) && live.contains(&blob));
+            assert!(skipped.is_empty());
+            assert_eq!(live.len(), 2);
+        }
+    }
+
+    #[test]
+    fn soft_chunked_subjects_keep_shared_chunks_and_skip_missing_chunks() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let chunk = write_blob(&store, b"abc");
+        let manifest = |id| {
+            store
+                .write(
+                    &serialize::serialize(&Object::ChunkedBlob(
+                        crate::object::ChunkedBlob::new(3, 0, [(id, 3)]).unwrap(),
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        let good = manifest(chunk);
+        let bad = manifest([0x88; 32]);
+        for root in [good, bad] {
+            write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&root)));
+        }
+        let report = run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+        assert!(store.contains(&good) && store.contains(&chunk));
+        assert!(!store.contains(&bad));
+        assert_eq!(
+            report.skipped_state_files,
+            [md.attestations_dir().join(hash::to_hex(&bad))]
+        );
+    }
+
+    #[test]
+    fn missing_hard_closure_still_aborts_with_soft_attestation_roots() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (hard, blob) = commit_one(&store, b"hard", b"hard", vec![]);
+        write_ref(&md, "refs/heads/main", &hard);
+        let orphan = write_blob(&store, b"orphan");
+        write_attestation_fixture(&md.attestations_dir().join("99".repeat(32)));
+        fs::remove_file(store.path_for(&blob)).unwrap();
+        assert!(run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
+        assert!(store.contains(&hard) && store.contains(&orphan));
+    }
+
+    #[test]
+    fn soft_roots_share_complete_and_missing_history_scans() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (base, _) = commit_one(&store, b"base", b"base", vec![]);
+        let (one, _) = commit_one(&store, b"one", b"one", vec![base]);
+        let (two, _) = commit_one(&store, b"two", b"two", vec![one]);
+        let mut graph = soft::SoftGraph::new(&store, MarkLimits::DEFAULT);
+        assert_eq!(graph.classify(two).unwrap(), None);
+        let scanned = graph.scanned();
+        assert_eq!(graph.classify(one).unwrap(), None);
+        assert_eq!(graph.classify(base).unwrap(), None);
+        assert_eq!(graph.scanned(), scanned);
+        let missing = [0x77; 32];
+        let (bad_one, _) = commit_one(&store, b"bad", b"bad", vec![missing]);
+        let (bad_two, _) = commit_one(&store, b"bad2", b"bad2", vec![bad_one]);
+        assert_eq!(graph.classify(bad_two).unwrap(), Some(missing));
+        let scanned = graph.scanned();
+        assert_eq!(graph.classify(bad_one).unwrap(), Some(missing));
+        assert_eq!(graph.scanned(), scanned);
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&two)));
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&bad_two)));
+        let (live, skipped) = live_objects_with(&store, &md, MarkLimits::DEFAULT).unwrap();
+        assert!(live.contains(&base) && live.contains(&one) && live.contains(&two));
+        assert!(!live.contains(&bad_one) && !live.contains(&bad_two));
+        assert_eq!(
+            skipped,
+            [md.attestations_dir().join(hash::to_hex(&bad_two))]
+        );
+    }
+
+    #[test]
+    fn attestation_with_missing_subject_or_closure_is_skipped() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let absent = [0xa5; 32];
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&absent)));
+        let (attested, blob) = commit_one(&s, b"attested", b"payload", vec![]);
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&attested)));
+        // Remove one object to simulate a partly swept closure.
+        fs::remove_file(s.path_for(&blob)).unwrap();
+        let (_, skipped) =
+            live_objects_observed(&s, &md, MarkLimits::DEFAULT, &mut |_, _, _| {}, &mut |_| {})
+                .unwrap();
+        assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&absent))));
+        assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&attested))));
     }
 
     #[test]
@@ -1173,12 +1739,19 @@ mod tests {
         let (kept, kept_blob) = commit_one(&s, b"deep", b"deep", vec![]);
         let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
         let name = vec!["a"; crate::refs::MAX_REF_NAME_BYTES / 2].join("/");
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            md.common_dir().join("refs/heads").join(&name),
+            md.common_dir().join("refs/heads"),
+        );
         write_ref(&md, &format!("refs/heads/{name}"), &kept);
 
         assert!(collect_roots(&md).unwrap().contains(&kept));
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&kept) && s.contains(&kept_blob));
         assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
+        drop(cleanup);
+        drop(s);
+        d.close().unwrap();
     }
 
     /// Past every name the length bound allows, gc cannot tell what the
@@ -1190,6 +1763,10 @@ mod tests {
         let (kept, _) = commit_one(&s, b"deep", b"deep", vec![]);
         let (orphan, _) = commit_one(&s, b"orphan", b"orphan", vec![]);
         let name = vec!["a"; MAX_REF_WALK_DEPTH + 3].join("/");
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            md.common_dir().join("refs/heads").join(&name),
+            md.common_dir().join("refs/heads"),
+        );
         write_ref(&md, &format!("refs/heads/{name}"), &kept);
 
         assert!(matches!(
@@ -1197,10 +1774,13 @@ mod tests {
             Err(GcRootsError::RefTooDeep(_))
         ));
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::RefTooDeep(_))
         ));
         assert!(s.contains(&kept) && s.contains(&orphan));
+        drop(cleanup);
+        drop(s);
+        d.close().unwrap();
     }
 
     #[test]
@@ -1215,7 +1795,7 @@ mod tests {
         let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
 
         // grace=0 → all unreachable objects are old enough to prune.
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
 
         // The safety invariant: every live object still present.
         for h in &live {
@@ -1282,7 +1862,7 @@ mod tests {
         .unwrap();
 
         // Every object is older than the grace period.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for h in [result_tree, result_blob, start, bad, good, skipped] {
             assert!(s.contains(&h), "{} was pruned", hash::to_hex(&h));
         }
@@ -1293,7 +1873,7 @@ mod tests {
         // With the state gone nothing keeps them.
         conflict_state::clear_merge_state(&md).unwrap();
         bisect::cleanup_bisect(&md).unwrap();
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for h in [result_tree, result_blob, start, bad, good, skipped] {
             assert!(!s.contains(&h), "{} was kept", hash::to_hex(&h));
         }
@@ -1311,10 +1891,10 @@ mod tests {
         // A crash while the merge state was cleared leaves the file alone.
         conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
 
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(!s.contains(&result_tree) && !s.contains(&result_blob));
         // A second gc finds nothing left to read, and still succeeds.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&kept));
     }
 
@@ -1336,7 +1916,7 @@ mod tests {
             fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&kept))).unwrap();
             conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
 
-            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
             assert!(
                 s.contains(&result_tree) && s.contains(&result_blob),
                 "{operation}: the result tree was pruned"
@@ -1344,7 +1924,7 @@ mod tests {
 
             // With the operation gone nothing keeps the tree.
             fs::remove_file(&head_file).unwrap();
-            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
             assert!(
                 !s.contains(&result_tree) && !s.contains(&result_blob),
                 "{operation}: the result tree was kept"
@@ -1455,7 +2035,7 @@ mod tests {
             s.remove_object(&gone).unwrap();
         }
 
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         let mut expected = vec![
             md.bisect_file(),
             conflict_state::result_tree_path(&md.rebase_dir()),
@@ -1470,7 +2050,7 @@ mod tests {
         let (present, _) = commit_one(&s, b"present", b"present", vec![]);
         let present_tree = tree_of(&s, &present);
         conflict_state::write_result_tree(md.worktree_state_dir(), &present_tree).unwrap();
-        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
         assert!(
             !report
                 .skipped_state_files
@@ -1498,7 +2078,7 @@ mod tests {
         conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
         s.remove_object(&result_blob).unwrap();
 
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.skipped_state_files, [path]);
         assert!(s.contains(&kept) && s.contains(&kept_blob));
         // The rest of the closure is pruned, as the root is not one.
@@ -1511,7 +2091,7 @@ mod tests {
         conflict_state::write_result_tree(md.worktree_state_dir(), &tree_of(&s, &other)).unwrap();
         s.remove_object(&other_blob).unwrap();
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
         ));
     }
@@ -1539,12 +2119,12 @@ mod tests {
         s.remove_object(&tree).unwrap();
 
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
         ));
         // A missing commit under a ref fails the same way.
         s.remove_object(&kept).unwrap();
-        assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
     }
 
     /// Only the roots that an older gc could prune are skipped when gone. The
@@ -1683,7 +2263,7 @@ mod tests {
             };
             setup(&md, kept, named);
             s.remove_object(&named).unwrap();
-            let result = run_gc(&s, &md, u64::MAX, 0, false);
+            let result = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {});
             assert!(
                 result.is_err(),
                 "a missing {name} must still fail gc, got {result:?}"
@@ -1718,7 +2298,7 @@ mod tests {
             "staged blob must be a retention root"
         );
         // grace=0 → anything unrooted is pruned immediately.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             s.contains(&staged),
             "gc must never delete staged-but-uncommitted content"
@@ -1735,7 +2315,7 @@ mod tests {
 
         // Huge grace window with now=0 → nothing is "old", so the orphan
         // is kept despite being unreachable.
-        let report = run_gc(&s, &md, 0, u64::MAX, false).unwrap();
+        let report = run_gc(&s, &md, 0, u64::MAX, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&orphan), "recent orphan kept by grace window");
         assert_eq!(report.pruned, 0);
         assert!(report.kept_recent >= 1, "{report:?}");
@@ -1763,7 +2343,7 @@ mod tests {
         fs::remove_dir_all(&real_objects).unwrap();
         symlink(&external, &real_objects).unwrap();
 
-        let err = run_gc(&s, &md, u64::MAX, 0, false).unwrap_err();
+        let err = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap_err();
         assert!(
             matches!(err, GcRootsError::SymlinkedStore(_)),
             "gc must refuse a symlinked objects dir, got {err:?}"
@@ -1778,7 +2358,7 @@ mod tests {
         write_ref(&md, "refs/heads/main", &kept);
         let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
 
-        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
         assert!(report.dry_run && report.pruned >= 1, "{report:?}");
         assert!(s.contains(&orphan), "dry run must not delete the orphan");
     }
@@ -1802,7 +2382,7 @@ mod tests {
         )
         .unwrap();
 
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             s.contains(&superseded) && s.contains(&superseded_blob),
             "a recovery-logged commit must not be pruned"
@@ -1841,7 +2421,7 @@ mod tests {
             b"KIDX\x04\0\0\0\0".to_vec(),
         ] {
             fs::write(md.index_file(), &bytes).unwrap();
-            assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+            assert!(run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
             assert!(s.contains(&staged));
         }
     }

@@ -26,9 +26,9 @@ use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_core::{delta, serialize, transfer};
 use kit_sync::{
-    AppliedPacks, CloneRemote, FetchReport, NoopObserver, Observer, PullOutcome, RemoteSource,
-    SourceError, SyncError, SyncEvent, SyncOptions, TransportSource, clone, fetch, init_clone_dir,
-    pull,
+    AppliedPacks, CloneInitError, CloneRemote, FetchReport, NoopObserver, Observer, PullOutcome,
+    RemoteSource, SourceError, SyncError, SyncEvent, SyncOptions, TransportSource, clone, fetch,
+    init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
 
@@ -148,12 +148,16 @@ impl Remote {
         let bytes = writer.finish().unwrap();
         let pack_key = pack::pack_key(&bytes);
         self.tx
-            .upload_pack(&bytes, &PackKey::from_hash(pack_key))
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &PackKey::from_hash(pack_key),
+                None,
+            )
             .unwrap();
         let node = transfer::encode_packlist(self.packmap_head, &[pack_key]).unwrap();
         let node_key = hash::hash(&node);
         self.tx
-            .upload_blob(&node, &PackKey::from_hash(node_key))
+            .upload_blob(&node, &PackKey::from_hash(node_key), None)
             .unwrap();
         let (packmap_condition, head_condition) = match (self.packmap_head, self.tip) {
             (Some(node), Some(tip)) => (
@@ -209,6 +213,14 @@ fn fresh_target() -> (tempfile::TempDir, std::path::PathBuf, RepoLayout) {
     (dir, target, layout)
 }
 
+/// A readable legacy marker that stays loose. Tests that need gc to remove
+/// objects or want one durable checkpoint per wire pack use this fixture.
+fn fresh_loose_target() -> (tempfile::TempDir, std::path::PathBuf, RepoLayout) {
+    let target = fresh_target();
+    kit_core::fault::keep_loose(&target.2);
+    target
+}
+
 fn run_fetch(
     target: &Path,
     source: &dyn RemoteSource,
@@ -225,7 +237,7 @@ fn tracking_tip(layout: &RepoLayout) -> Option<Hash> {
 /// that had to wait for the worktree lock is the caller's concern.
 fn gc_now(layout: &RepoLayout) -> kit_core::ops::GcReport {
     let store = ObjectStore::open(layout).unwrap();
-    run_gc(&store, layout, u64::MAX, 0, false).unwrap()
+    run_gc(&store, layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap()
 }
 
 fn assert_closure_complete(layout: &RepoLayout, tip: Hash) {
@@ -339,13 +351,21 @@ impl RemoteSource for HookSource<'_> {
     fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
         let n = self.downloads.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.at {
             match &self.action {
@@ -357,7 +377,7 @@ impl RemoteSource for HookSource<'_> {
                 }
             }
         }
-        self.inner.download_pack_via_ref(key, ref_name)
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -607,7 +627,7 @@ fn the_longest_lock_wait_pulls_once_the_lock_is_released() {
 #[test]
 fn gc_at_grace_zero_prunes_none_of_a_running_fetchs_objects() {
     let remote = Remote::with_commits(4);
-    let (_dir, target, layout) = fresh_target();
+    let (_dir, target, layout) = fresh_loose_target();
     let (gate, pause) = gate();
     let probe = Probe {
         pause_unpack: Some((2, &gate)),
@@ -680,7 +700,7 @@ fn a_fetch_killed_in_any_download_resumes_with_only_the_remaining_packs() {
     const PACKS: usize = 5;
     let remote = Remote::with_commits(PACKS);
     for k in 1..=PACKS {
-        let (_dir, target, layout) = fresh_target();
+        let (_dir, target, layout) = fresh_loose_target();
         let dying = HookSource::new(&remote, k, Action::Panic);
         let died = catch_unwind(AssertUnwindSafe(|| {
             run_fetch(&target, &dying, &NoopObserver)
@@ -702,6 +722,38 @@ fn a_fetch_killed_in_any_download_resumes_with_only_the_remaining_packs() {
     }
 }
 
+#[test]
+fn packed_clone_resumes_from_the_last_completed_publication_window() {
+    let mut remote = Remote::new();
+    let mut data = vec![1; 64 << 20];
+    remote.push_file("first", &data);
+    data[0] = 2;
+    remote.push_file("second", &data);
+    remote.push_file("third", b"third");
+
+    let (_dir, target, layout) = fresh_target();
+    kill_fetch_in(&remote, &target, 3);
+    assert_eq!(tracking_tip(&layout), None);
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+    let applied = AppliedPacks::load(&layout, "origin").unwrap();
+    assert!(applied.contains(&PackKey::from_hash(remote.packs[0])));
+    assert!(!applied.contains(&PackKey::from_hash(remote.packs[1])));
+
+    let resumed = HookSource::counting(&remote);
+    let report = clone(
+        &target,
+        &resumed,
+        &clone_remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(resumed.downloads(), 2);
+    assert_eq!(report.pull.fetch.packs_already_applied, 1);
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+    assert_closure_complete(&layout, remote.tip());
+}
+
 // ---------------------------------------------------------------------------
 // 6. gc after a killed fetch, then a fetch
 // ---------------------------------------------------------------------------
@@ -719,11 +771,11 @@ fn remote_with_a_delta_across_packs() -> Remote {
 
 /// Kill a fetch in its `die_at`-th download, then gc away what it wrote, then
 /// fetch again. Returns the second fetch's report and how often it healed.
-fn heal_after_gc(remote: &Remote, die_at: usize) -> (FetchReport, usize, RepoLayout) {
-    let (dir, target, layout) = fresh_target();
-    // Keep the directory for the rest of the process; the caller's layout
-    // points into it.
-    std::mem::forget(dir);
+fn heal_after_gc(
+    remote: &Remote,
+    die_at: usize,
+) -> (FetchReport, usize, RepoLayout, tempfile::TempDir) {
+    let (dir, target, layout) = fresh_loose_target();
     let dying = HookSource::new(remote, die_at, Action::Panic);
     let died = catch_unwind(AssertUnwindSafe(|| {
         run_fetch(&target, &dying, &NoopObserver)
@@ -735,14 +787,23 @@ fn heal_after_gc(remote: &Remote, die_at: usize) -> (FetchReport, usize, RepoLay
     let probe = Probe::default();
     let report = run_fetch(&target, &remote.source(), &probe).unwrap();
     let stale = probe.stale.load(Ordering::SeqCst);
-    (report, stale, layout)
+    (report, stale, layout, dir)
+}
+
+#[test]
+fn healed_fetch_fixture_is_removed_when_dropped() {
+    let remote = remote_with_a_delta_across_packs();
+    let healed = heal_after_gc(&remote, 3);
+    let path = healed.2.worktree_root().to_path_buf();
+    drop(healed);
+    assert!(!path.exists(), "healed fixture left at {}", path.display());
 }
 
 #[test]
 fn a_fetch_after_gc_pruned_a_killed_fetchs_objects_heals() {
     let remote = remote_with_a_delta_across_packs();
     // The first two packs are recorded and nothing references their objects.
-    let (report, stale, layout) = heal_after_gc(&remote, 3);
+    let (report, stale, layout, _dir) = heal_after_gc(&remote, 3);
 
     assert_eq!(stale, 1, "the fetch heals once");
     assert_eq!(report.packs_downloaded, 3);
@@ -756,7 +817,7 @@ fn a_heal_reports_only_the_attempt_that_published() {
     let remote = remote_with_a_delta_across_packs();
     // Only the first pack is recorded. The retry's first attempt skips it,
     // applies the second pack, and fails on the third pack's delta.
-    let (report, stale, layout) = heal_after_gc(&remote, 2);
+    let (report, stale, layout, _dir) = heal_after_gc(&remote, 2);
 
     assert_eq!(stale, 1);
     assert_eq!(report.packs_downloaded, 3);
@@ -874,6 +935,80 @@ fn a_resumed_clone_equals_an_uninterrupted_one() {
     }
 }
 
+#[test]
+fn a_clone_run_again_over_its_unfinished_self_resumes() {
+    const PACKS: usize = 4;
+    let remote = Remote::with_commits(PACKS);
+
+    let dir = tempfile::tempdir().unwrap();
+    let whole = dir.path().join("whole");
+    clone(
+        &whole,
+        &remote.source(),
+        &clone_remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let expected = footprint(&whole, &RepoLayout::single(&whole));
+
+    let resumed = dir.path().join("resumed");
+    let layout = init_clone_dir(&resumed, &clone_remote()).unwrap();
+    kit_core::fault::keep_loose(&layout);
+    let dying = HookSource::new(&remote, 2, Action::Panic);
+    let died = catch_unwind(AssertUnwindSafe(|| {
+        run_fetch(&resumed, &dying, &NoopObserver)
+    }));
+    assert!(died.is_err());
+    let kept = ObjectStore::open(&layout)
+        .unwrap()
+        .iter_object_hashes()
+        .unwrap()
+        .len();
+    assert!(kept > 0, "the stopped clone kept the packs it applied");
+
+    // Another remote, or a file in the worktree, rules the directory out.
+    let other = CloneRemote {
+        url: "kit+memory://other".to_owned(),
+        ..clone_remote()
+    };
+    assert!(matches!(
+        init_clone_dir(&resumed, &other),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
+    std::fs::write(resumed.join("note"), b"mine").unwrap();
+    assert!(matches!(
+        init_clone_dir(&resumed, &clone_remote()),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
+    std::fs::remove_file(resumed.join("note")).unwrap();
+    // A record of a verified tip left in the directory is not trusted: the
+    // resumed clone checks every history in full.
+    let planted = layout.applied_packs_dir().join(".verified").join("planted");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"not made by this clone").unwrap();
+
+    let report = clone(
+        &resumed,
+        &remote.source(),
+        &clone_remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(
+        report.pull.outcome,
+        PullOutcome::FastForwarded { .. }
+    ));
+    assert!(!planted.exists());
+    assert_eq!(footprint(&resumed, &layout), expected);
+    // A finished clone has published its refs: it is not resumed again.
+    assert!(matches!(
+        init_clone_dir(&resumed, &clone_remote()),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Two fetches and the cursor record
 // ---------------------------------------------------------------------------
@@ -895,6 +1030,10 @@ impl RemoteSource for ViewBeforePush<'_> {
             hash: Some(self.tip),
         }])
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        let _ = prefix;
+        Ok(Vec::new())
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         if name == "refs/kit/packmap/main" {
             Ok(self.packmap)
@@ -902,11 +1041,16 @@ impl RemoteSource for ViewBeforePush<'_> {
             self.inner.read_ref(name)
         }
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
         Ok(self.cursor.clone())
@@ -924,17 +1068,25 @@ impl RemoteSource for PauseOnRead<'_> {
     fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         if name == self.name {
             self.gate.hit();
         }
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
         self.inner.repo_cursor()
@@ -1004,4 +1156,71 @@ fn a_fetch_overtaken_by_a_slower_one_does_not_hide_the_new_tip_from_later_fetche
         report.remote_unchanged,
         hash::to_hex(&old_tip)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 9. Kill and gc above an earlier tracking tip
+// ---------------------------------------------------------------------------
+
+/// A target that fetched the first three commits of a remote that then added
+/// three more, one pack each. The tracking tip, returned last, is where the
+/// closure check of the next fetch stops.
+fn above_an_earlier_tip() -> (
+    Remote,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    RepoLayout,
+    Hash,
+) {
+    let mut remote = Remote::with_commits(3);
+    let (dir, target, layout) = fresh_loose_target();
+    run_fetch(&target, &remote.source(), &NoopObserver).unwrap();
+    let anchor = remote.tip();
+    for i in 3..6 {
+        remote.push_file(&format!("f{i}.txt"), format!("content {i}\n").as_bytes());
+    }
+    (remote, dir, target, layout, anchor)
+}
+
+fn kill_fetch_in(remote: &Remote, target: &Path, die_at: usize) {
+    let dying = HookSource::new(remote, die_at, Action::Panic);
+    let died = catch_unwind(AssertUnwindSafe(|| {
+        run_fetch(target, &dying, &NoopObserver)
+    }));
+    assert!(died.is_err(), "the fetch must die in download {die_at}");
+}
+
+#[test]
+fn a_fetch_killed_above_an_earlier_tip_resumes_and_publishes_a_whole_closure() {
+    for die_at in 1..=3 {
+        let (remote, _dir, target, layout, anchor) = above_an_earlier_tip();
+        kill_fetch_in(&remote, &target, die_at);
+        assert_eq!(tracking_tip(&layout), Some(anchor), "death in {die_at}");
+
+        let probe = Probe::default();
+        let report = run_fetch(&target, &remote.source(), &probe).unwrap();
+        assert_eq!(probe.stale.load(Ordering::SeqCst), 0, "death in {die_at}");
+        assert_eq!(report.packs_downloaded, 3 - (die_at - 1));
+        assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+        assert_closure_complete(&layout, remote.tip());
+    }
+}
+
+/// gc prunes what a killed fetch applied above the tracking tip, and keeps
+/// the tracking tip's closure. The next fetch's check stops at that tip, still
+/// finds the pruned objects missing above it, and heals.
+#[test]
+fn gc_after_a_fetch_killed_above_an_earlier_tip_is_healed_by_the_next_fetch() {
+    for die_at in 2..=3 {
+        let (remote, _dir, target, layout, anchor) = above_an_earlier_tip();
+        kill_fetch_in(&remote, &target, die_at);
+        assert!(gc_now(&layout).pruned > 0, "death in {die_at}");
+        assert_closure_complete(&layout, anchor);
+
+        let probe = Probe::default();
+        run_fetch(&target, &remote.source(), &probe).unwrap();
+        assert_eq!(probe.stale.load(Ordering::SeqCst), 1, "death in {die_at}");
+        assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+        assert_closure_complete(&layout, remote.tip());
+    }
 }

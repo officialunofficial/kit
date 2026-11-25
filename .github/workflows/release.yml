@@ -33,7 +33,8 @@ name: "Release: Artifacts"
 # deserialize. The npm job builds without a cache for the same reason.
 #
 # No secrets are needed for cosign keyless, npm or crates.io — the OIDC token
-# comes from GitHub.
+# comes from GitHub. The tap update needs HOMEBREW_TAP_TOKEN with write
+# access to contents in officialunofficial/homebrew-tap.
 
 on:
   push:
@@ -199,6 +200,21 @@ jobs:
             echo "version=${VERSION}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Checkout the verified release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ steps.validate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Check tap write access
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: python3 -I -B scripts/homebrew.py preflight
+
+      - name: Check the formula template
+        run: python3 -I -B scripts/test-homebrew.py
+
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -262,7 +278,7 @@ jobs:
           components: rustfmt,clippy
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266  # v2
         with:
           workspaces: rust -> rust/target
           # Partition release caches away from PR-event workflow caches —
@@ -510,7 +526,7 @@ jobs:
       # same way the cargo-nextest/cargo-semver-checks installs above do, so
       # this job never compiles cargo-about from source.
       - name: Install cargo-about
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2  # v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f  # v2
         with:
           tool: cargo-about@0.9.1
 
@@ -799,7 +815,7 @@ jobs:
 
       - name: Install wasm-bindgen ${{ steps.pin.outputs.wasm_bindgen }}
         if: steps.registry.outputs.published == 'false'
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2  # v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f  # v2
         with:
           tool: wasm-bindgen@${{ steps.pin.outputs.wasm_bindgen }}
 
@@ -1006,3 +1022,32 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC2086  # EXCLUDES is a list of flags
           cargo publish --workspace --locked --no-verify ${EXCLUDES}
+
+  update-homebrew:
+    name: Update the Homebrew formula
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag, release, publish-npm, publish-crates]
+    if: ${{ !contains(needs.validate-release-tag.outputs.version, '-') }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.validate-release-tag.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download published release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate-release-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo officialunofficial/kit --json isDraft --jq 'if .isDraft then error("release is still a draft") else . end'
+          gh release download "$TAG" --repo officialunofficial/kit --pattern SHA256SUMS --dir "$RUNNER_TEMP/homebrew"
+
+      - name: Commit the formula to the tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.validate-release-tag.outputs.version }}
+        run: python3 -I -B scripts/homebrew.py update --version "$VERSION" --checksums "$RUNNER_TEMP/homebrew/SHA256SUMS"

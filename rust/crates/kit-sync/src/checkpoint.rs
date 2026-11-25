@@ -23,6 +23,14 @@ pub(crate) struct Checkpoint {
     pub(crate) nodes: usize,
 }
 
+/// Drop every checkpoint. A fetch then reads each branch in full.
+///
+/// # Errors
+/// The checkpoints cannot be removed.
+pub(crate) fn forget_all(layout: &RepoLayout) -> std::io::Result<()> {
+    crate::anchor::remove_dir_if_present(&layout.applied_packs_dir().join(".heads"))
+}
+
 pub(crate) fn path(
     layout: &RepoLayout,
     source: &dyn RemoteSource,
@@ -94,7 +102,7 @@ impl Checkpoint {
             self.nodes
         );
         let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
-        crate::applied_packs::write_atomic(path, bytes.as_bytes())
+        kit_core::durable::write_cache(path, bytes.as_bytes(), kit_core::durable::Parents::Create)
     }
 }
 

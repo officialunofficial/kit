@@ -586,9 +586,11 @@ pub fn list(layout: &RepoLayout, store_config: &StoreConfig<'_>) -> Result<Vec<E
 /// A relative `path` resolves against `cwd`. A locked tree needs
 /// `force_locked`, which is separate from `force`. Without `force`, the
 /// operation refuses a tree that is in the middle of an operation, or that has staged
-/// changes, unstaged changes or untracked files. It holds the registry lock
-/// and then the lock of the tree to remove, in that order. Another process
-/// that works inside the tree could be in the middle of a commit.
+/// changes, unstaged changes or untracked files. It takes the registry lock and
+/// then the lock of the tree to remove, in that order, before it checks for
+/// local work, and holds both until the tree is gone. Another process that
+/// works inside the tree could be in the middle of a commit, or about to stage
+/// a file.
 ///
 /// The tree goes first and the registry entry second. A crash in between
 /// leaves a registry entry that [`prune`] removes, and never a live tree with
@@ -615,6 +617,8 @@ pub fn remove(
         return Err(Error::RemoveCurrent);
     }
 
+    // The registry lock comes first, in the global lock order.
+    let _registry = lock::acquire_registry(layout, observer)?;
     let Some(entry) = registry(layout)?.into_iter().find(|entry| {
         entry
             .tree_root
@@ -624,6 +628,15 @@ pub fn remove(
         return Err(Error::NotLinked(target));
     };
     refuse_locked(&entry.state_dir, force_locked)?;
+    // The tree lock is held across the check for local work and the removal.
+    // A `kit add` or `kit commit` in the tree takes the same lock, so no file
+    // can be staged between the check and the delete.
+    let _tree_lock = if entry.state_dir.is_dir() {
+        let tree = RepoLayout::linked(&target, &entry.state_dir, layout.common_dir());
+        Some(lock::acquire_worktree(&tree, observer)?)
+    } else {
+        None
+    };
 
     // Local work counts: an operation in progress, staged and unstaged
     // changes, and untracked files, which exist in that tree only.
@@ -636,17 +649,6 @@ pub fn remove(
             return Err(Error::Dirty(why));
         }
     }
-
-    let _registry = lock::acquire_registry(layout, observer)?;
-    // A sibling `lock` may have run since the first check.
-    refuse_locked(&entry.state_dir, force_locked)?;
-    // The registry lock comes first, in the global lock order.
-    let _tree_lock = if entry.state_dir.is_dir() {
-        let tree = RepoLayout::linked(&target, &entry.state_dir, layout.common_dir());
-        Some(lock::acquire_worktree(&tree, observer)?)
-    } else {
-        None
-    };
     if target.exists()
         && let Err(source) = std::fs::remove_dir_all(&target)
     {

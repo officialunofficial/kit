@@ -88,15 +88,29 @@ fn holds(condition: RefWriteCondition, current: Option<Hash>) -> bool {
 }
 
 impl Transport for Remote<'_> {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.uploads.fetch_add(1, Ordering::SeqCst);
-        self.inner.upload_pack(bytes, key)
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -105,6 +119,9 @@ impl Transport for Remote<'_> {
         hash: &Hash,
     ) -> TransportResult<()> {
         self.inner.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
@@ -264,9 +281,12 @@ fn chain(remote: &Remote<'_>) -> Vec<transfer::PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = remote.read_ref(&packmap_ref("main")).unwrap();
     while let Some(key) = cursor {
-        let node =
-            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
-                .unwrap();
+        let node = transfer::decode_packlist(
+            &remote
+                .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
         cursor = node.prev;
         nodes.push(node);
     }
@@ -281,7 +301,9 @@ fn rebuilds(remote: &Remote<'_>, head: Hash) -> bool {
     let mut nodes = chain(remote);
     nodes.reverse();
     for key in nodes.iter().flat_map(|node| &node.packs) {
-        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let bytes = remote
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         if PackReader::read(&bytes, &fresh).is_err() {
             return false;
         }
@@ -325,18 +347,24 @@ fn reset_to(remote: &Remote<'_>, store: &ObjectStore, tip: Hash) {
     push_at(&scratch, store, tip, RefWriteCondition::Missing, 0).unwrap();
     let node_key = scratch.read_ref(&packmap_ref("main")).unwrap().unwrap();
     let node = scratch
-        .download_blob(&PackKey::from_hash(node_key))
+        .download_blob(&PackKey::from_hash(node_key), None, u64::MAX)
         .unwrap();
     for key in transfer::decode_packlist(&node).unwrap().packs {
         let key = PackKey::from_hash(key);
         remote
             .inner
-            .upload_pack(&scratch.download_pack(&key).unwrap(), &key)
+            .upload_pack(
+                &kit_core::protocol::SliceBody(
+                    &scratch.download_blob(&key, None, u64::MAX).unwrap(),
+                ),
+                &key,
+                None,
+            )
             .unwrap();
     }
     remote
         .inner
-        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .upload_blob(&node, &PackKey::from_hash(node_key), None)
         .unwrap();
     for (name, value) in [(packmap_ref("main"), node_key), (HEAD.to_owned(), tip)] {
         remote
@@ -457,10 +485,35 @@ fn a_force_push_racing_a_re_baseline_lands() {
     assert!(rebuilds(&remote, s.ahead));
 }
 
-/// Force pushes keep the ordered path on a remote that offers neither
-/// advance: their head write stays unconditional.
 #[test]
-fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
+fn a_serialized_force_push_replans_when_the_head_disappears() {
+    let (_dir, local) = store();
+    let (_other_dir, other_store) = store();
+    let remote = Remote::new();
+    let tip = commit(&local, &[("a", "ours")], &[], 1);
+    let old = commit(&other_store, &[("b", "theirs")], &[], 2);
+    push(&remote, &local, tip, RefWriteCondition::Missing).unwrap();
+    push(&remote, &other_store, old, RefWriteCondition::Any).unwrap();
+    assert!(!local.contains(&old));
+    let map = packmap_ref("main");
+    let before = remote.read_ref(&map).unwrap().unwrap();
+
+    // The force plan's full-closure pack is already in the chain. The
+    // delete removes its head between planning and the serialized advance.
+    remote.before_advance(move |remote| remote.delete_ref(HEAD, &old).unwrap());
+    push(&remote, &local, tip, RefWriteCondition::Any).unwrap();
+
+    assert!(matches!(
+        remote.delete_ref(&map, &before),
+        Err(TransportError::RefConflict)
+    ));
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+    assert!(rebuilds(&remote, tip));
+}
+
+/// A force push leases the head it planned against on an ordered advance.
+#[test]
+fn a_force_push_on_an_ordered_advance_leases_the_observed_head() {
     let (_dir, store) = store();
     let remote = Remote {
         serialized: false,
@@ -471,7 +524,7 @@ fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
     push(&remote, &store, s.ahead, RefWriteCondition::Any).unwrap();
     assert_eq!(
         *remote.head_conditions.lock().unwrap(),
-        [RefWriteCondition::Any]
+        [RefWriteCondition::Match(s.c[2])]
     );
     assert!(rebuilds(&remote, s.ahead));
 }
@@ -613,15 +666,20 @@ fn branch_rebuilds(remote: &Remote<'_>, branch: &str, head: Hash) -> bool {
     let mut nodes = Vec::new();
     let mut cursor = remote.read_ref(&packmap_ref(branch)).unwrap();
     while let Some(key) = cursor {
-        let node =
-            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
-                .unwrap();
+        let node = transfer::decode_packlist(
+            &remote
+                .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
         cursor = node.prev;
         nodes.push(node);
     }
     nodes.reverse();
     for key in nodes.iter().flat_map(|node| &node.packs) {
-        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let bytes = remote
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         if PackReader::read(&bytes, &fresh).is_err() {
             return false;
         }
@@ -863,6 +921,42 @@ fn a_push_over_the_ticket_budget_splits_into_advances_within_it() {
             "remote holds a tip: {first}, uploads per advance: {sent:?}"
         );
     }
+}
+
+#[test]
+fn a_linear_push_rebuilds_from_an_earlier_tip_across_several_packs() {
+    let (_dir, store) = store();
+    let remote = Remote {
+        atomic: true,
+        ..Remote::new()
+    };
+    let line = bulky_line(&store, 14);
+    let base = line[7];
+    push_bulky(
+        &remote,
+        &store,
+        base,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    )
+    .unwrap();
+    let before = remote.uploads.load(Ordering::SeqCst);
+    remote.uploads_at_advance.lock().unwrap().clear();
+    let tip = line[13];
+
+    let steps = push_bulky(
+        &remote,
+        &store,
+        tip,
+        RefWriteCondition::Match(base),
+        &PushControl::default(),
+    )
+    .unwrap();
+
+    assert_eq!(steps, 1);
+    assert!(packs_per_advance(&remote, before)[0] > 2);
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+    assert!(rebuilds(&remote, tip));
 }
 
 /// A push within the ticket budget stays one advance.

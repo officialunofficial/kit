@@ -237,6 +237,9 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
 - The `kit attest` CLI defaults to a `{}` predicate body when
   `--predicate-file` is omitted.
 
+Readers MUST ignore unrecognized Statement fields, and a predicate type that
+adds an expiry or validity window MUST use a new `predicateType` URI.
+
 ### 4.3 Canonicalization
 
 Both the outer DSSE envelope and the inner Statement are serialized
@@ -313,6 +316,12 @@ overwritten or deleted, so the two envelopes co-exist on disk.
 
 ### 5.3 Verify
 
+`kit verify-attest` succeeds when at least one envelope passes the checks
+below. An optional `--predicate-type` selects the exact `predicateType`
+URI from the signed payload. No match fails closed. Untrusted, malformed,
+and unbound envelopes are reported but do not veto a trusted match.
+Trust roots remain user-scoped. The algorithm filter affects display only.
+
 For each envelope attached to the commit:
 
 1. Decode envelope bytes via the strict decoder; reject if it doesn't
@@ -361,8 +370,8 @@ envelope's signature at all.
 
 The `kit verify-attest` CLI enumerates every envelope under
 `.kit/attestations/<commit>/`, prints a per-signature verdict, and
-exits 0 iff every envelope has at least one verifying signature whose
-subject binds to that commit.
+exits 0 iff at least one envelope has a trusted signature, binds to that
+commit, and matches the optional predicate type.
 
 There is no revocation list. Revocation is: stop trusting the
 `keyid`. Transparency-log-backed signatures would solve this
@@ -611,29 +620,19 @@ The PAE prefix `"DSSEv1 "` cannot collide with either domain prefix
 confusion (SPEC-SIGNING §2) is therefore extended to cover
 attestations with no additional work.
 
-### 7.3 Transport **(planned)**
+### 7.3 Transport
 
-Push/pull of attestations across the wire is not yet implemented in
-any of the `kit-transport-{file,http,s3,ssh,memory}` backends, and
-the SPEC-RPC opcode table does not yet carry attestation verbs.
-`kit push` / `kit pull` / `kit fetch` move only the object DAG
-today; attestations remain repo-local until a future transport
-revision adds them.
+`refs/kit/attestmap` names a KPKL v1 chain of attestation packs.
+SPEC-TRANSPORT §1.5 fixes the reader limits, synchronization records,
+and publication rules. Every pack entry MUST be a plain blob containing
+one strict in-toto DSSE envelope of at most 1 MiB. Raw and zstd-raw
+entries are allowed; deltas are forbidden. The blob's object id and the
+attestation id differ: the latter hashes only the envelope content.
+Readers derive the primary subject and attestation id from those bytes.
+They never unpack attestation blobs into the local object store.
 
-When that revision lands it MUST:
-
-- Allow uploading an envelope as `(commit-hash, envelope-bytes)`,
-  with the server computing `<att-id> = BLAKE3(envelope-bytes)` and
-  writing `.kit/attestations/<commit>/<att-id>.dsse`.
-- Allow downloading by `<att-id>` (returning envelope bytes).
-- Allow listing every `<att-id>` attached to a given `<commit>`,
-  returning the same sorted-by-att-id order `store::list` produces.
-- Degrade cleanly: a pre-attestation-aware server returns whatever
-  the SPEC-RPC unsupported-verb status is, and the client emits a
-  `warning:` line to stderr and continues without attestations.
-
-Opcode numbers and exact frame shapes will be specified in
-`SPEC-RPC` once the wire revision is cut.
+The git mirror `refs/kit/attestations` remains separate
+(SPEC-GIT-BRIDGE §11).
 
 ---
 
@@ -653,8 +652,10 @@ kit attest [--commit <hash>]
 kit verify-attest [--commit <hash>]
                    [--trust-roots <path>]
                    [--algorithm <filter>]
-    Verify every attestation attached to a commit. Exits 0 iff every
-    listed attestation has at least one verifying signature. The
+                   [--predicate-type <URI>]
+    Report every attestation attached to a commit. Exit 0 only when at
+    least one bound envelope has a trusted signature and matches the
+    optional predicate type. Untrusted envelopes remain in the report. The
     --algorithm filter narrows the per-signature display to one of
     ed25519 / secp256k1 / p256; the verdict is unchanged.
 ```
@@ -678,10 +679,7 @@ implemented**:
   hand against `.kit/attestations/<commit>/<att-id>.dsse`.
 - `kit attest --add-signature <att-id>` &mdash; see §5.2; multi-signer
   envelopes must currently be produced in a single invocation.
-- `--require-predicate` / `--require-signer` filters on
-  `kit verify-attest` &mdash; the verify command currently exits 0 if
-  every envelope verifies under at least one trust-rooted signature,
-  without further policy filtering.
+- `--require-signer` is not implemented.
 
 ---
 
@@ -723,6 +721,9 @@ must run `kit attest` explicitly after the commit lands.
 ---
 
 ## 10. Security properties (what this does and doesn't protect)
+
+An envelope binds to a subject, not a repository. It can be replayed into
+another repository that contains the same subject hash.
 
 Protects against:
 - **Silent substitution of attestation content.** JCS + BLAKE3 content-

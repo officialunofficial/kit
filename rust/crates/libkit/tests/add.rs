@@ -614,9 +614,15 @@ fn a_dry_run_of_a_file_of_many_chunks_stores_nothing_and_reports_what_add_stages
     f.run_with(&request, &mut NoChooser, &events).unwrap();
     assert_eq!(
         *events.0.lock().unwrap(),
-        vec![Event::WouldAdd {
-            path: "big.bin".to_owned()
-        }]
+        vec![
+            Event::HashProgress { bytes: 0 },
+            Event::HashProgress {
+                bytes: 24 * 1024 * 1024
+            },
+            Event::WouldAdd {
+                path: "big.bin".to_owned()
+            },
+        ]
     );
     assert_eq!(object_files(&f), before);
     assert!(index::read_index(&f.layout).unwrap().entries.is_empty());
@@ -627,4 +633,149 @@ fn a_dry_run_of_a_file_of_many_chunks_stores_nothing_and_reports_what_add_stages
     assert_eq!(idx.entries.len(), 1);
     assert_eq!(idx.entries[0].path, "big.bin");
     assert!(object_files(&f) > before);
+}
+
+/// The loose object files and the local packs of a repository.
+fn loose_and_packs(f: &Fixture) -> (usize, usize) {
+    let objects = f.root.join(".kit/objects");
+    let mut loose = 0;
+    for shard in fs::read_dir(&objects).unwrap() {
+        let shard = shard.unwrap().path();
+        let name = shard.file_name().unwrap().to_string_lossy().into_owned();
+        if shard.is_dir() && name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            loose += fs::read_dir(&shard)
+                .unwrap()
+                .filter(|e| {
+                    !e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with('.')
+                })
+                .count();
+        }
+    }
+    let packs = fs::read_dir(objects.join("pack")).map_or(0, |dir| {
+        dir.filter(|e| {
+            let path = e.as_ref().unwrap().path();
+            !path.file_name().unwrap().to_string_lossy().starts_with('.')
+                && path.extension().is_some_and(|ext| ext == "pack")
+        })
+        .count()
+    });
+    (loose, packs)
+}
+
+#[test]
+fn a_large_file_is_added_as_one_pack_and_one_loose_manifest() {
+    let f = Fixture::new(&[], &[]);
+    let data = pseudo_random(24 * 1024 * 1024);
+    fs::write(f.root.join("big.bin"), &data).unwrap();
+    f.paths(&["big.bin"]).unwrap();
+
+    assert_eq!(loose_and_packs(&f), (1, 1));
+    let idx = index::read_index(&f.layout).unwrap();
+    let Object::ChunkedBlob(manifest) = f.store.read_object(&idx.entries[0].object_hash).unwrap()
+    else {
+        panic!("a file of many chunks is a manifest");
+    };
+    assert!(manifest.chunks().len() > 100);
+    for id in manifest.chunks() {
+        f.store.read(id).unwrap();
+    }
+    // An edit rewrites only the changed chunks, into a small pack.
+    let mut edited = data;
+    edited[12 << 20] ^= 0xFF;
+    fs::write(f.root.join("big.bin"), &edited).unwrap();
+    f.paths(&["big.bin"]).unwrap();
+    let (loose, packs) = loose_and_packs(&f);
+    assert_eq!(packs, 2);
+    assert_eq!(loose, 2, "the old and the new manifest");
+}
+
+/// The index file as a test sees a rewrite of it: the bytes, and the inode,
+/// which a temporary file and a rename change.
+#[cfg(unix)]
+fn index_file(layout: &RepoLayout) -> (Vec<u8>, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = layout.index_file();
+    (fs::read(&path).unwrap(), fs::metadata(path).unwrap().ino())
+}
+
+#[cfg(unix)]
+#[test]
+fn an_add_that_changes_nothing_leaves_the_index_file_alone() {
+    let f = Fixture::new(&[], &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+    // The files are older than the racy window of the index the add writes,
+    // so the index keeps their stat cache and the next add finds them clean.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    f.paths(&["."]).unwrap();
+    let settled = index_file(&f.layout);
+
+    f.paths(&["a.txt"]).unwrap();
+    assert_eq!(
+        index_file(&f.layout),
+        settled,
+        "an add of an unchanged file"
+    );
+    f.run(&Request { all: true, ..BULK }).unwrap();
+    assert_eq!(index_file(&f.layout), settled, "add -A on a clean tree");
+    f.run(&Request {
+        update: true,
+        ..BULK
+    })
+    .unwrap();
+    assert_eq!(index_file(&f.layout), settled, "add -u on a clean tree");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_add_that_stages_something_writes_the_index() {
+    let f = Fixture::new(&[], &[("a.txt", "one\n")]);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    f.paths(&["a.txt"]).unwrap();
+    let before = index_file(&f.layout);
+
+    fs::write(f.root.join("a.txt"), "changed\n").unwrap();
+    f.paths(&["a.txt"]).unwrap();
+    assert_ne!(index_file(&f.layout), before);
+    assert_eq!(f.staged("a.txt").as_deref(), Some("changed\n"));
+
+    fs::remove_file(f.root.join("a.txt")).unwrap();
+    f.run(&Request {
+        update: true,
+        ..BULK
+    })
+    .unwrap();
+    assert_eq!(f.staged("a.txt"), None, "a deletion is recorded");
+}
+
+#[test]
+fn an_add_writes_an_index_it_seeded_from_head_even_when_nothing_changed() {
+    // A repository whose index file is gone starts from the tree of HEAD. The
+    // add stages nothing, and the file is still written, so the next command
+    // finds the seeded entries.
+    let f = Fixture::new(&[], &[("a.txt", "one\n")]);
+    f.paths(&["a.txt"]).unwrap();
+    let tree =
+        kit_core::worktree::build_tree_from_index(&f.store, &index::read_index(&f.layout).unwrap())
+            .unwrap();
+    let commit = Object::Commit(kit_core::object::Commit::new_unannotated(
+        tree,
+        Vec::new(),
+        kit_core::object::Identity::ed25519([1; 32]),
+        [1; 32],
+        b"first".to_vec(),
+        0,
+        [0; 64],
+    ));
+    let head = f
+        .store
+        .write(&serialize::serialize(&commit).unwrap())
+        .unwrap();
+    refs::write_ref(&f.layout, "main", &head).unwrap();
+    fs::remove_file(f.layout.index_file()).unwrap();
+
+    f.paths(&["a.txt"]).unwrap();
+    assert_eq!(f.staged("a.txt").as_deref(), Some("one\n"));
 }

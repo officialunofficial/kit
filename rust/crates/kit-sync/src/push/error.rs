@@ -1,6 +1,7 @@
 use super::RetryReason;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PushError {
     #[error(transparent)]
     Sync(#[from] crate::SyncError),
@@ -25,6 +26,15 @@ pub enum PushError {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would link a node onto a pack chain that, with it, holds
+    /// more nodes or listed packs than a fetch walks, so no client without
+    /// the tip could fetch the branch. The advance that would cross the
+    /// bound was not published, and neither is any later one, so a split
+    /// push reports this error alone rather than as a resumable prefix.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// One advance would need more data packs than the server permits per
     /// advance. `commit` names the single commit or merge that cannot be split
     /// further when the refusal came from the pre-flight dry seal, before
@@ -81,12 +91,18 @@ pub enum PushError {
         total: usize,
         cause: Box<PushError>,
     },
+    /// A tag the push names is not a local tag.
+    #[error("tag '{0}' does not exist")]
+    NoSuchTag(String),
     #[error("upload ticket was rejected after the push was retried")]
     TicketRejected,
     #[error("delta base is unavailable after a restart")]
     DeltaBaseUnavailable,
     #[error("packlist still names a pack absent from this repository after retry")]
     PacklistNotInRepository,
+    /// `push --delete` deleted nothing.
+    #[error(transparent)]
+    Delete(#[from] super::DeleteError),
 }
 
 fn resume_hint(cause: &PushError) -> &'static str {
@@ -109,15 +125,20 @@ impl From<kit_core::refs::RefError> for PushError {
     }
 }
 
+/// A local I/O error, on the store or on the push's delta spool, is
+/// [`crate::SyncError::Io`], as it is for a pack spool.
 impl From<kit_core::store::StoreError> for PushError {
     fn from(error: kit_core::store::StoreError) -> Self {
-        Self::Sync(crate::SyncError::Store(error))
+        match error {
+            kit_core::store::StoreError::Io(error) => Self::Sync(crate::SyncError::Io(error)),
+            error => Self::Sync(crate::SyncError::Store(error)),
+        }
     }
 }
 
 impl From<kit_core::pack::PackError> for PushError {
     fn from(error: kit_core::pack::PackError) -> Self {
-        Self::Sync(crate::SyncError::Pack(error))
+        Self::Sync(crate::SyncError::from(error))
     }
 }
 

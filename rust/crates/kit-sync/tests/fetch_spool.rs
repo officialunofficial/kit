@@ -1,0 +1,573 @@
+//! A fetch spools each pack in `.kit/tmp/` and leaves nothing there: not
+//! when it is killed mid-pack, not when the disk fills, and not after a
+//! stale file from an earlier run.
+//!
+//! A full disk is injected with `kit_core::fault`, which fails every write
+//! of a kind in the process, so the tests here run one at a time.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
+
+use std::cell::Cell;
+use std::io::ErrorKind;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
+
+use kit_core::fault::{self, Site, SyncStep};
+use kit_core::hash::{self, Hash};
+use kit_core::layout::RepoLayout;
+use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::pack::{self, PackSpool, PackWriter};
+use kit_core::protocol::{
+    BackoffIterator, PACK_BODY_LIMIT, PackKey, PackSink, SliceBody, Transport, TransportError,
+    retrying,
+};
+use kit_core::refs::{self, RefWriteCondition};
+use kit_core::sign::{self, KeyPair};
+use kit_core::{serialize, transfer};
+use kit_sync::{
+    AppliedPacks, CloneRemote, NoopObserver, RemoteSource, SourceError, SyncError, SyncOptions,
+    TransportSource, fetch, init_clone_dir,
+};
+use kit_transport_memory::MemoryTransport;
+
+/// The tests share the injected failures, so each one holds this while it
+/// runs.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Bytes that do not compress.
+fn noise(len: usize, seed: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut block = 0u32;
+    while out.len() < len {
+        out.extend_from_slice(&hash::hash(&[&block.to_le_bytes()[..], &[seed]].concat()));
+        block += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+/// A remote whose `main` is one signed commit of one 3 MiB file, in one pack:
+/// longer than the spool's buffer, so the spool writes to its file while
+/// the pack arrives.
+struct Remote {
+    tx: MemoryTransport,
+    tip: Hash,
+    pack: Hash,
+    /// The id the tree names for the big file.
+    blob: Hash,
+}
+
+fn remote() -> Remote {
+    remote_carrying(7)
+}
+
+/// [`remote`], but the pack carries the big file with the noise of `seed`
+/// while the tree names the file of seed 7, so any other seed is a corrupt
+/// object: bytes that are not the ones its id names.
+fn remote_carrying(seed: u8) -> Remote {
+    let tx = MemoryTransport::new();
+    let blob = Object::Blob(Blob {
+        data: noise(3 << 20, 7),
+    });
+    let carried = Object::Blob(Blob {
+        data: noise(3 << 20, seed),
+    });
+    let tree = Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"big.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob.id().unwrap(),
+        }],
+    });
+    let key = KeyPair::generate().unwrap();
+    let mut commit = Commit::new_unannotated(
+        tree.id().unwrap(),
+        Vec::new(),
+        Identity::ed25519(key.public.0),
+        key.public.0,
+        b"big file".to_vec(),
+        1_700_000_000,
+        [0u8; 64],
+    );
+    commit.signature = sign::sign_commit(&commit, &key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let mut writer = PackWriter::new();
+    for object in [&carried, &tree, &commit] {
+        writer
+            .push_raw(object.id().unwrap(), &serialize::serialize(object).unwrap())
+            .unwrap();
+    }
+    let bytes = writer.finish().unwrap();
+    let pack = pack::pack_key(&bytes);
+    tx.upload_pack(&SliceBody(&bytes), &PackKey::from_hash(pack), None)
+        .unwrap();
+    let node = transfer::encode_packlist(None, &[pack]).unwrap();
+    let node_key = hash::hash(&node);
+    tx.upload_blob(&node, &PackKey::from_hash(node_key), None)
+        .unwrap();
+    tx.update_ref(
+        "refs/kit/packmap/main",
+        RefWriteCondition::Missing,
+        &node_key,
+    )
+    .unwrap();
+    let tip = commit.id().unwrap();
+    tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &tip)
+        .unwrap();
+    Remote {
+        tx,
+        tip,
+        pack,
+        blob: blob.id().unwrap(),
+    }
+}
+
+/// A clone directory with nothing fetched yet.
+fn target() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    init_clone_dir(
+        &work,
+        &CloneRemote {
+            name: "origin".to_owned(),
+            url: "kit+memory://spool".to_owned(),
+            kind: "memory".to_owned(),
+        },
+    )
+    .unwrap();
+    (dir, work)
+}
+
+fn run_fetch(work: &Path, source: &dyn RemoteSource) -> Result<(), SyncError> {
+    fetch(
+        work,
+        source,
+        "origin",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .map(drop)
+}
+
+fn spool_dir(work: &Path) -> std::path::PathBuf {
+    work.join(".kit").join("tmp")
+}
+
+/// The entries in `dir`, or none when it is missing.
+fn entries(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir).map_or_else(
+        |_| Vec::new(),
+        |list| {
+            list.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        },
+    )
+}
+
+/// Files under the objects directory whose names are not object ids: the
+/// temporary files of an unfinished store write.
+fn stray_object_files(work: &Path) -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.len() != 62 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    out.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&work.join(".kit").join("objects"), &mut out);
+    out
+}
+
+/// Whether the applied-pack record of `origin` names `pack`.
+fn recorded(work: &Path, pack: Hash) -> bool {
+    AppliedPacks::load(&RepoLayout::single(work), "origin")
+        .unwrap()
+        .contains(&PackKey::from_hash(pack))
+}
+
+fn remote_tip(work: &Path) -> Option<Hash> {
+    refs::read_remote_ref(&RepoLayout::single(work), "origin", "main").unwrap()
+}
+
+/// Counts pack downloads, and the entries of `.kit/tmp/` while the spool
+/// holds a pack, which an unnamed spool never adds to. When `cut` is set, it
+/// writes the first half of the pack into the spool and panics, as a fetch
+/// killed mid-pack would stop.
+struct Downloads<'a> {
+    inner: TransportSource<'a>,
+    remote: &'a Remote,
+    work: &'a Path,
+    packs: Cell<usize>,
+    named_while_held: Cell<usize>,
+    cut: bool,
+}
+
+impl<'a> Downloads<'a> {
+    fn new(remote: &'a Remote, work: &'a Path, cut: bool) -> Self {
+        Self {
+            inner: TransportSource::new(&remote.tx),
+            remote,
+            work,
+            packs: Cell::new(0),
+            named_while_held: Cell::new(0),
+            cut,
+        }
+    }
+
+    fn note_named_spools(&self) {
+        let named = entries(&spool_dir(self.work)).len();
+        self.named_while_held
+            .set(self.named_while_held.get() + named);
+    }
+}
+
+impl RemoteSource for Downloads<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_hint)
+    }
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: &str,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
+        self.packs.set(self.packs.get() + 1);
+        if self.cut {
+            let bytes = self.remote.tx.download_blob(key, None, u64::MAX).unwrap();
+            sink.begin(Some(bytes.len() as u64)).unwrap();
+            sink.write(&bytes[..bytes.len() / 2]).unwrap();
+            self.note_named_spools();
+            panic!("the fetch is killed mid-pack");
+        }
+        self.inner.download_pack(key, ref_hint, sink)?;
+        self.note_named_spools();
+        Ok(())
+    }
+}
+
+#[test]
+fn a_fetch_killed_mid_pack_leaves_no_record_and_no_spool_and_the_next_one_applies() {
+    let _guard = serial();
+    let remote = remote();
+    let (_dir, work) = target();
+
+    let cut = Downloads::new(&remote, &work, true);
+    let killed = catch_unwind(AssertUnwindSafe(|| run_fetch(&work, &cut)));
+
+    assert!(killed.is_err());
+    assert_eq!(cut.packs.get(), 1);
+    assert_eq!(cut.named_while_held.get(), 0, "the spool has no name");
+    assert!(!recorded(&work, remote.pack));
+    assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+    assert_eq!(remote_tip(&work), None);
+
+    let source = Downloads::new(&remote, &work, false);
+    run_fetch(&work, &source).unwrap();
+    assert_eq!(source.named_while_held.get(), 0, "the spool has no name");
+    assert_eq!(source.packs.get(), 1);
+    assert_eq!(remote_tip(&work), Some(remote.tip));
+    assert!(recorded(&work, remote.pack));
+    assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+}
+
+/// A big object whose bytes are not the ones its id names is not fetched: the
+/// decoder derives its id from the bytes it writes, so the tree's name for
+/// the file stays missing, the fetch fails and no ref moves. No temporary file
+/// is left, and the object the pack really carries is never taken for the
+/// one the tree names.
+#[test]
+fn a_corrupt_big_object_is_refused_and_leaves_no_ref_and_no_file() {
+    let _guard = serial();
+    let remote = remote_carrying(8);
+    let (_dir, work) = target();
+    let source = Downloads::new(&remote, &work, false);
+
+    assert!(run_fetch(&work, &source).is_err());
+
+    assert_eq!(remote_tip(&work), None);
+    let store = kit_core::store::ObjectStore::open(&RepoLayout::single(&work)).unwrap();
+    assert!(!store.contains(&remote.blob));
+    // The tree's commit and trees are packed; no temporary file is left.
+    let temporary: Vec<_> = stray_object_files(&work)
+        .into_iter()
+        .filter(|path| path.contains(".kit.tmp"))
+        .collect();
+    assert_eq!(temporary, Vec::<String>::new());
+    assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+}
+
+/// A full disk under the spool, or under the store, ends the fetch as
+/// `SyncError::Io` after one download, with no file left behind. The next
+/// fetch, on a disk with room, applies the pack.
+#[test]
+fn a_full_disk_ends_the_fetch_as_an_io_error_without_a_retry_or_a_file() {
+    let _guard = serial();
+    let remote = remote();
+    for site in [Site::Spool, Site::Store] {
+        let (_dir, work) = target();
+        let source = Downloads::new(&remote, &work, false);
+
+        let failed = {
+            let _full = fault::fail_writes(site);
+            run_fetch(&work, &source)
+        };
+
+        match failed {
+            Err(SyncError::Io(error)) => {
+                assert_eq!(error.kind(), ErrorKind::StorageFull, "{site:?}: {error}");
+                if site == Site::Spool {
+                    let message = error.to_string();
+                    assert!(message.contains(".kit/tmp"), "{message}");
+                }
+            }
+            other => panic!("{site:?}: expected SyncError::Io, got {other:?}"),
+        }
+        assert_eq!(
+            source.packs.get(),
+            1,
+            "{site:?}: the download is not retried"
+        );
+        // A pack that verified and then failed to store stays for the retry,
+        // in its own directory. A download that failed leaves nothing.
+        let kept = if site == Site::Store {
+            vec!["retained".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(entries(&spool_dir(&work)), kept, "{site:?}");
+        assert_eq!(stray_object_files(&work), Vec::<String>::new(), "{site:?}");
+        assert!(!recorded(&work, remote.pack), "{site:?}");
+        assert_eq!(remote_tip(&work), None, "{site:?}");
+
+        run_fetch(&work, &source).unwrap();
+        assert_eq!(remote_tip(&work), Some(remote.tip), "{site:?}");
+        let downloads = if site == Site::Store { 1 } else { 2 };
+        assert_eq!(source.packs.get(), downloads, "{site:?}");
+    }
+}
+
+/// A crash after the pack of a window is published, whether before or after
+/// its loose batch is complete, leaves no record. The replay of the same
+/// window gives the same pack key: the one pack pair stays, with no second
+/// copy of its objects, and the clone ends complete.
+#[test]
+fn a_replayed_window_after_a_crash_reuses_the_published_pack() {
+    let _guard = serial();
+    let remote = remote();
+    for crash_at_device_flush in [false, true] {
+        let (_dir, work) = target();
+        let objects = work.join(".kit").join("objects");
+        let pack_dir = objects.join("pack");
+        let fired = Arc::new(Mutex::new(false));
+
+        let killed = {
+            let (objects, fired) = (objects.clone(), Arc::clone(&fired));
+            let _hook = fault::on_sync(move |step| {
+                let crash = match step {
+                    // The loose shards of the window, flushed after the pack.
+                    SyncStep::DirBarrier(dir) => {
+                        !crash_at_device_flush
+                            && dir.starts_with(&objects)
+                            && !dir.ends_with("pack")
+                    }
+                    // Every loose shard is durable; only the record is missing.
+                    SyncStep::DeviceFlush(at) => crash_at_device_flush && *at == objects,
+                    SyncStep::Writeout(_) | SyncStep::Flush(_) => false,
+                };
+                if crash {
+                    *fired.lock().unwrap_or_else(PoisonError::into_inner) = true;
+                    panic!("the fetch is killed after its pack is published");
+                }
+            });
+            catch_unwind(AssertUnwindSafe(|| {
+                run_fetch(&work, &TransportSource::new(&remote.tx))
+            }))
+        };
+
+        assert!(killed.is_err(), "{crash_at_device_flush}");
+        assert!(*fired.lock().unwrap(), "{crash_at_device_flush}");
+        let published = entries(&pack_dir);
+        assert_eq!(published.len(), 2, "one pack and its index");
+        assert!(!recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), None);
+
+        run_fetch(&work, &TransportSource::new(&remote.tx)).unwrap();
+
+        let mut replayed = entries(&pack_dir);
+        replayed.sort();
+        let mut published = published;
+        published.sort();
+        assert_eq!(replayed, published, "the replay publishes no second pack");
+        assert!(recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), Some(remote.tip));
+    }
+}
+
+/// Once a spool's write fails, a `begin` from a retry, a fallback to
+/// another location or a reconnect is refused and `failed()` stays set, so
+/// the transfer ends at the first local error.
+#[test]
+fn a_failed_spool_refuses_every_later_begin() {
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let mut spool = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    let body = noise(2 << 20, 3);
+    let attempts = Cell::new(0);
+
+    let result = retrying(
+        || {
+            attempts.set(attempts.get() + 1);
+            PackSink::begin(&mut spool, Some(body.len() as u64))?;
+            if attempts.get() == 1 {
+                let _full = fault::fail_writes(Site::Spool);
+                let written = PackSink::write(&mut spool, &body);
+                assert!(matches!(written, Err(TransportError::ProtocolError)));
+                // The connection drops as well: the ladder would retry.
+                return Err(TransportError::ConnectionFailed);
+            }
+            PackSink::write(&mut spool, &body)
+        },
+        || BackoffIterator::with(Duration::ZERO, Duration::ZERO, 5),
+        |_| {},
+    );
+
+    assert_eq!(attempts.get(), 2, "the retry's begin ends the transfer");
+    assert!(
+        matches!(result, Err(TransportError::ProtocolError)),
+        "{result:?}"
+    );
+    assert_eq!(PackSink::failed(&spool), Some(ErrorKind::StorageFull));
+    // A fallback or reconnect begins again later: still refused.
+    assert!(PackSink::begin(&mut spool, None).is_err());
+    assert_eq!(PackSink::failed(&spool), Some(ErrorKind::StorageFull));
+}
+
+/// The sweep at fetch start removes a spool file an earlier run left in
+/// `.kit/tmp/`, leaves a file it did not name, and a spool another transfer
+/// holds open there keeps working.
+#[test]
+fn the_sweep_at_fetch_start_removes_a_stale_file_and_leaves_an_open_spool() {
+    let _guard = serial();
+    let remote = remote();
+    let (_dir, work) = target();
+    let tmp = spool_dir(&work);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join(".tmpStale1"), b"left by a power loss").unwrap();
+    std::fs::write(tmp.join("notes.txt"), b"not a spool").unwrap();
+    let body = remote
+        .tx
+        .download_blob(&PackKey::from_hash(remote.pack), None, u64::MAX)
+        .unwrap();
+    let mut open = PackSpool::create(&tmp, PACK_BODY_LIMIT).unwrap();
+    open.begin(Some(body.len() as u64)).unwrap();
+    open.write(&body[..body.len() / 2]).unwrap();
+
+    run_fetch(&work, &Downloads::new(&remote, &work, false)).unwrap();
+
+    assert_eq!(entries(&tmp), vec!["notes.txt".to_owned()]);
+    open.write(&body[body.len() / 2..]).unwrap();
+    open.finish(&PackKey::from_hash(remote.pack)).unwrap();
+}
+
+/// Point `main` of `work` at `tip`, with HEAD on it.
+fn set_main(work: &Path, tip: Hash) {
+    let layout = RepoLayout::single(work);
+    refs::write_ref(&layout, "main", &tip).unwrap();
+    refs::write_head_branch(&layout, "main").unwrap();
+}
+
+/// A commit on `parent` whose one file differs from the remote's in a byte,
+/// written to the store of `work`.
+fn edit_commit(work: &Path, parent: Hash) -> Hash {
+    let store = kit_core::store::ObjectStore::open(&RepoLayout::single(work)).unwrap();
+    let write = |object: &Object| store.write(&serialize::serialize(object).unwrap()).unwrap();
+    let mut data = noise(3 << 20, 7);
+    data[1 << 20] ^= 1;
+    let tree = write(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"big.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: write(&Object::Blob(Blob { data })),
+        }],
+    }));
+    write(&Object::Commit(Commit::new_unannotated(
+        tree,
+        vec![parent],
+        Identity::ed25519([5; 32]),
+        [5; 32],
+        b"edit".to_vec(),
+        1_700_000_001,
+        [0u8; 64],
+    )))
+}
+
+fn push_to(work: &Path, tx: &MemoryTransport) -> Result<(), kit_sync::PushError> {
+    let source = TransportSource::new(tx);
+    let options = kit_sync::PushOptions::default();
+    kit_sync::push(work, &source, &options).map(drop)
+}
+
+/// A full disk under a push's pack spool, or under its delta spool, ends the
+/// push as `SyncError::Io` before any upload, with no file left behind. The
+/// push after it, on a disk with room, sends the packs.
+#[test]
+fn a_full_disk_ends_a_push_as_an_io_error_before_any_upload() {
+    let _guard = serial();
+    let remote = remote();
+    let (_dir, work) = target();
+    run_fetch(&work, &Downloads::new(&remote, &work, false)).unwrap();
+    set_main(&work, remote.tip);
+    let to = MemoryTransport::new();
+
+    for delta in [false, true] {
+        let packs = to.pack_count();
+        let failed = {
+            let _full = fault::fail_writes(Site::Spool);
+            push_to(&work, &to)
+        };
+        match failed {
+            Err(kit_sync::PushError::Sync(SyncError::Io(error))) => {
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::StorageFull,
+                    "delta {delta}: {error}"
+                );
+            }
+            other => panic!("delta {delta}: expected SyncError::Io, got {other:?}"),
+        }
+        assert_eq!(
+            to.pack_count(),
+            packs,
+            "delta {delta}: nothing was uploaded"
+        );
+        assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+
+        push_to(&work, &to).unwrap();
+        assert!(to.pack_count() > packs, "delta {delta}");
+        if !delta {
+            set_main(&work, edit_commit(&work, remote.tip));
+        }
+    }
+}

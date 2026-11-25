@@ -13,10 +13,12 @@
 //! BLAKE3 pack digest per line, LF-terminated, with no header. Unknown or
 //! malformed lines are ignored on load, so a torn final line from a killed
 //! process is harmless. A fetch appends one line per pack as it applies the
-//! pack ([`AppliedPacks::record_applied`]), with no fsync. The full rewrite
-//! is atomic: a sibling `.tmp` file is written, fsynced, and renamed over
-//! the destination — the same temp+fsync+rename pattern
-//! `kit_core::refs`/`kit_core::atomic` use for ref files.
+//! pack ([`AppliedPacks::record_applied`]), with no fsync. At the write limit,
+//! compaction keeps the newest digests in file order and leaves room for
+//! further appends. Persist makes no device flush: a lost line costs one
+//! download. Compaction, a clear, and retries of failed appends rewrite the
+//! record with a temporary file and a rename, with no flush. A shared
+//! repository lock protects the writable record across replacements.
 //!
 //! `<record>` is the remote *name* with any `/` percent-encoded to `%2F`
 //! (see [`record_file_name`]) so a legal multi-segment remote like
@@ -66,16 +68,15 @@
 //! routes through [`record_path`], so the two cannot drift.
 
 use kit_core::layout::RepoLayout;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-#[cfg(unix)]
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use kit_core::durable::Parents;
 use kit_core::hash::{HEX_LEN, Hash, to_hex};
 use kit_core::protocol::PackKey;
-use tempfile::NamedTempFile;
+use kit_core::repo_lock::{RepoLock, acquire_default};
 
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
@@ -84,14 +85,69 @@ use crate::observer::{Observer, SyncEvent};
 /// cache. A longer file is an error, and the fetch path then starts from
 /// an empty record.
 const RECORD_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const RECORD_MAX_ENTRIES: usize = 1_000_000;
+const RECORD_LINE_BYTES: usize = HEX_LEN + 1;
+const RECORD_WRITE_MAX_BYTES: u64 = (RECORD_MAX_ENTRIES * RECORD_LINE_BYTES) as u64;
+const RECORD_COMPACT_ENTRIES: usize = 900_000;
+const RECORD_LOCK: &str = "applied-packs.lock";
+
+#[derive(Debug, Default)]
+struct PackHints {
+    /// A true value marks a failed append or a digest recorded after a clear.
+    needs_write: HashMap<Hash, bool>,
+    oldest_first: VecDeque<Hash>,
+    pending: usize,
+}
+
+impl PackHints {
+    fn load(bytes: &[u8]) -> Self {
+        let mut hints = Self::default();
+        for digest in digest_lines(bytes).rev() {
+            if hints.oldest_first.len() == RECORD_MAX_ENTRIES {
+                break;
+            }
+            if hints.needs_write.insert(digest, false).is_none() {
+                hints.oldest_first.push_front(digest);
+            }
+        }
+        hints
+    }
+
+    fn remember(&mut self, digest: Hash, needs_write: bool, limit: usize) {
+        if self.oldest_first.len() == limit
+            && let Some(oldest) = self.oldest_first.pop_front()
+        {
+            self.pending -= usize::from(self.needs_write.remove(&oldest) == Some(true));
+        }
+        self.oldest_first.push_back(digest);
+        self.needs_write.insert(digest, needs_write);
+        self.pending += usize::from(needs_write);
+    }
+
+    fn unwritten(&self) -> impl DoubleEndedIterator<Item = Hash> + '_ {
+        self.oldest_first
+            .iter()
+            .copied()
+            .filter(|digest| self.needs_write.get(digest) == Some(&true))
+    }
+
+    fn mark_written(&mut self) {
+        self.pending = 0;
+        for needs_write in self.needs_write.values_mut() {
+            *needs_write = false;
+        }
+    }
+}
 
 /// A local record of pack digests already unpacked into this repo's object
 /// store for one remote. See the module docs for the on-disk format and the
 /// self-heal contract.
 #[derive(Debug)]
 pub struct AppliedPacks {
-    set: HashSet<Hash>,
+    hints: PackHints,
     path: PathBuf,
+    lock_dir: PathBuf,
+    clear_pending: bool,
     dirty: bool,
     /// A write to the record has failed and been reported. Later failures stay
     /// silent, so an unwritable record costs one warning per fetch, not one
@@ -114,14 +170,16 @@ impl AppliedPacks {
     pub fn load(layout: &RepoLayout, remote: &str) -> Result<Self, SyncError> {
         validate_remote_name(remote)?;
         let path = record_path(layout, remote);
-        let set = match kit_core::bounded_read::read_capped(&path, RECORD_MAX_BYTES) {
-            Ok(bytes) => parse(&bytes),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
+        let hints = match kit_core::bounded_read::read_capped(&path, RECORD_MAX_BYTES) {
+            Ok(bytes) => PackHints::load(&bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => PackHints::default(),
             Err(e) => return Err(SyncError::Io(e)),
         };
         Ok(Self {
-            set,
+            hints,
             path,
+            lock_dir: layout.common_dir().to_owned(),
+            clear_pending: false,
             dirty: false,
             failure_reported: false,
         })
@@ -144,8 +202,10 @@ impl AppliedPacks {
                 error: e.to_string(),
             });
             Self {
-                set: HashSet::new(),
+                hints: PackHints::default(),
                 path: record_path(layout, remote),
+                lock_dir: layout.common_dir().to_owned(),
+                clear_pending: false,
                 dirty: false,
                 failure_reported: false,
             }
@@ -155,15 +215,17 @@ impl AppliedPacks {
     /// True iff `key`'s digest is already recorded as applied.
     #[must_use]
     pub fn contains(&self, key: &PackKey) -> bool {
-        self.set.contains(&key.into_hash())
+        self.hints.needs_write.contains_key(&key.into_hash())
     }
 
     /// Record `key`'s digest as applied and append it to the on-disk record
     /// at once, so a fetch that dies later still skips this pack. The append
     /// is one `hex\n` line with no fsync: the record is a cache, and a torn or
     /// lost line is ignored on load and costs one download. The digest is
-    /// recorded in memory even when the append fails. The record is marked
-    /// dirty, so the next [`Self::persist`] still rewrites it atomically.
+    /// recorded in memory even when the append fails. At the write limit,
+    /// the newest digests replace the file atomically. [`Self::persist`]
+    /// retries failed appends, and flushes nothing. If a clear is
+    /// pending, it publishes the digests recorded since the clear.
     ///
     /// # Errors
     ///
@@ -171,9 +233,19 @@ impl AppliedPacks {
     /// write to this record has failed before. Later failures return `Ok`, so a
     /// caller that reports each error reports an unwritable record once.
     pub fn record_applied(&mut self, key: &PackKey) -> io::Result<()> {
-        self.set.insert(key.into_hash());
+        let digest = key.into_hash();
+        if self.contains(key) {
+            return Ok(());
+        }
         self.dirty = true;
-        match self.append_line(key) {
+        if self.clear_pending {
+            self.hints.remember(digest, true, RECORD_MAX_ENTRIES);
+            return Ok(());
+        }
+        let result = self.append_line(digest);
+        self.hints
+            .remember(digest, result.is_err(), RECORD_MAX_ENTRIES);
+        match result {
             Err(e) if self.first_failure() => Err(e),
             Err(_) | Ok(()) => Ok(()),
         }
@@ -185,20 +257,25 @@ impl AppliedPacks {
         !std::mem::replace(&mut self.failure_reported, true)
     }
 
-    fn append_line(&self, key: &PackKey) -> io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let mut line = to_hex(&key.into_hash());
+    fn lock(&self) -> io::Result<RepoLock> {
+        fs::create_dir_all(&self.lock_dir)?;
+        acquire_default(&self.lock_dir, RECORD_LOCK).map_err(io::Error::other)
+    }
+
+    fn append_line(&self, digest: Hash) -> io::Result<()> {
+        let _lock = self.lock()?;
+        fs::create_dir_all(self.path.parent().expect("record has a parent"))?;
+        let mut line = to_hex(&digest);
         line.push('\n');
         let mut file = fs::OpenOptions::new()
             .read(true)
             .append(true)
             .create(true)
             .open(&self.path)?;
+        let len = file.metadata()?.len();
         // A killed process can leave a torn last line. Start a new line, so
         // this digest is not glued onto the torn one and lost.
-        if file.metadata()?.len() > 0 {
+        if len > 0 {
             let mut last = [0u8; 1];
             file.seek(SeekFrom::End(-1))?;
             file.read_exact(&mut last)?;
@@ -206,19 +283,37 @@ impl AppliedPacks {
                 line.insert(0, '\n');
             }
         }
+        if len.saturating_add(line.len() as u64) > RECORD_WRITE_MAX_BYTES {
+            drop(file);
+            let bytes = read_record_for_rewrite(&self.path)?;
+            return write_recent(&self.path, &bytes, [digest], RECORD_COMPACT_ENTRIES);
+        }
         file.write_all(line.as_bytes())
     }
 
-    /// Atomically rewrite the on-disk record with the full current set
-    /// (sorted, for a deterministic file), but only if [`Self::record_applied`] has
-    /// been called since the last successful persist. A no-op call is free.
-    /// Clears the dirty flag on a successful write so a subsequent no-op
-    /// call really is free.
+    /// Retry missing writes, or publish a pending clear. Appended lines are
+    /// already in the record and need no flush. A successful persist clears
+    /// the dirty flag.
     pub fn persist(&mut self) -> Result<(), SyncError> {
         if !self.dirty {
             return Ok(());
         }
-        write(&self.path, &self.set)?;
+        if self.clear_pending || self.hints.pending != 0 {
+            let _lock = self.lock()?;
+            let bytes = if self.clear_pending {
+                Vec::new()
+            } else {
+                read_record_for_rewrite(&self.path)?
+            };
+            write_recent(
+                &self.path,
+                &bytes,
+                self.hints.unwritten(),
+                RECORD_MAX_ENTRIES,
+            )?;
+            self.hints.mark_written();
+            self.clear_pending = false;
+        }
         self.dirty = false;
         Ok(())
     }
@@ -229,7 +324,8 @@ impl AppliedPacks {
     /// wiped but `applied-packs/` survived) — this does not touch disk
     /// itself, so the caller persists, as the self-heal path does at once.
     pub fn clear(&mut self) {
-        self.set.clear();
+        self.hints = PackHints::default();
+        self.clear_pending = true;
         self.dirty = true;
     }
 
@@ -318,7 +414,7 @@ fn record_file_name(remote: &str) -> String {
 /// The full record path for `remote`:
 /// `<common dir>/applied-packs/<record_file_name(remote)>`. The single
 /// source of truth for the derivation — [`AppliedPacks::load`]/
-/// [`AppliedPacks::empty`] on the fetch path and
+/// [`AppliedPacks::load_or_empty`] on the fetch path and
 /// [`AppliedPacks::remove_record`]/[`AppliedPacks::rename_record`] on the
 /// `remote remove`/`rename` path all route through it, so the command
 /// handlers and the fetch path cannot drift.
@@ -329,79 +425,51 @@ fn record_path(layout: &RepoLayout, remote: &str) -> PathBuf {
 /// Parse the on-disk record format: one lowercase 64-hex digest per LF
 /// line. Malformed lines (wrong length, non-hex, uppercase hex) are
 /// silently ignored, per the module's contract.
-fn parse(bytes: &[u8]) -> HashSet<Hash> {
-    let mut set = HashSet::new();
-    let Ok(s) = core::str::from_utf8(bytes) else {
-        return set;
-    };
-    for line in s.split('\n') {
-        let trimmed = line.trim_end_matches('\r');
-        // Strict lowercase-hex parse in a single pass — reuses the same
-        // wire parser refs files use, rather than the more permissive
-        // `hash::from_hex` (which tolerates uppercase). On-disk records must
-        // be strict so a hand-edited or foreign-cased line is treated as
-        // malformed and ignored rather than silently accepted.
-        if let Some(h) = kit_core::refs::parse_lowercase_hash(trimmed.as_bytes()) {
-            set.insert(h);
-        }
-    }
-    set
+fn digest_lines(bytes: &[u8]) -> impl DoubleEndedIterator<Item = Hash> + '_ {
+    bytes.split(|&byte| byte == b'\n').filter_map(|line| {
+        let text = core::str::from_utf8(line).ok()?;
+        kit_core::refs::parse_lowercase_hash(text.trim_end_matches('\r').as_bytes())
+    })
 }
 
-/// Atomically rewrite `path` with the sorted, LF-terminated hex encoding of
-/// `set`. Creates the parent directory (`applied-packs/`) on first write.
-fn write(path: &Path, set: &HashSet<Hash>) -> Result<(), SyncError> {
-    let mut hexes: Vec<String> = set.iter().map(to_hex).collect();
-    hexes.sort_unstable();
-    let mut body = String::with_capacity(hexes.len() * (HEX_LEN + 1));
-    for hex in &hexes {
-        body.push_str(hex);
+fn read_record_for_rewrite(path: &Path) -> io::Result<Vec<u8>> {
+    match kit_core::bounded_read::read_capped(path, RECORD_MAX_BYTES) {
+        // Replace a cache that could not be read or exceeded its read limit.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::InvalidData
+                    | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(Vec::new())
+        }
+        result => result,
+    }
+}
+
+fn write_recent(
+    path: &Path,
+    bytes: &[u8],
+    appended: impl IntoIterator<Item = Hash, IntoIter: DoubleEndedIterator>,
+    limit: usize,
+) -> io::Result<()> {
+    // Read newest first so a repeated line takes its most recent position.
+    let mut seen = HashSet::new();
+    let newest_first: Vec<_> = appended
+        .into_iter()
+        .rev()
+        .chain(digest_lines(bytes).rev())
+        .filter(|hash| seen.insert(*hash))
+        .take(limit)
+        .collect();
+    let mut body = String::with_capacity(newest_first.len() * RECORD_LINE_BYTES);
+    for digest in newest_first.iter().rev() {
+        body.push_str(&to_hex(digest));
         body.push('\n');
     }
-    write_atomic(path, body.as_bytes())?;
-    Ok(())
-}
-
-/// Atomic temp+fsync+rename write, matching `kit_core::atomic::write_atomic`
-/// (kept as a local copy here rather than reaching into kit-core's
-/// crate-private helper — see that module's docs for why each durable
-/// subsystem owns its own copy of this primitive).
-pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = final_path
-        .parent()
-        .expect("applied_packs::write_atomic: path has parent");
-    fs::create_dir_all(parent)?;
-    let file_name = final_path
-        .file_name()
-        .expect("applied_packs::write_atomic: path has file name")
-        .to_string_lossy();
-    // `with_prefix_in` already appends a random unique suffix, so this
-    // prefix only needs to be stable and recognisable — no pid/sequence
-    // needed for uniqueness.
-    let tmp_prefix = format!(".{file_name}.tmp");
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_prefix, parent)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
-    tmp.persist(final_path).map_err(|e| e.error)?;
-
-    sync_parent_dir(parent)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    match File::open(parent) {
-        Ok(dir) => dir.sync_all(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    kit_core::durable::write_cache(path, body.as_bytes(), Parents::Create)
 }
 
 #[cfg(test)]
@@ -448,6 +516,73 @@ mod tests {
     }
 
     #[test]
+    fn appending_at_the_record_limit_keeps_the_newest_digests_readable() {
+        let (_dir, layout) = fresh_kit_dir();
+        let path = record_path(&layout, "origin");
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let old = pk("old");
+        let last_that_fits = pk("last that fits");
+        let newest = pk("newest");
+        applied.record_applied(&old).unwrap();
+        let mut other = AppliedPacks::load(&layout, "origin").unwrap();
+
+        // Pad the file to the write boundary without generating a million
+        // distinct digests. Compaction replaces this padding with valid lines.
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(RECORD_WRITE_MAX_BYTES - RECORD_LINE_BYTES as u64)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"\n").unwrap();
+        drop(file);
+
+        other.record_applied(&last_that_fits).unwrap();
+        assert!(!applied.contains(&last_that_fits));
+        assert_eq!(fs::metadata(&path).unwrap().len(), 65_000_000);
+        applied.record_applied(&newest).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 3 * 65);
+        applied.persist().unwrap();
+        other.persist().unwrap();
+        let reloaded = AppliedPacks::load(&layout, "origin").unwrap();
+        for key in [old, last_that_fits, newest] {
+            assert!(reloaded.contains(&key));
+        }
+    }
+
+    #[test]
+    fn retained_hints_evict_unwritten_digests_at_the_limit() {
+        let mut hints = PackHints::default();
+        let [old, middle, newest] = [3, 2, 1].map(|n| [n; 32]);
+        hints.remember(old, true, 2);
+        hints.remember(middle, false, 2);
+        assert_eq!(hints.pending, 1);
+        hints.remember(newest, true, 2);
+        assert_eq!(hints.oldest_first, [middle, newest]);
+        assert_eq!(hints.pending, 1);
+        assert!(!hints.needs_write.contains_key(&old));
+        assert_eq!(hints.unwritten().collect::<Vec<_>>(), vec![newest]);
+    }
+
+    #[test]
+    fn compaction_drops_oldest_hints_instead_of_sorting_by_digest() {
+        let (_dir, layout) = fresh_kit_dir();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let [old, middle, newest] = [3, 2, 1].map(|n| PackKey::from_hash([n; 32]));
+        for key in [old, middle, newest] {
+            applied.record_applied(&key).unwrap();
+        }
+        applied.persist().unwrap();
+
+        let path = record_path(&layout, "origin");
+        let bytes = fs::read(&path).unwrap();
+        write_recent(&path, &bytes, [], 2).unwrap();
+        let compacted = AppliedPacks::load(&layout, "origin").unwrap();
+        assert!(!compacted.contains(&old));
+        assert!(compacted.contains(&middle));
+        assert!(compacted.contains(&newest));
+        assert_eq!(fs::metadata(&compacted.path).unwrap().len(), 2 * 65);
+    }
+
+    #[test]
     fn a_torn_appended_line_is_ignored_on_load() {
         let (_dir, kit_dir) = fresh_kit_dir();
         let k1 = pk("pack-1");
@@ -481,6 +616,12 @@ mod tests {
         let next = pk("pack-2");
         assert!(applied.record_applied(&next).is_ok());
         assert!(applied.contains(&next));
+
+        fs::remove_dir(record_path(&kit_dir, "origin")).unwrap();
+        applied.persist().unwrap();
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(reloaded.contains(&key));
+        assert!(reloaded.contains(&next));
     }
 
     #[test]
@@ -530,18 +671,31 @@ mod tests {
         content.push('\n');
         content.push_str(&"z".repeat(64));
         content.push('\n');
+        let mut content = content.into_bytes();
+        content.extend_from_slice(b"\xff\n");
         fs::write(&path, content).unwrap();
 
-        let applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
         assert!(applied.contains(&PackKey::from_hash(valid)));
+        let newest = pk("newest");
+        applied.record_applied(&newest).unwrap();
+        applied.persist().unwrap();
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(reloaded.contains(&newest));
     }
 
     #[test]
     fn atomic_rewrite_leaves_no_tmp_file_on_success() {
         let (_dir, kit_dir) = fresh_kit_dir();
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
-        applied.record_applied(&pk("pack-1")).unwrap();
+        applied.record_applied(&pk("old")).unwrap();
+        applied.clear();
+        applied.record_applied(&pk("new")).unwrap();
         applied.persist().unwrap();
+
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(!reloaded.contains(&pk("old")));
+        assert!(reloaded.contains(&pk("new")));
 
         let dir = kit_dir.applied_packs_dir();
         let leftover: Vec<_> = fs::read_dir(&dir)
@@ -553,6 +707,29 @@ mod tests {
             leftover.is_empty(),
             "no .tmp file should survive a successful persist"
         );
+    }
+
+    #[test]
+    fn cache_records_are_written_with_no_full_flush() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let before = kit_core::fault::flushes();
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        applied.record_applied(&pk("pack-1")).unwrap();
+        applied.persist().unwrap();
+        kit_core::durable::write_cache(&dir.path().join("record"), b"bytes", Parents::Existing)
+            .unwrap();
+        let tip = h("tip");
+        crate::anchor::persist(&dir.path().join("verified"), &tip).unwrap();
+        assert_eq!(kit_core::fault::flushes(), before);
+        assert_eq!(crate::anchor::load(&dir.path().join("verified")), Some(tip));
+
+        // A durable pointer flushes the file and its directory.
+        kit_core::durable::write_pointer(&dir.path().join("pointer"), b"bytes", Parents::Existing)
+            .unwrap();
+        // Windows has no directory flush, so there it is the file alone.
+        let pointer = if cfg!(unix) { 2 } else { 1 };
+        assert_eq!(kit_core::fault::flushes(), before + pointer);
     }
 
     #[test]

@@ -1031,7 +1031,7 @@ pub(crate) fn export_closure_with_limits(
         if pack::PackFill::of(&writer).seals_before(
             pack::Incoming::raw(bytes.len() as u64, 0),
             max_pack_payload,
-            None,
+            crate::protocol::PACK_BODY_LIMIT,
             max_entries as usize,
         ) {
             packs.push(writer.finish()?);
@@ -1512,6 +1512,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(corrupt_ids(&report), vec![parent.0], "{report:?}");
+        assert_eq!(report.verified, 5, "a late conflict does not undo a visit");
     }
 
     fn remix_over(tree_hash: Hash) -> (Hash, Vec<u8>) {

@@ -10,12 +10,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Receives events of type `E` and can cancel an operation at its checkpoints.
 ///
-/// Both methods have a default body, so an observer implements only what it
+/// The methods have default bodies, so an observer implements only what it
 /// needs.
 pub trait Observer<E: ?Sized> {
     /// Called synchronously, on the calling thread, as events happen. Some
     /// events fire while a repository lock is held, so keep this cheap.
     fn event(&self, _event: &E) {}
+
+    /// An optional thread-safe view for progress delivered by a transfer sink.
+    /// Existing observers receive the transfer boundaries on the calling thread.
+    fn concurrent(&self) -> Option<&(dyn Observer<E> + Sync)> {
+        None
+    }
 
     /// Polled at every checkpoint between network or disk steps. Returning
     /// `true` makes the operation stop with its interrupted error.

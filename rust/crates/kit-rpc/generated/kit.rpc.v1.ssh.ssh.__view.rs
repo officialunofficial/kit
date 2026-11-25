@@ -2027,6 +2027,15 @@ pub struct ListRefsView<'a> {
     ///
     /// Field 1: `prefix`
     pub prefix: ::core::option::Option<&'a str>,
+    /// The most refs the reply may hold. The server caps it, and an absent or
+    /// zero value is refused. Same field numbers as the Connect ListRefsRequest.
+    ///
+    /// Field 2: `page_size`
+    pub page_size: ::core::option::Option<u32>,
+    /// The `next_page_token` of the previous page; empty starts the listing.
+    ///
+    /// Field 3: `page_token`
+    pub page_token: ::core::option::Option<&'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsView<'a> {
@@ -2066,6 +2075,20 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsView<'a> {
                 )?;
                 view.prefix = Some(::buffa::types::borrow_str(&mut cur)?);
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.page_size = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.page_token = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -2089,6 +2112,8 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsView<'a> {
         let _ = __buffa_src;
         ::core::result::Result::Ok(super::super::ListRefs {
             prefix: self.prefix.map(|s| s.to_string()),
+            page_size: self.page_size,
+            page_token: self.page_token.map(|s| s.to_string()),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -2101,6 +2126,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsView<'a> {
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
         if let Some(ref v) = self.prefix {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.page_size {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.page_token {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -2116,6 +2147,12 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsView<'a> {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.prefix {
             ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.page_size {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.page_token {
+            ::buffa::types::put_string_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2214,6 +2251,21 @@ impl ListRefsOwnedView {
     pub fn prefix(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().prefix
     }
+    /// The most refs the reply may hold. The server caps it, and an absent or
+    /// zero value is refused. Same field numbers as the Connect ListRefsRequest.
+    ///
+    /// Field 2: `page_size`
+    #[must_use]
+    pub fn page_size(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().page_size
+    }
+    /// The `next_page_token` of the previous page; empty starts the listing.
+    ///
+    /// Field 3: `page_token`
+    #[must_use]
+    pub fn page_token(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().page_token
+    }
 }
 impl ::core::convert::From<::buffa::OwnedView<ListRefsView<'static>>>
 for ListRefsOwnedView {
@@ -2244,6 +2296,11 @@ pub struct ListRefsResponseView<'a> {
         'a,
         super::super::super::super::super::common::v1::__buffa::view::RefEntryView<'a>,
     >,
+    /// Empty ends the listing. Any other value is passed back as `page_token`
+    /// to read the page after this one.
+    ///
+    /// Field 2: `next_page_token`
+    pub next_page_token: ::core::option::Option<&'a str>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
@@ -2276,6 +2333,13 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
         let view = self;
         let mut cur = cur;
         match tag.field_number() {
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.next_page_token = Some(::buffa::types::borrow_str(&mut cur)?);
+            }
             1u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -2323,6 +2387,7 @@ impl<'a> ::buffa::MessageView<'a> for ListRefsResponseView<'a> {
                 .iter()
                 .map(|v| v.to_owned_from_source(__buffa_src))
                 .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+            next_page_token: self.next_page_token.map(|s| s.to_string()),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -2342,6 +2407,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if let Some(ref v) = self.next_page_token {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2360,6 +2428,9 @@ impl<'a> ::buffa::ViewEncode<'a> for ListRefsResponseView<'a> {
                 buf,
             );
             v.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.next_page_token {
+            ::buffa::types::put_string_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2463,6 +2534,14 @@ impl ListRefsResponseOwnedView {
         super::super::super::super::super::common::v1::__buffa::view::RefEntryView<'_>,
     > {
         &self.0.reborrow().refs
+    }
+    /// Empty ends the listing. Any other value is passed back as `page_token`
+    /// to read the page after this one.
+    ///
+    /// Field 2: `next_page_token`
+    #[must_use]
+    pub fn next_page_token(&self) -> ::core::option::Option<&'_ str> {
+        self.0.reborrow().next_page_token
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<ListRefsResponseView<'static>>>
@@ -2943,7 +3022,7 @@ pub struct UpdateRefView<'a> {
     pub name: ::core::option::Option<&'a str>,
     /// Field 2: `expected_id`
     pub expected_id: ::core::option::Option<&'a [u8]>,
-    /// empty new_id deletes the ref
+    /// empty new_id deletes the ref, under MATCH only
     ///
     /// Field 3: `new_id`
     pub new_id: ::core::option::Option<&'a [u8]>,
@@ -3188,7 +3267,7 @@ impl UpdateRefOwnedView {
     pub fn expected_id(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().expected_id
     }
-    /// empty new_id deletes the ref
+    /// empty new_id deletes the ref, under MATCH only
     ///
     /// Field 3: `new_id`
     #[must_use]

@@ -348,3 +348,187 @@ fn pull_no_ff_refuses_a_detached_head() {
     let out = run_in(&fixture, &fixture.local, &["pull", "--no-ff"]);
     assert_eq!(out.status.code(), Some(64), "{out:?}");
 }
+
+/// Keep content addressing valid while making the new remote commit fail
+/// signature verification. Push accepts it so the client must refuse it.
+fn push_invalid_tip(fixture: &Fixture, unsigned: bool) {
+    use kit_core::{
+        layout::RepoLayout, object::Object, refs, serialize::serialize, store::ObjectStore,
+    };
+
+    commit_in(fixture, &fixture.upstream, "u.txt", "unverified\n", "u1");
+    let layout = RepoLayout::single(&fixture.upstream);
+    let store = ObjectStore::open(&layout).unwrap();
+    let head = refs::resolve_head(&layout).unwrap().unwrap();
+    let Object::Commit(mut commit) = store.read_object(&head).unwrap() else {
+        panic!("HEAD must be a commit");
+    };
+    if unsigned {
+        commit.signature = [0; 64];
+    } else {
+        commit.signature[0] ^= 0xff;
+    }
+    let tip = store
+        .write(&serialize(&Object::Commit(commit)).unwrap())
+        .unwrap();
+    refs::write_ref(&layout, "main", &tip).unwrap();
+    ok_in(fixture, &fixture.upstream, &["push", "origin", "main:main"]);
+}
+
+fn assert_invalid_pull_preserves_state(mode: &[&str], unsigned: bool, omitted: bool) {
+    let fixture = fixture();
+    push_invalid_tip(&fixture, unsigned);
+    if omitted {
+        ok_in(
+            &fixture,
+            &fixture.local,
+            &["fetch", "--no-verify-signatures"],
+        );
+        fs::remove_file(fixture.dirs[1].path().join("refs/heads/main")).unwrap();
+    }
+    let layout = kit_core::layout::RepoLayout::single(&fixture.local);
+    let head = rev(&fixture, &fixture.local, "HEAD");
+    let head_file = fs::read(layout.head_file()).unwrap();
+    let index = fs::read(layout.index_file()).unwrap();
+    let contents = fs::read(fixture.local.join("shared.txt")).unwrap();
+    let mut args = vec!["pull"];
+    args.extend_from_slice(mode);
+    let out = run_in(&fixture, &fixture.local, &args);
+    assert_eq!(out.status.code(), Some(65), "{args:?}: {out:?}");
+    if mode.contains(&"--format=json") {
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["ok"], false);
+        assert!(value["error"].as_str().unwrap().contains("signature"));
+    }
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("signature"),
+        "{out:?}"
+    );
+    assert_eq!(rev(&fixture, &fixture.local, "HEAD"), head);
+    assert_eq!(fs::read(layout.head_file()).unwrap(), head_file);
+    assert_eq!(fs::read(layout.index_file()).unwrap(), index);
+    assert_eq!(
+        fs::read(fixture.local.join("shared.txt")).unwrap(),
+        contents
+    );
+    assert!(!fixture.local.join("u.txt").exists());
+    assert!(!rebase_state(&fixture));
+    assert!(!layout.merge_head_file().exists());
+    assert!(!layout.pull_head_file().exists());
+}
+
+#[test]
+fn pull_modes_refuse_invalid_remote_signatures_without_changing_local_state() {
+    for mode in [&[][..], &["--rebase"], &["--no-ff"]] {
+        for unsigned in [false, true] {
+            assert_invalid_pull_preserves_state(mode, unsigned, false);
+        }
+    }
+}
+
+#[test]
+fn pull_rebase_refuses_an_unverified_tracking_tip_omitted_by_the_remote() {
+    for unsigned in [false, true] {
+        assert_invalid_pull_preserves_state(&["--rebase"], unsigned, true);
+    }
+}
+
+#[test]
+fn pull_no_ff_refuses_an_unverified_tracking_tip_omitted_by_the_remote() {
+    for unsigned in [false, true] {
+        assert_invalid_pull_preserves_state(&["--no-ff"], unsigned, true);
+    }
+}
+
+#[test]
+fn pull_modes_honor_the_explicit_signature_opt_out_for_an_omitted_tracking_tip() {
+    for mode in ["--rebase", "--no-ff"] {
+        let fixture = fixture();
+        push_invalid_tip(&fixture, true);
+        ok_in(
+            &fixture,
+            &fixture.local,
+            &["fetch", "--no-verify-signatures"],
+        );
+        fs::remove_file(fixture.dirs[1].path().join("refs/heads/main")).unwrap();
+        ok_in(
+            &fixture,
+            &fixture.local,
+            &["pull", mode, "--no-verify-signatures"],
+        );
+        assert_eq!(
+            fs::read(fixture.local.join("u.txt")).unwrap(),
+            b"unverified\n"
+        );
+    }
+}
+
+#[test]
+fn pull_modes_refuse_a_local_ref_that_shadows_the_verified_tip_hash() {
+    use kit_core::{
+        layout::RepoLayout, object::Object, refs, serialize::serialize, store::ObjectStore,
+    };
+
+    for args in [
+        &["pull", "--rebase"][..],
+        &["pull", "--no-ff"],
+        &["pull", "--rebase", "--no-verify-signatures"],
+        &["pull", "--no-ff", "--no-verify-signatures"],
+    ] {
+        let fixture = fixture();
+        push_upstream(&fixture, "u.txt", "upstream\n", "u1");
+        ok_in(&fixture, &fixture.local, &["fetch"]);
+        let tip = rev(&fixture, &fixture.upstream, "HEAD");
+        let layout = RepoLayout::single(&fixture.local);
+        let store = ObjectStore::open(&layout).unwrap();
+        let Object::Commit(mut commit) = store
+            .read_object(&kit_core::hash::from_hex(&tip).unwrap())
+            .unwrap()
+        else {
+            panic!("remote tip must be a commit");
+        };
+        commit.signature = [0; 64];
+        let unsigned = store
+            .write(&serialize(&Object::Commit(commit)).unwrap())
+            .unwrap();
+        refs::write_tag(&layout, &tip, &unsigned).unwrap();
+        let head = rev(&fixture, &fixture.local, "HEAD");
+        let index = fs::read(layout.index_file()).unwrap();
+        let out = run_in(&fixture, &fixture.local, args);
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        assert_eq!(rev(&fixture, &fixture.local, "HEAD"), head);
+        assert_eq!(fs::read(layout.index_file()).unwrap(), index);
+        assert!(!fixture.local.join("u.txt").exists());
+        assert!(!rebase_state(&fixture));
+        assert!(!layout.merge_head_file().exists());
+    }
+}
+
+#[test]
+fn pull_modes_report_unverified_tracking_tips_as_json_errors() {
+    for mode in ["--rebase", "--no-ff"] {
+        assert_invalid_pull_preserves_state(&[mode, "--format=json"], true, true);
+    }
+}
+
+#[test]
+fn pull_modes_honor_the_user_signature_opt_out_for_an_omitted_tracking_tip() {
+    for mode in ["--rebase", "--no-ff"] {
+        let fixture = fixture();
+        push_invalid_tip(&fixture, true);
+        ok_in(
+            &fixture,
+            &fixture.local,
+            &["fetch", "--no-verify-signatures"],
+        );
+        fs::remove_file(fixture.dirs[1].path().join("refs/heads/main")).unwrap();
+        let config_dir = fixture.xdg.join("kit");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(config_dir.join("config"), "pull.require_signed = false\n").unwrap();
+        ok_in(&fixture, &fixture.local, &["pull", mode]);
+        assert_eq!(
+            fs::read(fixture.local.join("u.txt")).unwrap(),
+            b"unverified\n"
+        );
+    }
+}

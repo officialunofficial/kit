@@ -10,7 +10,8 @@
 use core::fmt;
 
 use kit_core::refs::{
-    BRANCH_REF_PREFIX, PACKMAP_REF_PREFIX, validate_ref_name, validate_ref_name_grammar,
+    BRANCH_REF_PREFIX, PACKMAP_REF_PREFIX, TAG_REF_PREFIX, TAGMAP_REF_PREFIX, validate_ref_name,
+    validate_ref_name_grammar,
 };
 
 use super::text::strictly_ascending;
@@ -34,6 +35,26 @@ pub fn packmap_head(ref_name: &str) -> Option<String> {
 pub fn head_packmap(head: &str) -> Option<String> {
     let branch = head.strip_prefix(BRANCH_REF_PREFIX)?;
     validate_ref_name(head).then(|| format!("{PACKMAP_REF_PREFIX}{branch}"))
+}
+
+/// §8.3: the tag ref `refs/tags/<x>` whose flags cover the tag map ref
+/// `refs/kit/tagmap/<x>`. `None` for anything else, including a name
+/// outside SPEC-REFS §3. The server authorizes a tag map write only
+/// together with this tag, in one `AdvanceRefs`, under the tag's
+/// [`RefScopes::effective_flags`].
+#[must_use]
+pub fn tagmap_tag(ref_name: &str) -> Option<String> {
+    let tag = ref_name.strip_prefix(TAGMAP_REF_PREFIX)?;
+    validate_ref_name(ref_name).then(|| format!("{TAG_REF_PREFIX}{tag}"))
+}
+
+/// §8.3: the tag map ref `refs/kit/tagmap/<x>` of the tag ref
+/// `refs/tags/<x>`, the inverse of [`tagmap_tag`]. `None` for anything
+/// else.
+#[must_use]
+pub fn tag_tagmap(tag_ref: &str) -> Option<String> {
+    let tag = tag_ref.strip_prefix(TAG_REF_PREFIX)?;
+    validate_ref_name(tag_ref).then(|| format!("{TAGMAP_REF_PREFIX}{tag}"))
 }
 
 /// The `cufd` flags of a ref-scope entry (§3.3, §8).
@@ -133,7 +154,8 @@ impl RefPattern {
     /// `RefPattern` if it does not follow the SPEC-REFS §3 ref-name
     /// grammar, optionally followed by `/*` (so a bare `*` and
     /// `refs/heads/*x` fail); `PackmapPattern` if it is or begins with
-    /// [`PACKMAP_REF_PREFIX`].
+    /// [`PACKMAP_REF_PREFIX`]; `TagmapPattern` if it is or begins with
+    /// [`TAGMAP_REF_PREFIX`].
     ///
     /// The grammar only, not §3's 512-byte name bound: the statement cap
     /// already bounds a pattern, and a pattern longer than any ref name
@@ -149,6 +171,9 @@ impl RefPattern {
         if s.starts_with(PACKMAP_REF_PREFIX) {
             return Err(GrantError::PackmapPattern);
         }
+        if s.starts_with(TAGMAP_REF_PREFIX) {
+            return Err(GrantError::TagmapPattern);
+        }
         Ok(pattern)
     }
 
@@ -157,9 +182,12 @@ impl RefPattern {
     pub fn matches(&self, ref_name: &str) -> bool {
         match self {
             Self::Exact(name) => ref_name == name,
-            Self::Prefix(prefix) => ref_name
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|rest| rest.starts_with('/')),
+            Self::Prefix(prefix) => {
+                ref_name != kit_core::refs::ATTESTMAP_REF
+                    && ref_name
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
         }
     }
 }
@@ -248,13 +276,17 @@ impl RefScopes {
     /// `ref_name`. A ref no pattern matches, or a name outside SPEC-REFS §3,
     /// gets [`RefFlags::EMPTY`], so every change to it is denied.
     ///
-    /// A packmap ref (under [`PACKMAP_REF_PREFIX`]) always gets
-    /// [`RefFlags::EMPTY`], even under `refs/*` or `refs/kit/*`: §3.3 never
-    /// matches packmap refs directly. §8.3 covers one through its head; see
-    /// [`packmap_head`].
+    /// A packmap ref (under [`PACKMAP_REF_PREFIX`]) or a tag map ref (under
+    /// [`TAGMAP_REF_PREFIX`]) always gets [`RefFlags::EMPTY`], even under
+    /// `refs/*` or `refs/kit/*`: §3.3 never matches them directly. §8.3
+    /// covers one through its head or its tag; see [`packmap_head`] and
+    /// [`tagmap_tag`].
     #[must_use]
     pub fn effective_flags(&self, ref_name: &str) -> RefFlags {
-        if !validate_ref_name(ref_name) || ref_name.starts_with(PACKMAP_REF_PREFIX) {
+        if !validate_ref_name(ref_name)
+            || ref_name.starts_with(PACKMAP_REF_PREFIX)
+            || ref_name.starts_with(TAGMAP_REF_PREFIX)
+        {
             return RefFlags::EMPTY;
         }
         self.0
@@ -285,6 +317,23 @@ mod tests {
         let s = RefScopes::parse(field).unwrap();
         assert_eq!(s.to_string(), field);
         s
+    }
+
+    #[test]
+    fn attestmap_requires_an_exact_scope_even_under_broad_prefixes() {
+        let name = kit_core::refs::ATTESTMAP_REF;
+        for prefix in ["refs/*", "refs/kit/*"] {
+            let pattern = RefPattern::parse(prefix).unwrap();
+            assert!(!pattern.matches(name));
+            assert_eq!(
+                scopes(&format!("{prefix}=cufd")).effective_flags(name),
+                RefFlags::EMPTY
+            );
+        }
+        let flags = RefFlags::parse("cu").unwrap();
+        assert_eq!(scopes("refs/kit/attestmap=cu").effective_flags(name), flags);
+        let combined = scopes("refs/kit/*=f;refs/kit/attestmap=cu");
+        assert_eq!(combined.effective_flags(name), flags);
     }
 
     /// SPEC-WRITE-GRANTS §3.3: a pattern follows the SPEC-REFS §3 grammar
@@ -401,6 +450,13 @@ mod tests {
             "refs/kit/packmap/a/*",
         ] {
             assert_eq!(RefPattern::parse(packmap), Err(GrantError::PackmapPattern));
+        }
+        for tagmap in [
+            "refs/kit/tagmap/*",
+            "refs/kit/tagmap/v1",
+            "refs/kit/tagmap/a/*",
+        ] {
+            assert_eq!(RefPattern::parse(tagmap), Err(GrantError::TagmapPattern));
         }
     }
 
@@ -546,6 +602,46 @@ mod tests {
         let s = scopes("refs/kit/*=u");
         assert_eq!(s.effective_flags("refs/kit/other"), RefFlags::UPDATE);
         assert_eq!(s.effective_flags("refs/kit/packmap"), RefFlags::UPDATE);
+    }
+
+    /// §3.3: tag map refs are never matched directly either.
+    #[test]
+    fn tagmap_refs_get_no_flags() {
+        for field in ["refs/*=cufd", "refs/kit/*=cufd"] {
+            let s = scopes(field);
+            assert_eq!(s.effective_flags("refs/kit/tagmap/v1"), RefFlags::EMPTY);
+            assert_eq!(s.effective_flags("refs/kit/tagmap/a/b"), RefFlags::EMPTY);
+        }
+        let s = scopes("refs/kit/*=u");
+        assert_eq!(s.effective_flags("refs/kit/tagmap"), RefFlags::UPDATE);
+    }
+
+    #[test]
+    fn tagmap_tag_maps_to_the_tag_and_back() {
+        for (tagmap, tag) in [
+            ("refs/kit/tagmap/v1", "refs/tags/v1"),
+            ("refs/kit/tagmap/rel/a/b", "refs/tags/rel/a/b"),
+        ] {
+            assert_eq!(tagmap_tag(tagmap).as_deref(), Some(tag));
+            assert_eq!(tag_tagmap(tag).as_deref(), Some(tagmap));
+        }
+        for not_tagmap in [
+            "refs/kit/tagmap/",
+            "refs/kit/tagmap",
+            "refs/kit/tagmap/.x",
+            "refs/tags/v1",
+            "refs/kit/tagmapx/v1",
+        ] {
+            assert_eq!(tagmap_tag(not_tagmap), None, "{not_tagmap}");
+        }
+        for not_tag in ["refs/tags/", "refs/heads/main", "refs/tags/a.lock"] {
+            assert_eq!(tag_tagmap(not_tag), None, "{not_tag}");
+        }
+        // The tag's flags cover the tag map (§8.3); its own flags are empty.
+        let s = scopes("refs/tags/*=c");
+        let tag = tagmap_tag("refs/kit/tagmap/v1").unwrap();
+        assert_eq!(s.effective_flags(&tag), RefFlags::CREATE);
+        assert_eq!(s.effective_flags("refs/kit/tagmap/v1"), RefFlags::EMPTY);
     }
 
     #[test]

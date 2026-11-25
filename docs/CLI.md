@@ -230,7 +230,15 @@ Working-tree commands:
   before it removes anything and names the linked tree.
 - `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
-  changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops
+  changes. `push` is another name for `save`. `push -u` and
+  `push --include-untracked` explicitly include non-ignored untracked files
+  (kit also includes them by default). `-a`/`--all` is not supported.
+  `push [--] <path>...` saves only the named files or directory prefixes,
+  relative to the current directory, and leaves other worktree and index
+  entries alone. Globs, pathspec magic, and paths containing `..` are not supported. Pop and apply
+  restore only saved changes and refuse an existing untracked destination
+  before writing anything, even when its bytes match the saved file.
+  `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
   printed by `stash list`. `pop`/`apply` accept `--index`, which also
@@ -240,10 +248,13 @@ Working-tree commands:
   `[HEAD, index]`) &mdash; no on-disk manifest change, and it stays gc-reachable
   through the stash commit. The snapshot is the **serialized index** (a blob
   in the index commit's wrapper tree, paired with a content subtree that
-  keeps staged blobs gc-reachable), so `--index` restores the index exactly,
+  keeps staged blobs gc-reachable). A `p` blob in that local wrapper holds
+  one byte: `0` for a full stash or `1` for selected paths. Pop and apply
+  require this marker; there is no compatibility reader for earlier entries.
+  Full stashes keep the whole-worktree dirty guard; selected stashes check
+  only saved paths. `--index` restores staged differences,
   **including staged deletions** (`kit rm`-staged) &mdash; which a tree could not
-  encode. Stashes created before this feature carry no index snapshot, so
-  `--index` is a no-op for them (with a note).
+  encode.
   `--format=json` (a global flag, valid after any subcommand) emits a
   machine-readable result to stdout: on `list`, JSONL with keys `index`,
   `hash`, `message` (mirroring `branch --format=json`); on
@@ -291,7 +302,9 @@ History / commits:
   <subject>` (with `(root-commit)` for the first commit, `detached HEAD`
   when detached) followed by a diffstat and `create/delete mode` lines;
   `-q`/`--quiet` suppresses it. kit always signs commits and has no
-  hooks.
+  hooks. After the commit is durable, `commit` runs the due automatic
+  local pack maintenance step (see `kit fetch`); it can take about 5
+  seconds longer when one is due, and `gc.auto = false` turns it off.
   `--format=json` additionally emits one JSON object to stdout on success:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
@@ -364,19 +377,20 @@ History / commits:
   commit's first parent, so a merged side branch never enters the walk at
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
-  One walk reads at most 1,000,000 commits, counting the excluded side of
-  a range: both sides of a range share that budget. A walk that would read
-  more fails with an error that names the limit; `kit log` never prints
-  part of a history as if it were all of it. The merge base of `A...B`
-  comes from a separate walk with the same limit on each side.
-  A commit of the walk, or of the excluded side of a range, that is
-  missing, corrupt or not a commit fails the walk with an error that names
-  it; it never drops out of the history.
-  With `-n`, a walk from one revision reads only the commits it needs while
-  each commit has at most one followed parent, so `-n 20` on a linear
-  history or with `--first-parent` reads about 20 commits. From the first
-  merge on, it reads the rest of the reachable history before it prints,
-  because a later commit can still be a child of any commit seen so far.
+  The selected graph and retained exclusion set share a 1,000,000-commit
+  budget. Bounded range probes have a separate allowance. A walk that
+  exceeds that budget fails without printing a partial answer. The merge base of `A...B` uses a separate bounded walk.
+  Missing, corrupt or non-commit objects fail when inspected. Objects below
+  a proven stopping boundary are not inspected. In a closed `A..B` range,
+  where every selected path reaches `A`, ancestors of `A` stay unread.
+  Range discovery may inspect commits beyond the output limit to prove a
+  cut. It first probes up to 63 selected commits for the excluded endpoint,
+  then up to 4,096 commits from both endpoints for a shared frontier. If
+  neither proof succeeds, it uses the full exclusion walk.
+  With `-n`, a linear or first-parent walk stops at the filtered limit.
+  At a merge, it sorts the region above a shared unread frontier before
+  continuing below that frontier. Separate roots or exclusion boundaries
+  can require the full remaining graph to preserve the topological order.
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each
@@ -500,9 +514,10 @@ History / commits:
   diagnostics). A line that never survives a step stays on `<start>`
   (git marks such lines with a leading `^`; kit's tab format carries no
   `^`, consistent with its existing boundary-marker omission). `-w` and
-  `-L` compose with `--reverse`. A range whose first-parent walk from
-  `<end>` holds more than 1,000,000 commits fails with an error that names
-  the limit and blames nothing. Default emits
+  `-L` compose with `--reverse`. If the first-parent walk from `<end>`
+  cannot read a commit or finds another object type, the error names that
+  object. If the walk exceeds 1,000,000 commits, the error names the limit.
+  In either case, blame prints no attribution. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `kit verify <rev> [--trusted] [--trust-roots <path>]` &mdash; verify the
@@ -746,7 +761,7 @@ Attestations:
   ```
 
 - `kit verify-attest [--commit <hash>] [--trust-roots <path>]
-  [--algorithm <alg>] [--format=json]` &mdash; verify every attestation attached to a
+  [--algorithm <alg>] [--predicate-type <URI>] [--format=json]` &mdash; report every attestation attached to a
   commit. For each envelope, looks each signature's `keyid` up in the
   trust-roots registry and verifies the DSSE PAE. Reports per-
   signature verdicts to stderr; with `--format=json`, also emits one JSON
@@ -755,8 +770,10 @@ Attestations:
   "signatures":[{"keyid":"...","algorithm":"<string>|null","verified":<bool>,
   "reason":"<string>|null"}]}]}` &mdash; the JSON `signatures` list is unfiltered
   (it always carries every signature, independent of `--algorithm`, which
-  only filters the stderr report). Exits `0` iff every listed attestation has
-  at least one verified signature, `65` (`dataerr`) if any failed,
+  only filters the stderr report). Exits `0` iff at least one envelope binds
+  to the commit, has a trusted signature, and matches `--predicate-type` when
+  set. Untrusted envelopes remain in the report. Exits `65` (`dataerr`) if
+  none passes,
   `1` (`general_error`) if the commit has no attestations.
 
   Flags:
@@ -769,6 +786,8 @@ Attestations:
     passed explicitly &mdash; without that gate, a hostile clone could
     ship its own trust-roots and have verification print "ok"
     against attacker keys.
+  - `--predicate-type <URI>` &mdash; require an exact predicate type from the
+    signed statement. Use this in CI to require the intended claim.
   - `--algorithm <alg>` &mdash; filter reported signatures by algorithm
     (`ed25519`, `secp256k1`, `p256`). Unmatched signatures are
     omitted from the report.
@@ -883,8 +902,14 @@ Branches / refs:
 - `kit switch <branch>` / `kit switch -c|-C <new> [<start>]` &mdash; git's
   modern branch-switch UX; a thin front-end over `checkout` with the same
   clobber guard and output. `-c` creates (refuses to clobber), `-C`
-  create-or-resets, then switches. (`switch -`/`@{-1}` is a follow-up:
-  kit does not yet track a previous branch.)
+  create-or-resets, then switches. `switch -`, `switch @{-1}`, and
+  `checkout -` return to the previous HEAD, detached when it was detached.
+  A successful HEAD change atomically saves one previous HEAD in the local
+  per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
+  `no previous branch`. Running an older kit's gc on a repository a newer kit
+  uses can prune the previous HEAD; `switch -` then reports `previous HEAD
+  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
+  for N greater than 1 is not supported.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -1036,8 +1061,15 @@ Branches / refs:
   entries, computes the live set reachable from the retention roots (refs,
   stash, in-progress operations, attestations, and the recovery log of
   commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
-  unreachable objects older than the grace window (default 14 days).
-  `-n`/`--dry-run` reports what would be pruned without deleting.
+  unreachable objects older than the grace window (default 14 days). It also
+  retires local packs that are wholly dead past grace, rewrites packs that
+  hold a quarter or more garbage, merges small packs and retires duplicate
+  packs, copying what must survive into new packs before it retires the
+  old ones. A damaged pack or a failed copy is kept and reported as a
+  warning on standard error, and so is a retirement that stopped because a
+  fetch, push or add held the store lock; the exit code does not change.
+  `-n`/`--dry-run` reports what would be pruned without deleting, and
+  reports packed garbage.
   `--grace-secs 0` prunes every unreachable object, but **bypasses the
   grace window** &mdash; the grace window is gc's concurrency-safety net (some
   root-publishing paths such as `tag` and `fetch` write an object before
@@ -1146,9 +1178,23 @@ Remote / sync:
 - `kit remote get-url <name>` &mdash; print a remote's URL (use `default` for
   the flat default remote). `kit remote set-url <name> <url>` &mdash; change an
   existing remote's URL (validated like `remote add`).
+
+Clone, fetch and pull also fetch portable attestations by default. They read
+`refs/kit/attestmap` before listing code, then save valid envelopes whose
+subjects exist locally. Signature trust remains a `verify-attest` decision.
+Use `--no-attestations` or `fetch.attestations = false` to skip this work.
+Use `--refetch-attestations` to retry every pack, including envelopes dropped
+because their subjects were absent. Refetch overrides the config opt-out;
+it conflicts with `--no-attestations`. Attestation failures print `warning:`
+and leave the code fetch successful. Connect remotes without advertised
+attestation support warn once per command and skip the log.
+
 - `kit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
-  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]` &mdash; clone a repository
-  into `<dir>` (defaults to the final URL path segment). `--sparse
+  [--tags | --no-tags] [--no-attestations | --refetch-attestations]
+  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]`
+  &mdash; clone a repository into `<dir>` (defaults to the final URL path
+  segment). The clone takes the remote's tags as `kit fetch` does; a refused
+  tag prints its line and the clone exits 1 after the checkout. `--sparse
   <pattern>...` persists the patterns and materializes only the
   matching files via the verifiable sparse-checkout pipeline (requires
   a build with `--features sparse-checkout`). Note this is an
@@ -1168,8 +1214,24 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `kit fetch [<remote>] [--all] [-p|--prune] [--no-verify-signatures]
-  [--format=json] [-q|--quiet]` &mdash; download from remote without merging.
+- `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
+  [--no-attestations | --refetch-attestations]
+  [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
+  remote without merging. After the branches it takes every remote tag
+  (SPEC-TRANSPORT §1.4); `--tags` says so explicitly, and `--no-tags` skips
+  them. The last of the two flags wins. A tag publishes to `refs/tags/<t>` only
+  once its closure is local, its tag object carries its name and, with
+  signature checks on, its history verifies. Each new tag prints
+  ` * [new tag]         <t> -> <t>`. A refused tag prints
+  ` ! [rejected]        <t> -> <t> (<reason>)`: a local tag with another value
+  (`would clobber existing tag`, never moved), a name that is a directory of a
+  local tag's name or the reverse (`conflicts with existing tag`), a signature
+  failure, a name mismatch, a missing tag map or object, or a history past the
+  check's bound.
+  A remote tag name that kit cannot push prints a `warning:` line and is not a
+  refusal. A tag listing that fails prints `error: tag listing failed: <error>`. A refused tag or a failed listing never stops the branches
+  or the other tags, and the fetch then exits 1 after everything else is
+  published; the next fetch tries the tag again.
   `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
   branch the remote lost, and prints ` - [deleted]         (none) ->
   <remote>/<branch>` for each. It runs only after every remote branch was
@@ -1186,11 +1248,19 @@ Remote / sync:
   others &mdash; `fetch --all` continues through the full list and exits
   non-zero if any remote failed. `--format=json` emits one JSON object
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
-  "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
-  success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--no-verify-signatures]
-  [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
-  branch from `refs/remotes/<remote>/<branch>`. The fast-forward writes only
+  "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}],"tags":["..."],
+  "tags_rejected":[{"name":"...","reason":"..."}],"tag_warnings":[...],
+  "tag_listing_failed":"..."|null}` on success, with `"ok":false` when a tag
+  was refused or the listing failed, or `{"ok":false,"error":"..."}` on
+  failure.
+- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--tags | --no-tags]
+  [--no-attestations | --refetch-attestations]
+  [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
+  fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
+  fetch takes tags and reports them as `kit fetch` does; a refused tag makes
+  the pull exit 1 after the branch moved. With `--rebase` or `--no-ff` the
+  JSON object is the one of `kit rebase` or `kit merge` and carries no tag
+  fields; the tag lines are on stderr and the exit status is 1. The fast-forward writes only
   the files the new tip changed; the others keep their inode and mtime.
   Divergent histories are
   refused; use `--rebase`, `--no-ff` or an explicit merge after resolving the
@@ -1215,8 +1285,31 @@ Remote / sync:
   an explicit `<remote>` argument. `--format=json` emits one JSON object
   per remote pulled: `{"ok":true,"remote":"...","endpoint":"...",
   "branch":"...","old":"<hex>|null","new":"<hex>|null",
-  "up_to_date":<bool>}` on success, or `{"ok":false,"error":"..."}` on
-  failure.
+  "up_to_date":<bool>}` plus the tag fields of `kit fetch` on success, or
+  `{"ok":false,"error":"..."}` on failure.
+- **Automatic local pack maintenance (default on).** After applying a
+  pack or pruning a remote-tracking ref, fetch and pull remove abandoned
+  staging files and lone indexes past the 14-day grace period.
+  They periodically retire wholly dead packs past grace, remove a pack
+  that lost its index past grace only after a collection's mark found
+  nothing live that needs it, and rewrite,
+  merge and retire covered packs. `kit commit` runs the same step after
+  it publishes, so a repository that never fetches does not build up
+  packs, and `kit add` alone does not run it. A fetch or clone that applies packs creates the advisory stamp. A clone that finds fewer than
+  32 pairs leaves it empty, and an empty stamp counts as never run, so the
+  first fetch or commit that finds 32 pairs runs a full step. Set `gc.auto = false` in repo or user config to disable the
+  step. A step has a 5 second budget before retirement, so a command that
+  runs a due step can take about 5 seconds longer, and more when it retires
+  packs. A maintenance failure leaves the command's exit status unchanged.
+  Use `-q` to hide the maintenance lines. Fetch and fast-forward pull add a
+  `maintenance` object to `--format=json` when collection was attempted or
+  a file was removed. It contains `leftovers_removed`, `packs_retired`,
+  `packs_rewritten`, `packs_merged`, `packs_retired_covered`,
+  `bytes_copied`, `bytes_reclaimed`, `collection` and `elapsed` in
+  milliseconds. `collection` is one of `not_due`, `complete`, `busy`,
+  `roots_changed`, `over_budget`, `progress` (planned work is left; the
+  next step is due in an hour) and `failed`. `kit commit` prints its
+  maintenance line on standard error and adds nothing to its JSON.
 - **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `kit verify <rev>` runs manually
@@ -1243,8 +1336,9 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote> [<src>:<dst>|<branch>]] [--all] [--force|--force-with-lease]
-  [--dry-run] [--format=json] [-q|--quiet]`
+- `kit push [<remote> [<src>:<dst>|<branch>|<tag>]] [--all | --tags]
+  [--force|--force-with-lease] [--attestations] [--dry-run] [--format=json] [-q|--quiet]`,
+  `kit push --delete <remote> <branch>|<tag>`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
@@ -1255,7 +1349,7 @@ Remote / sync:
   ref. A refspec push goes through the same path as a plain push, so the
   lease and the non-fast-forward check apply, and it records an upstream only
   with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
-  `<src>` (a remote delete), a ref outside `refs/heads/` and a refspec with
+  `<src>` (use `--delete`), a ref outside `refs/heads/` and a refspec with
   `--all`. The default push is
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
@@ -1265,20 +1359,30 @@ Remote / sync:
   `--force`. When the remote head differs from the lease, a push without
   `--force` fails as a non-fast-forward before it uploads anything. A
   remote head that already equals the tip means an earlier attempt landed:
-  the push succeeds and writes nothing. `-u`/`--set-upstream` records the pushed remote as the
+  the code push succeeds without advancing refs. The push reads the remote's head
+  every time and never trusts the tracking ref alone, so a remote that lost
+  the branch, for example one deleted and made again, gets it again. A
+  push without `--force-with-lease` creates a branch the remote does not
+  hold. `-u`/`--set-upstream` records the pushed remote as the
   branch's upstream even if one was already set. `--dry-run`
-  resolves the push plan without contacting the remote. Every endpoint
+  resolves the push plan without contacting the remote, so it goes by the
+  tracking ref. Every endpoint
   flows through the per-endpoint credential-trust gate, which is keyed on
   the resolved endpoint URL, never the remote name. On success `push`
   prints git's `To <url>` plus ref-update summary (or `Everything
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
+  "up_to_date":<bool>,"steps":<n>,"attestations_pushed":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
   advances the push took; `--all` reports the total plus `ref_count`), or
   `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
+  Push publishes locally authored envelopes only with `--attestations` or
+  `push.attestations = true`. It also publishes when code is up to date.
+  Fetched envelopes never publish again. Attestation failures warn while the code
+  push succeeds. Publication is permanent; log compaction and removal need force
+  permission on `refs/kit/attestmap`.
   On a V2 Connect remote, pushes at or above its advertised upload threshold
   open a signed ticket for each data pack and packmap node, then consume those
   tickets with the branch advance. A single advance carries one fewer data
@@ -1310,16 +1414,74 @@ Remote / sync:
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `kit push` again to resume; the message reports
   how many parts were saved.
-- **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
-  live, honest progress line on stderr while the network transfer runs &mdash;
-  `Writing objects: N objects, B bytes` while building/uploading the
-  outgoing pack, `Unpacking objects: N objects` while applying a
-  downloaded one. The counts are real (objects actually unpacked,
-  bytes actually handed to the transport); kit does not print git's
-  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines.
-  Progress shows only when stderr is a tty; `-q`/`--quiet`
-  forces it off, and `KIT_PROGRESS=always`/`never` overrides the
-  tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
+
+  `--tags` pushes every local tag and nothing else; it conflicts with
+  `--all`, a refspec and `-u`. `kit push <remote> <tag>` pushes one tag.
+  A name that is both a branch and a tag is a usage error (exit 64); name
+  `refs/heads/<n>` or `refs/tags/<n>`. A missing `refs/tags/<t>` exits 65.
+  Each tag goes with its tag map `refs/kit/tagmap/<t>` (SPEC-TRANSPORT
+  §7.2), which grafts on the nearest branch the remote holds, so a tag on a
+  pushed commit uploads only its tag object and a lightweight one uploads
+  nothing. The tags that share a branch upload once. Each tag prints one
+  line: ` * [new tag]`, ` * [tag map]` when only its tag map was missing,
+  ` + <old>...<new> (forced update)`, or ` ! [rejected] <t> -> <t>
+  (<reason>)`. A remote tag with another value is refused unless `--force`
+  or `--force-with-lease`; both condition on the value the push read. A push
+  refuses an unsigned annotated tag (re-create it with `kit tag -s`, or push
+  a lightweight tag), an annotated tag whose object names another tag. On a ticketed Connect remote, tags whose history
+  needs more than one advance are refused: push the branch first, then the
+  tags. A refused tag does not stop the others, and the push exits 1.
+  `--format=json` prints `{"ok":<bool>,"remote":"...","endpoint":"...",
+  "tags_pushed":<n>,"tags_rejected":<n>}`.
+
+  `--delete <remote> <name>` deletes one remote branch or tag together with
+  its chain ref, `refs/kit/packmap/<b>` or `refs/kit/tagmap/<t>`
+  (SPEC-TRANSPORT §7.3). A short name is the remote's branch or tag of that
+  name; a name the remote holds as both is refused, so name
+  `refs/heads/<n>` or `refs/tags/<n>`. A branch is deleted only while it
+  holds its tracking ref's value, and its tracking ref goes too; a branch
+  with no tracking ref is refused (fetch first). A tag is deleted only while
+  it holds the value the push just read. A remote branch that moved since
+  the last fetch is not deleted, and the push exits 1. A tag the remote does
+  not hold is an error; a branch the remote no longer holds, or a tag
+  another writer deletes while this one runs, counts as deleted, and a
+  branch's tracking ref goes. The local branch or tag stays. On
+  success the push prints `To <url>` and ` - [deleted]         <ref>`. An
+  S3 remote refuses every delete. `--delete` needs a ref and conflicts with
+  `--all`, `--tags`, `--force`, `--force-with-lease` and `-u` (exit 64).
+  `--dry-run` names the delete and contacts nothing. `--format=json` prints
+  `{"ok":true,"remote":"...","endpoint":"...","deleted":"<ref>",
+  "old":"<hex>|null"}`, where `old` is null when the ref was already gone,
+  and under `--dry-run` `{"ok":true,"dry_run":true,"remote":"...",
+  "endpoint":"...","delete":"<name>"}`.
+- **Progress.** `clone`, `push`, `pull`, `fetch`, `add`, `checkout` and `gc`
+  report completed work on stderr. Text shows the operation, counts, bytes
+  and rate. Known totals also show a percentage and ETA. Unknown totals
+  stay unknown. Stderr must be a terminal unless `KIT_PROGRESS=always`
+  forces text or `KIT_PROGRESS=json` selects newline-delimited JSON.
+  `--quiet` and `KIT_PROGRESS=never` suppress progress.
+
+  Each JSON progress record has exactly these fields:
+
+  | Field | Type | Meaning |
+  |---|---|---|
+  | `phase` | string | `download`, `closure`, `signatures`, `restore`, `push_planning`, `packing`, `unpacking`, `add`, `gc_mark` or `gc` |
+  | `done` | unsigned integer | Completed objects or files; zero for byte-only work |
+  | `total` | unsigned integer or null | Known object or file total |
+  | `bytes` | unsigned integer | Accepted download bytes, hashed input bytes, uploaded pack bytes or reclaimed gc bytes |
+  | `bytes_total` | unsigned integer or null | Declared download length, when available |
+  | `elapsed_ms` | unsigned integer | Milliseconds since this operation began |
+
+  Packing and unpacking counts accumulate across packs; their clock starts
+  with the command. Each split-push advance restarts those counts and their
+  clock. Other counts describe one operation. A new pack or a
+  retry starts its byte count at zero. A changed `phase` starts its clock
+  again, as does a retry or a new pack. Download lengths describe the current attempt. Skipped packs
+  produce no download records. Progress is limited to ten updates per
+  second, plus start and final counts. An error can leave a partial count;
+  only the command's exit status indicates success. Command results and
+  warnings retain their usual output; JSON progress records start with `{`.
+
 - `kit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. It speaks the kit-rpc SSH framing on stdin and stdout
   and has no other mode. It has no network listener. The engine is the
@@ -1363,8 +1525,10 @@ Remote / sync:
   `.kit/server-meta` (exit 78), because the refs of that root live in a
   database. A session may send at most 10,000 frames after `Hello`; the
   server refuses the next one with an error that names the limit. An
-  unchanged fetch costs one frame plus at least two per branch, so one
-  session fetches at most 4,999 branches (SPEC-TRANSPORT §4.4).
+  unchanged fetch costs the frames of the branch and tag listings (one for each
+  1,000 refs) plus at least two per branch, so one session fetches at most
+  4,997 branches (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
+  frames, so a clone of about 5,000 of them fails the same way.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.
@@ -1403,6 +1567,9 @@ Remote / sync:
   (`DATAERR`).
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
+- `kit closure repair-indexes` &mdash; rebuild damaged or missing local pack
+  indexes from verified packs. Run it from any worktree, even if no revision resolves.
+  If a pack fails verification, fetch again from the remote that supplied it.
 - `kit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of
@@ -1716,9 +1883,11 @@ Config / keys / version:
 ## Ignore files
 
 kit reads ignore patterns from **both** `.gitignore` and `.kitignore` at
-the repository root. `.gitignore` is applied first and `.kitignore` last, so
+every visited directory. Patterns are relative to their file’s directory.
+Deeper files win; an excluded directory cannot be re-included from below.
+`.gitignore` is applied first and `.kitignore` last, so
 under gitignore's last-match-wins rule a repo's own `.kitignore` can override
-(including re-include via `!`) anything `.gitignore` set. Matching is honored
+(including re-include via `!`) rules from `.gitignore` in the same directory. Matching is honored
 by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
 worktree tree-builder.
 
@@ -1727,7 +1896,7 @@ v1 subset:
 
 - A pattern with no `/` (other than a trailing one) matches at **any depth**
   (`*.log` matches `a/b/c.log`). A pattern containing a `/` &mdash; including a
-  leading `/` &mdash; is **anchored** to the repo root (`/foo` matches only the
+  leading `/` &mdash; is **anchored** to its ignore file’s directory (`/foo` matches only the
   top-level `foo`; `src/gen` only that path).
 - `*` and `?` match within a single path segment; `[abc]`, `[a-z]`, and
   `[!abc]` character classes are supported; `\` escapes the next character.
@@ -1740,9 +1909,12 @@ v1 subset:
 - `.kit` and `.git` are always ignored (matched on the basename, ASCII
   case-insensitively).
 
-**Deferred (documented non-goals for now):** nested per-directory
-ignore files (only the repo root is read), global excludes
-(`core.excludesFile`), and escaped trailing spaces.
+Global patterns come from `$XDG_CONFIG_HOME/git/ignore`, or
+`~/.config/git/ignore` when `XDG_CONFIG_HOME` is unset. `.kit/info/exclude`
+overrides the global file, and per-directory files override both.
+kit does not read Git config or `core.excludesFile`.
+
+**Deferred (documented non-goals for now):** escaped trailing spaces.
 
 ## Divergences from Git
 
@@ -1797,7 +1969,9 @@ These are documented behaviors, not bugs:
   passed explicitly (and requires `--ignore-rev`/`--ignore-revs-file`).
 - `kit reset [--soft|--mixed|--hard] [-f] [<commit>]` &mdash; `--soft` moves
   HEAD only; `--mixed` (the default) also resets the index; both leave the
-  worktree untouched. `--hard` additionally resets the worktree to the
+  worktree untouched. Every mode but `--soft` also ends a merge, cherry-pick
+  or revert in progress and drops the record of a pull that stopped before
+  its restore. `--hard` additionally resets the worktree to the
   target tree &mdash; overwriting tracked-file changes and removing tracked
   files the target drops. Untracked files are kept (like git), **except**
   an untracked path that *collides* with one the target writes. As a
@@ -1856,6 +2030,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
 | `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
@@ -1893,11 +2068,12 @@ and hostname verification remain enabled. A missing, unreadable, empty,
 or malformed selected file is a hard error. Keep private keys out of the
 CA file; it contains certificates only.
 
-These settings apply only to native kit remotes over the Connect transport:
-HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
+For Connect remotes, these settings cover HTTPS RPCs, pack uploads, and
+downloads. The self-updater uses the OS trust
 store and the release checksum when present; it does not read
-`KIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
-setting; private-CA S3 endpoints are not supported. Wasm/browser
+`KIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes accept `KIT_SSL_CA_FILE`
+for both metadata requests and pack uploads. It adds roots to the system trust store and keeps certificate-chain
+and hostname verification enabled. S3 does not read `http.sslCAInfo`. Wasm/browser
 certificate trust is unchanged.
 The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
 kit uses its own `KIT_SSL_CA_FILE` environment variable.
@@ -2023,6 +2199,7 @@ Based on BSD `sysexits(3)`:
 | 69   | `unavailable`    | Transport could not connect                  |
 | 70   | `software`       | Internal consistency error (a bug, not bad input) |
 | 73   | `cantcreat`      | Cannot create output file                    |
+| 74   | `ioerr`          | I/O failure, including out of disk space       |
 | 75   | `tempfail`       | Temporary failure; retry is safe             |
 | 76   | `protocol_error` | Bad URL scheme or malformed server response  |
 | 77   | `noperm`         | Permission denied                            |
@@ -2035,10 +2212,12 @@ parsing stderr.
 ### Environment variables
 
 - **`GIT_EDITOR` / `EDITOR` / `VISUAL`** &mdash; the editor `kit commit`
-  opens when neither `-m` nor `-F` is supplied, tried in that order. If
-  none is set it falls back to `vi`, matching git. In a headless or
-  non-interactive context (CI, an agent), always pass `-m`/`-F` so the
-  commit never blocks on an editor.
+  opens when neither `-m` nor `-F` is supplied, tried in that order, and
+  the editor of `kit tag -a` and `kit rebase -i`. If none is set it falls
+  back to `vi`, matching git. An editor that is set always runs, terminal
+  or not, so `EDITOR="code --wait"` works from a script. When none is set
+  and stdin is not a terminal (CI, an agent), these commands start no `vi`
+  and fail at once with a message: pass `-m`/`-F`, or set an editor.
 - **`NO_COLOR`** &mdash; if set (any value, including empty) ANSI color on
   stdout is suppressed. See <https://no-color.org>.
 - **`CLICOLOR_FORCE=1`** &mdash; force ANSI color even when stdout is piped.
@@ -2046,9 +2225,10 @@ parsing stderr.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
   `kit+ssh://` transports.
 - **`KIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
-  Connect HTTPS remote trust only, overriding `http.sslCAInfo`. The
-  self-updater is excluded by design; S3 remotes are not yet covered.
-  Certificates are added to the Mozilla roots, with chain and hostname verification enabled.
+  Connect and S3 HTTPS remote trust. For Connect, it overrides `http.sslCAInfo`
+  and adds certificates to the Mozilla roots. For S3, it adds certificates to
+  system trust. Both keep chain and hostname verification enabled.
+  The self-updater is excluded.
   Missing, unreadable, empty, or malformed files are hard errors. See
   [HTTPS certificate trust](#https-certificate-trust).
 - **`XDG_CONFIG_HOME`**, **`XDG_DATA_HOME`**, **`XDG_CACHE_HOME`**,
@@ -2078,11 +2258,30 @@ that kit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 
-- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** set a graceful-shutdown flag.
-  Long-running operations (push, pull, clone, log) poll it at natural
-  checkpoints and exit with `tempfail` (75) so the operation can be
-  retried. Wired via `signal-hook`'s `flag` module so the CLI stays
-  under its crate-level `#![deny(unsafe_code)]`.
+- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** usually stop a local command
+  at once. `reset --hard` writes the files first, then updates the branch,
+  HEAD, and index together. If it stops during the file writes, the files it
+  wrote show as local changes. Rerun it with `-f` to finish.
+- When `checkout` or `switch` starts restoring files for a branch or detached
+  HEAD, the first signal lets it finish updating the worktree, HEAD, and
+  index. A second signal stops it immediately. Rerun with `-f` to finish an
+  interrupted switch.
+- `kit gc` sweeps object temporary files. The next restore that writes into
+  a directory removes stale regular restore temporary files there. Status
+  and add skip untracked restore temporary files and symlinks. Ref reads
+  skip temporary files.
+- `push`, `pull`, `fetch`, `clone`, `log`, `reflog`, `grant`, `epoch` and
+  `visibility` instead set a graceful-shutdown flag on the first signal.
+  They poll it at natural checkpoints and exit with `tempfail` (75) so the
+  operation can be retried. `merge`, `rebase`, `cherry-pick`, `revert`,
+  `stash`, `bisect`, `worktree`, `remote` and `git pull` let the first
+  signal pass, so a multi-step operation is not cut between two writes.
+  In all of them a second signal stops the command at once. Wired via
+  `signal-hook`'s `flag` module so the CLI stays under its crate-level
+  `#![deny(unsafe_code)]`.
+- While an editor runs (`kit commit`, `kit tag -a`, `kit rebase -i`), kit
+  ignores `SIGINT` and `SIGQUIT`, as git does: the editor gets Ctrl-C, and
+  kit waits for it to exit. `SIGTERM` still ends kit.
 - **`SIGPIPE`** is ignored. Pipelines like `kit log | head -1` exit
   cleanly without a "Broken pipe" message &mdash; the next write just
   propagates `EPIPE` as a normal I/O error. This is the Rust runtime
@@ -2118,5 +2317,9 @@ cp completions/kit.zsh /usr/local/share/zsh/site-functions/_kit
 ```
 
 Then restart your shell (or run `compinit` on zsh). Completion covers
-the full subcommand list plus common flags; per-argument completion
-(branch names, remote URLs) is deferred to a future release.
+the full subcommand list, common flags, and local branch, remote, and tag names.
+Switch, checkout, merge, rebase, branch deletion and renaming, remote removal
+and renaming, and tag deletion suggest existing names. Push suggests a remote,
+then a local branch. Fetch and pull suggest a remote; those commands accept
+no branch argument.
+Completion reads local metadata only and stays silent outside a repository.

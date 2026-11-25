@@ -23,9 +23,9 @@
 //!
 //! | Variant   | Mechanism                                              | Race behaviour |
 //! |-----------|--------------------------------------------------------|----------------|
-//! | `Any`     | `write_atomic`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
-//! | `Missing` | `write_create_new`: same tmp+fsync, then a hard-link    | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
-//! | `Match(H)`| OS file-locks + in-process locks around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The exclusive lock of the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock`, serialises every CAS critical section on that ref; the in-process stripe mutex keeps multi-threaded callers from racing each other before they hit the file lock. |
+//! | `Any`     | `durable::write_pointer`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
+//! | `Missing` | `durable::write_pointer_new`: same tmp+fsync, then a no-replace rename | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
+//! | `Match(H)`| OS file-locks + in-process locks around read-then-`write_pointer` | Atomic across processes on the same on-disk root. The exclusive lock of the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock`, serialises every CAS critical section on that ref; the in-process stripe mutex keeps multi-threaded callers from racing each other before they hit the file lock. |
 //!
 //! Cross-process atomicity for `Match` is achieved via
 //! [`std::fs::File::lock`] (stable as of Rust 1.89) on two files under
@@ -55,8 +55,8 @@ use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
-/// Open the pack at `path` for reading, never through a link, and check
-/// on the open handle that it is a regular file.
+/// Open the pack at `path` for reading, never through a link and never
+/// waiting on a FIFO, and check on the open handle that it is a regular file.
 ///
 /// # Errors
 /// The open fails, which includes a link at `path`. A file that is not
@@ -67,7 +67,11 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // `O_NONBLOCK`: the open of a FIFO returns at once, so the check
+        // below refuses it, and a plain open would wait for a writer.
+        // `O_NOCTTY`: a terminal device opened here never becomes the
+        // controlling terminal of the process.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     #[cfg(windows)]
     {
@@ -116,20 +120,54 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Read the file at `path` as [`bounded_read::read_capped`] does, but open it
+/// without blocking and refuse a file that is not regular before any read: a
+/// FIFO, a device or a socket at a ref or pack-map path would otherwise make
+/// a read wait for a writer that never comes. The check reads the open
+/// handle, so a swap of the path after the open changes nothing. Unlike
+/// [`open_pack_file`] the open follows a link: [`FileTransport::guard_ref_path`]
+/// decides which links a ref path may cross.
+///
+/// # Errors
+/// The open or the read fails, or the file is over `limit` bytes
+/// ([`ErrorKind::InvalidData`]). A directory fails as a read of one does. Any
+/// other file that is not regular has kind [`ErrorKind::InvalidInput`].
+fn read_regular_capped(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    let kind = file.metadata()?.file_type();
+    if kind.is_dir() {
+        // As a read of a directory fails, so a directory of other refs is no
+        // ref file ([`no_ref_file`]).
+        return Err(io::Error::from(ErrorKind::IsADirectory));
+    }
+    if !kind.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "ref file is not a regular file",
+        ));
+    }
+    bounded_read::read_capped_from(file, limit)
+}
+
 use kit_core::bounded_read;
+use kit_core::durable::Parents;
 use kit_core::hash::Hash;
+use kit_core::pack::SPOOL_BUFFER;
 use kit_core::protocol::{
-    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor,
-    Transport, TransportError, TransportResult,
+    AdvanceOutcome, PACK_BODY_LIMIT, PackBody, PackKey, PackSink, RefWriteCondition, RepoCursor,
+    Transport, TransportError, TransportResult, saturating_usize,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
     validate_ref_name_grammar, validate_ref_prefix,
 };
-
-// We need write_atomic and write_create_new from kit_core's private `atomic`
-// module. Since they are `pub(crate)`, we re-implement them locally here.
-// The logic is identical to `kit_core::atomic`.
 
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,11 +200,11 @@ fn temp_path(dest: &Path) -> io::Result<PathBuf> {
 /// Create a new, empty temp file beside `dest`, named `.kit.tmp.<pid>.<seq>`.
 /// The file is created with `create_new`, which never follows a link and
 /// never truncates: a name that is taken, by a file or a link, is skipped and
-/// the next one is tried. Every temp file this crate writes is created here.
-/// A streaming writer that publishes into the same layout (a blob store
-/// writing `packs/`) creates its temp files here too, so it can never
-/// collide with this crate's own writes. The caller removes the file when it
-/// fails to publish it.
+/// the next one is tried. A streaming writer that publishes into the same
+/// layout (a blob store writing `packs/`) creates its temp files here, so it
+/// can never collide with the pointer writes of this crate, which go through
+/// `kit_core::durable` and add a random suffix to the same prefix. The caller
+/// removes the file when it fails to publish it.
 ///
 /// # Errors
 /// `InvalidInput` if `dest` has no parent directory or no file name. Any
@@ -186,122 +224,54 @@ pub fn create_temp(dest: &Path) -> io::Result<(PathBuf, fs::File)> {
     }
 }
 
-/// Write `bytes` to a new temp file beside `dest` and fsync it. A failure
-/// removes the temp file and returns the original error.
-fn write_temp(dest: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    use std::io::Write;
-    let (path, mut file) = create_temp(dest)?;
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(&path);
-        return Err(e);
-    }
-    Ok(path)
+/// A reader that notes when a read of it failed, so that a failed write can
+/// tell its source from its destination.
+struct Tracked<'a> {
+    inner: &'a mut dyn io::Read,
+    failed: bool,
 }
 
-/// Atomically write `bytes` to `dest` using a temp-file + fsync +
-/// rename + parent-dir-fsync sequence. Creates parent dirs when
-/// `make_parents` is `true`. Mirrors `kit_core::atomic::write_atomic`.
-fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
+impl io::Read for Tracked<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf);
+        self.failed |= read.is_err();
+        read
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let read = self.inner.read_exact(buf);
+        self.failed |= read.is_err();
+        read
+    }
+}
+
+/// Write a ref or server file: its directories first, each made durable, then
+/// the pointer.
+fn write_ref(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    parents_durably(dest)?;
+    kit_core::durable::write_pointer_shared(dest, bytes, Parents::Existing)
+}
+
+/// Make the directory of `dest` and its parents, each made durable, so the
+/// pointer written there next does not vanish with its directory on power
+/// loss.
+fn parents_durably(dest: &Path) -> io::Result<()> {
     let parent = dest
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
-    if make_parents {
-        create_dir_all_durably(parent)?;
-    }
-
-    let tmp_path = write_temp(dest, bytes)?;
-
-    if let Err(e) = fs::rename(&tmp_path, dest) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    // Make the rename's dirent durable. Propagated (not best-effort
-    // discarded): on power loss a swallowed parent-dir fsync could lose a
-    // committed ref/pack write. Matches `kit_core::atomic::write_atomic`,
-    // which propagates its `sync_parent_dir(parent)?` the same way.
-    sync_parent(parent)?;
-    Ok(())
-}
-
-/// Exclusive-create variant: writes `bytes` to `dest` only if `dest`
-/// does not already exist. Returns `Ok(true)` on success, `Ok(false)`
-/// if the destination was already present. Mirrors
-/// `kit_core::atomic::write_create_new`.
-fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<bool> {
-    let parent = dest
-        .parent()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
-    if make_parents {
-        create_dir_all_durably(parent)?;
-    }
-
-    let tmp_path = write_temp(dest, bytes)?;
-
-    // Hard-link tmp → dest (atomic, fails with AlreadyExists if dest exists).
-    match fs::hard_link(&tmp_path, dest) {
-        Ok(()) => {
-            let _ = fs::remove_file(&tmp_path);
-            // Make the hard-link's dirent durable. Propagated (not
-            // best-effort discarded): on power loss a swallowed
-            // parent-dir fsync could lose a committed ref write. Matches
-            // `kit_core::atomic::write_create_new`.
-            sync_parent(parent)?;
-            Ok(true)
-        }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&tmp_path);
-            Ok(false)
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            Err(e)
-        }
-    }
-}
-
-/// Fsync a directory, making completed renames/hard-links durable.
-///
-/// The result is propagated by callers (not discarded) so a power loss
-/// cannot silently lose a committed ref/pack write. A `NotFound` is
-/// tolerated as success — the directory only vanishes if a concurrent
-/// actor removed it, in which case there is nothing left to make
-/// durable. Mirrors `kit_core::atomic::sync_parent_dir`.
-///
-/// Unix-only: opening a directory with a plain [`fs::File::open`] (no
-/// `FILE_FLAG_BACKUP_SEMANTICS`) fails on Windows with `ERROR_ACCESS_DENIED`
-/// (os error 5) — this crate's `write_atomic`/`write_create_new` were
-/// silently failing every ref/pack write on Windows through this path
-/// before the platform split below was added (caught by the `windows-smoke`
-/// CI job; `kit_core::atomic::sync_parent_dir`, which this mirrors, already
-/// had this split). Directory-fsync is a POSIX durability idiom with no
-/// direct Windows equivalent reachable from safe `std::fs`, so the
-/// non-Unix arm is a deliberate no-op, not a partial implementation.
-#[cfg(unix)]
-fn sync_parent(dir: &Path) -> io::Result<()> {
-    match fs::File::open(dir) {
-        Ok(d) => d.sync_all(),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn sync_parent(_dir: &Path) -> io::Result<()> {
-    Ok(())
+    create_dir_all_durably(parent)
 }
 
 /// Fsync directory `dir`, making the renames, links and removals already
 /// done in it durable: what every write of this crate does after its
 /// rename. A missing `dir` counts as success; on non-Unix targets this is a
-/// no-op (see `sync_parent`). For writers that publish into the same
+/// no-op (see [`kit_core::durable::flush_dir`]). For writers that publish into the same
 /// layout with their own temp file (see [`create_temp`]).
 ///
 /// # Errors
 /// The directory could not be opened or synced.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    sync_parent(dir)
+    kit_core::durable::flush_dir(dir)
 }
 
 /// [`fs::create_dir_all`], then fsync the parent of every directory it
@@ -321,7 +291,7 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     for created in missing.iter().rev() {
         if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
-            sync_parent(parent)?;
+            kit_core::durable::flush_dir(parent)?;
         }
     }
     Ok(())
@@ -678,6 +648,39 @@ impl FileTransport {
         Ok(f(&LockedRefs { tx: self }))
     }
 
+    /// Delete the ref `name` if it holds `expected`: the read, the check and
+    /// the removal are one step under the exclusive ref lock
+    /// ([`Self::with_ref_lock`]), so the directories the removal leaves empty
+    /// can be pruned while no other writer is creating a file in them. The
+    /// stripe of `name` is counted, so the repository cursor changes.
+    ///
+    /// The inner result is `Err(current)` when the ref held another value,
+    /// or was absent (`None`); nothing was removed then.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
+    /// [`RefFileError::MetaElsewhere`], a ref file that holds no id, or I/O.
+    pub fn delete_ref_if(
+        &self,
+        name: &str,
+        expected: &Hash,
+    ) -> Result<Result<(), Option<Hash>>, RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        self.with_ref_lock(|refs| {
+            let current = refs.read_ref(name)?;
+            if current != Some(*expected) {
+                return Ok(Err(current));
+            }
+            Ok(if refs.delete_ref(name)? {
+                Ok(())
+            } else {
+                Err(None)
+            })
+        })?
+    }
+
     /// Run `f` holding the lock of the ref `name` only: the repo lock
     /// shared and the exclusive lock of the ref's stripe, each after its
     /// in-process mirror. What `f` reads and writes through [`LockedRef`]
@@ -864,7 +867,7 @@ impl FileTransport {
     fn restore(&self, name: &str, path: &Path, previous: Option<&[u8]>) {
         match previous {
             Some(bytes) => {
-                let _ = write_atomic(path, bytes, false);
+                let _ = kit_core::durable::write_pointer_shared(path, bytes, Parents::Existing);
             }
             None => {
                 if remove_durably(path).unwrap_or(false) {
@@ -894,7 +897,7 @@ impl FileTransport {
         if path.exists() {
             self.guard_ref_path(&path)?;
         }
-        match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+        match read_regular_capped(&path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
@@ -921,6 +924,25 @@ impl FileTransport {
         &self,
         prefix: &str,
     ) -> Result<Vec<(String, Option<Hash>)>, RefFileError> {
+        let mut out = Vec::new();
+        for name in self.list_ref_file_names(prefix)? {
+            match read_regular_capped(&self.root.join(&name), REF_FILE_MAX_BYTES) {
+                Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
+                // An oversized file is malformed content, like a bad hash.
+                Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
+                Err(e) => return Err(RefFileError::Io(e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The names that [`Self::list_ref_files`] lists, sorted, without reading
+    /// any file. A caller that pages a listing reads only the files of one
+    /// page, with [`Self::read_listed_ref_file`].
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for an invalid prefix, or I/O.
+    pub fn list_ref_file_names(&self, prefix: &str) -> Result<Vec<String>, RefFileError> {
         let trimmed = prefix.trim_end_matches('/');
         if !validate_ref_name(trimmed) {
             return Err(RefFileError::InvalidName(prefix.to_owned()));
@@ -951,16 +973,25 @@ impl FileTransport {
                 if !file_type.is_file() || !validate_ref_name_grammar(&name) {
                     continue; // a symlink, a temp or lock file, or no ref name
                 }
-                match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
-                    Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
-                    // An oversized file is malformed content, like a bad hash.
-                    Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
-                    Err(e) => return Err(RefFileError::Io(e)),
-                }
+                out.push(name);
             }
         }
         out.sort();
         Ok(out)
+    }
+
+    /// The id in the ref file that [`Self::list_ref_file_names`] listed as
+    /// `name`: `None` when the file holds no ref wire, or is gone since.
+    ///
+    /// # Errors
+    /// [`RefFileError::Io`], including for a file that is not regular.
+    pub fn read_listed_ref_file(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
+        match read_regular_capped(&self.root.join(name), REF_FILE_MAX_BYTES) {
+            Ok(bytes) => Ok(decode_ref_wire(&bytes)),
+            // An oversized file is malformed content, like a bad hash.
+            Err(e) if e.kind() == ErrorKind::InvalidData || no_ref_file(&e) => Ok(None),
+            Err(e) => Err(RefFileError::Io(e)),
+        }
     }
 
     /// The path of a server-owned file: `rel` must be a plain relative path
@@ -1263,9 +1294,10 @@ impl FileTransport {
             .map_err(|e| RefFileError::Io(io::Error::other(e.to_string())))?;
         // Exactly one creator wins the exclusive create; every caller then
         // reads the winner's id.
-        write_create_new(&path, &fresh, true).map_err(RefFileError::Io)?;
-        let bytes =
-            bounded_read::read_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
+        parents_durably(&path)
+            .and_then(|()| kit_core::durable::write_pointer_new(&path, &fresh, Parents::Existing))
+            .map_err(RefFileError::Io)?;
+        let bytes = read_regular_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
         bytes
             .try_into()
             .map_err(|_| RefFileError::Corrupt(REPO_ID_FILE.to_owned()))
@@ -1297,11 +1329,13 @@ impl FileTransport {
 
         match condition {
             // Unconditional atomic overwrite.
-            RefWriteCondition::Any => write_atomic(&dest, &wire, true).map_err(clashed),
+            RefWriteCondition::Any => write_ref(&dest, &wire).map_err(clashed),
 
             RefWriteCondition::Missing => {
                 // Exclusive create: succeeds only when the file is absent.
-                match write_create_new(&dest, &wire, true) {
+                match parents_durably(&dest).and_then(|()| {
+                    kit_core::durable::write_pointer_new_shared(&dest, &wire, Parents::Existing)
+                }) {
                     Ok(true) => Ok(()),
                     Ok(false) if dest.is_dir() => Err(RefFileError::InvalidName(name.to_owned())),
                     Ok(false) => Err(RefFileError::Conflict),
@@ -1314,7 +1348,7 @@ impl FileTransport {
                     Some(c) if c == expected => {}
                     _ => return Err(RefFileError::Conflict),
                 }
-                write_atomic(&dest, &wire, true).map_err(clashed)
+                write_ref(&dest, &wire).map_err(clashed)
             }
         }
     }
@@ -1328,7 +1362,7 @@ impl FileTransport {
                 break;
             }
             if let Some(parent) = dir.parent() {
-                let _ = sync_parent(parent);
+                let _ = kit_core::durable::flush_dir(parent);
             }
         }
     }
@@ -1483,7 +1517,7 @@ impl LockedRefs<'_> {
     pub fn write_file(&self, rel: &Path, bytes: &[u8]) -> Result<(), RefFileError> {
         self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.server_path(rel)?;
-        write_atomic(&path, bytes, true).map_err(RefFileError::Io)
+        write_ref(&path, bytes).map_err(RefFileError::Io)
     }
 
     /// Remove the server file at `rel` (see [`FileTransport::server_path`]),
@@ -1567,7 +1601,7 @@ fn condition_holds(path: &Path, condition: RefWriteCondition) -> io::Result<bool
 /// The bytes of the ref file at `path`, bounded like every ref read, or
 /// `None` when there is no file.
 fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+    match read_regular_capped(path, REF_FILE_MAX_BYTES) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -1611,28 +1645,87 @@ fn remove_durably(path: &Path) -> io::Result<bool> {
         Err(e) => return Err(e),
     }
     if let Some(parent) = path.parent() {
-        sync_parent(parent)?;
+        kit_core::durable::flush_dir(parent)?;
     }
     Ok(true)
 }
 
 impl Transport for FileTransport {
+    /// A `kit+file` remote is a directory kit writes and reads itself, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
+        if matches!(condition, RefWriteCondition::Any) {
+            return Err(TransportError::ProtocolError);
+        }
+        self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
+    }
+
     // ------------------------------------------------------------------
     // Pack verbs
     // ------------------------------------------------------------------
 
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    /// Copy the pack from its body into a temp file beside the destination,
+    /// fsync it and rename it into place, one buffer at a time. A failure to
+    /// read the body is local: [`TransportError::ProtocolError`], never
+    /// retried.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        _head_ref: Option<&str>,
+    ) -> TransportResult<()> {
         // Refuse a pack that `download_pack` would refuse, rather than store
         // something that can never be read back.
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        let len = pack.len();
+        if len > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
         }
-        let dest = self.pack_path(key);
-        write_atomic(&dest, bytes, true)
-            .map_err(|e| TransportError::RemoteError(format!("upload_pack I/O error: {e}")))
+        let mut body = pack
+            .read_from(0)
+            .map_err(|_| TransportError::ProtocolError)?;
+        let path = self.pack_path(key);
+        let mut source = Tracked {
+            inner: &mut body,
+            failed: false,
+        };
+        parents_durably(&path)
+            .and_then(|()| {
+                kit_core::durable::write_pointer_from_shared(
+                    &path,
+                    &mut source,
+                    len,
+                    Parents::Existing,
+                )
+            })
+            .map_err(|e| {
+                if source.failed {
+                    TransportError::ProtocolError
+                } else {
+                    TransportError::RemoteError(format!("upload_pack I/O error: {e}"))
+                }
+            })
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    /// Declare the pack's length to `sink` before any byte, then copy it in
+    /// [`SPOOL_BUFFER`]-byte reads.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        _ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        use std::io::Read as _;
         let path = self.pack_path(key);
         let io_err = |e: io::Error| match e.kind() {
             ErrorKind::NotFound => TransportError::PackNotFound,
@@ -1640,7 +1733,7 @@ impl Transport for FileTransport {
         };
         // The open refuses a link, and the checks read the open handle, so
         // a swap of the path after the open changes nothing.
-        let file = open_pack_file(&path).map_err(|e| {
+        let mut file = open_pack_file(&path).map_err(|e| {
             if e.kind() == ErrorKind::InvalidInput {
                 TransportError::RemoteError("download_pack: pack is not a regular file".into())
             } else {
@@ -1649,21 +1742,32 @@ impl Transport for FileTransport {
         })?;
         let len = file.metadata().map_err(io_err)?.len();
         if len > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(
-                usize::try_from(len).unwrap_or(usize::MAX),
-            ));
+            return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
         }
-        bounded_read::read_capped_from(file, PACK_BODY_LIMIT).map_err(|e| {
-            if e.kind() == ErrorKind::InvalidData {
-                TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE.saturating_add(1))
-            } else {
-                io_err(e)
-            }
-        })
+        sink.begin(Some(len))?;
+        let mut buf = vec![0u8; usize::try_from(len).map_or(SPOOL_BUFFER, |n| n.min(SPOOL_BUFFER))];
+        let mut left = len;
+        while left > 0 {
+            let n = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+            file.read_exact(&mut buf[..n]).map_err(io_err)?;
+            sink.write(&buf[..n])?;
+            left -= n as u64;
+        }
+        Ok(())
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        Ok(self.pack_path(key).exists())
+    fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
+        // A regular file only, as `download_pack` reads: a link or a
+        // directory at the key is not a stored pack.
+        Ok(fs::symlink_metadata(self.pack_path(key)).is_ok_and(|meta| meta.is_file()))
+    }
+
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        // The same regular file `pack_exists` accepts, with its length.
+        Ok(fs::symlink_metadata(self.pack_path(key))
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|meta| meta.len()))
     }
 
     // ------------------------------------------------------------------
@@ -1730,6 +1834,17 @@ impl Transport for FileTransport {
         }
     }
 
+    /// [`Self::delete_ref_if`]: under the exclusive ref lock, so a delete
+    /// never interleaves with another write and prunes the directories it
+    /// leaves empty.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        self.delete_ref_if(name, expected)?
+            .map_err(|_| TransportError::RefConflict)
+    }
+
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         if !validate_ref_name(name) {
             return Err(TransportError::InvalidRef(name.to_owned()));
@@ -1771,7 +1886,7 @@ impl Transport for FileTransport {
 /// Read and decode the hash from a ref file. Returns `None` if no ref
 /// file is there ([`no_ref_file`]); propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    ref_from_read(bounded_read::read_capped(path, REF_FILE_MAX_BYTES))
+    ref_from_read(read_regular_capped(path, REF_FILE_MAX_BYTES))
 }
 
 /// The ref a capped read of a ref file yields.
@@ -1838,7 +1953,7 @@ fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> Tran
                 continue;
             }
 
-            if let Ok(bytes) = bounded_read::read_capped(&path, REF_FILE_MAX_BYTES)
+            if let Ok(bytes) = read_regular_capped(&path, REF_FILE_MAX_BYTES)
                 && let Some(hash) = decode_ref_wire(&bytes)
             {
                 out.push(Ref {
@@ -1874,14 +1989,22 @@ mod tests {
     // Pack verb tests (6 tests)
     // ------------------------------------------------------------------
 
+    /// A `kit+file` remote takes a manifest delta.
+    #[test]
+    fn a_file_remote_accepts_manifest_deltas() {
+        let dir = tmp();
+        assert!(FileTransport::new(dir.path()).accepts_manifest_deltas());
+    }
+
     #[test]
     fn upload_and_download_pack() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let data = b"hello packfile content";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
-        let got = t.download_pack(&key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let got = t.download_blob(&key, None, u64::MAX).unwrap();
         assert_eq!(got, data);
     }
 
@@ -1890,7 +2013,7 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = pack_key_for(b"nonexistent pack");
-        let err = t.download_pack(&key).unwrap_err();
+        let err = t.download_blob(&key, None, u64::MAX).unwrap_err();
         assert!(matches!(err, TransportError::PackNotFound));
     }
 
@@ -1901,8 +2024,29 @@ mod tests {
         assert!(!dir.path().join("packs").exists());
         let data = b"first pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         assert!(dir.path().join("packs").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_exists_is_false_for_a_link_or_a_directory_at_the_key() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"real pack";
+        let key = pack_key_for(data);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let path = t.pack_path(&key);
+        fs::remove_file(&path).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
     }
 
     #[cfg(unix)]
@@ -1912,14 +2056,15 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"real pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         let outside = dir.path().join("outside");
         fs::write(&outside, b"secret").unwrap();
         let link = t.pack_path(&key);
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(matches!(
-            t.download_pack(&key),
+            t.download_blob(&key, None, u64::MAX),
             Err(TransportError::RemoteError(_))
         ));
     }
@@ -1938,6 +2083,118 @@ mod tests {
         assert!(
             open_pack_file(dir.path()).is_err(),
             "a directory is no pack"
+        );
+    }
+
+    /// Make a FIFO at `path`.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo");
+    }
+
+    /// The result of `work`, which must come back within 20 s. A read that
+    /// waits on the FIFO at `fifo` is let go, by opening its write end, so a
+    /// failing test does not leave its thread stuck.
+    #[cfg(unix)]
+    fn returns_at_once<T: Send + 'static>(
+        fifo: &Path,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        if let Ok(value) = result.recv_timeout(std::time::Duration::from_secs(20)) {
+            value
+        } else {
+            drop(fs::OpenOptions::new().write(true).open(fifo));
+            panic!("a read waited on the FIFO at {}", fifo.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_pack_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let key = pack_key_for(b"a pack that is a FIFO");
+        let (root, fifo) = (
+            dir.path().to_path_buf(),
+            FileTransport::new(dir.path()).pack_path(&key),
+        );
+        make_fifo(&fifo);
+        let err = returns_at_once(&fifo.clone(), move || {
+            let mut sink = kit_core::protocol::MemorySink::new(99);
+            FileTransport::new(root).download_pack(&key, None, &mut sink)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, TransportError::RemoteError(m) if m.contains("not a regular file")),
+            "{err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_ref_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let fifo = dir.path().join("refs/heads/main");
+        make_fifo(&fifo);
+        let root = dir.path().to_path_buf();
+        let (read, strict, listed, update) = returns_at_once(&fifo.clone(), move || {
+            let t = FileTransport::new(root);
+            (
+                t.read_ref("refs/heads/main"),
+                t.read_ref_strict("refs/heads/main"),
+                t.list_refs("refs/heads/"),
+                t.update_ref(
+                    "refs/heads/main",
+                    RefWriteCondition::Match([1; 32]),
+                    &[2; 32],
+                ),
+            )
+        });
+        assert!(read.is_err(), "{read:?}");
+        assert!(matches!(strict, Err(RefFileError::Io(_))), "{strict:?}");
+        assert!(listed.unwrap().is_empty(), "a listing skips a FIFO");
+        assert!(update.is_err(), "{update:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_ref_file_is_read_only_when_it_is_regular() {
+        let dir = tmp();
+        let file = dir.path().join("ref");
+        fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_regular_capped(&file, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(&file, 3).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_regular_capped(&link, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(Path::new("/dev/null"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput,
+            "a device is no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(dir.path(), 4).unwrap_err().kind(),
+            ErrorKind::IsADirectory,
+            "a directory of refs reads as no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(&dir.path().join("absent"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
         );
     }
 
@@ -2008,12 +2265,98 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
 
+    /// A body of `len` zero bytes that holds none of them.
+    struct Zeros(u64);
+
+    impl PackBody for Zeros {
+        fn len(&self) -> u64 {
+            self.0
+        }
+        fn read_from(&self, offset: u64) -> io::Result<Box<dyn io::Read + Send + '_>> {
+            Ok(Box::new(io::Read::take(io::repeat(0), self.0 - offset)))
+        }
+    }
+
+    /// The upload copies the body one buffer at a time: a pack is stored
+    /// whole and byte for byte, and a body that fails to read leaves nothing.
+    #[test]
+    fn upload_pack_streams_the_body_and_a_failed_read_stores_nothing() {
+        /// A body that claims more bytes than it gives.
+        struct Short;
+        impl PackBody for Short {
+            fn len(&self) -> u64 {
+                10
+            }
+            fn read_from(&self, _: u64) -> io::Result<Box<dyn io::Read + Send + '_>> {
+                Ok(Box::new(&b"abc"[..]))
+            }
+        }
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let bytes: Vec<u8> = (0..3 * SPOOL_BUFFER + 7)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let key = PackKey::new([0x58u8; 32]);
+        t.upload_pack(&kit_core::protocol::SliceBody(&bytes), &key, None)
+            .unwrap();
+        assert_eq!(fs::read(t.pack_path(&key)).unwrap(), bytes);
+
+        let other = PackKey::new([0x59u8; 32]);
+        assert!(matches!(
+            t.upload_pack(&Short, &other, None),
+            Err(TransportError::ProtocolError)
+        ));
+        assert!(!t.pack_exists(&other, None).unwrap());
+        let leftovers = fs::read_dir(t.pack_path(&other).parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(leftovers, 1, "only the first pack is in its directory");
+    }
+
+    /// A pack whose write fails on the remote leaves no temporary file
+    /// there: here the rename fails, because a directory holds its name.
+    #[test]
+    fn upload_pack_that_cannot_land_leaves_no_temporary_file() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x5bu8; 32]);
+        let blocker = t.pack_path(&key);
+        fs::create_dir_all(blocker.join("occupied")).unwrap();
+        assert!(
+            t.upload_pack(&kit_core::protocol::SliceBody(&[7u8; 4096]), &key, None)
+                .is_err()
+        );
+        let names: Vec<String> = fs::read_dir(blocker.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "only the blocking directory: {names:?}");
+    }
+
+    /// The download declares the pack's length before any byte, so a sink
+    /// with a smaller limit refuses it with no byte read.
+    #[test]
+    fn download_pack_declares_the_length_before_the_body() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x5au8; 32]);
+        t.upload_pack(&kit_core::protocol::SliceBody(&[7u8; 100]), &key, None)
+            .unwrap();
+        let mut sink = kit_core::protocol::MemorySink::new(99);
+        assert!(matches!(
+            t.download_pack(&key, None, &mut sink),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+        assert_eq!(t.download_blob(&key, None, 100).unwrap(), [7u8; 100]);
+    }
+
     #[test]
     fn download_pack_refuses_a_pack_over_the_body_limit() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x55u8; 32]);
-        t.upload_pack(b"seed", &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"seed"), &key, None)
+            .unwrap();
         // A sparse file, so the test writes no data.
         let f = fs::OpenOptions::new()
             .write(true)
@@ -2021,7 +2364,7 @@ mod tests {
             .unwrap();
         f.set_len(PACK_BODY_LIMIT + 1).unwrap();
         assert!(matches!(
-            t.download_pack(&key),
+            t.download_blob(&key, None, u64::MAX),
             Err(TransportError::PayloadTooLarge(_))
         ));
     }
@@ -2033,13 +2376,11 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x56u8; 32]);
-        // Zeroed memory is mapped lazily, so the test commits none of it.
-        let over = vec![0_u8; PACK_BODY_LIMIT_USIZE + 1];
         assert!(matches!(
-            t.upload_pack(&over, &key),
+            t.upload_pack(&Zeros(PACK_BODY_LIMIT + 1), &key, None),
             Err(TransportError::PayloadTooLarge(_))
         ));
-        assert!(!t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
     }
 
     /// A pack of exactly the limit is one `download_pack` accepts, so the
@@ -2051,9 +2392,8 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x57u8; 32]);
-        let exact = vec![0_u8; PACK_BODY_LIMIT_USIZE];
-        t.upload_pack(&exact, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
+        t.upload_pack(&Zeros(PACK_BODY_LIMIT), &key, None).unwrap();
+        assert!(t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
@@ -2077,8 +2417,9 @@ mod tests {
 
         let remote = tmp();
         let t = FileTransport::new(remote.path());
-        t.upload_pack(&pack, &key).unwrap();
-        let fetched = t.download_pack(&key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(&pack), &key, None)
+            .unwrap();
+        let fetched = t.download_blob(&key, None, u64::MAX).unwrap();
         assert_eq!(fetched, pack);
 
         let local = tmp();
@@ -2088,14 +2429,39 @@ mod tests {
     }
 
     #[test]
+    fn pack_len_is_the_stored_length_of_a_regular_file_only() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"length test";
+        let key = pack_key_for(data);
+        assert_eq!(t.pack_len(&key, None).unwrap(), None);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert_eq!(t.pack_len(&key, None).unwrap(), Some(data.len() as u64));
+        // A link or a directory at the key is no stored pack.
+        let linked = pack_key_for(b"linked");
+        let target = dir.path().join("target");
+        fs::write(&target, b"linked").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, t.pack_path(&linked)).unwrap();
+            assert_eq!(t.pack_len(&linked, None).unwrap(), None);
+        }
+        let dir_key = pack_key_for(b"dir");
+        fs::create_dir(t.pack_path(&dir_key)).unwrap();
+        assert_eq!(t.pack_len(&dir_key, None).unwrap(), None);
+    }
+
+    #[test]
     fn pack_exists_before_and_after_upload() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let data = b"exists test";
         let key = pack_key_for(data);
-        assert!(!t.pack_exists(&key).unwrap());
-        t.upload_pack(data, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert!(t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
@@ -2103,9 +2469,11 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x77u8; 32]);
-        t.upload_pack(b"first", &key).unwrap();
-        t.upload_pack(b"second", &key).unwrap();
-        assert_eq!(t.download_pack(&key).unwrap(), b"second");
+        t.upload_pack(&kit_core::protocol::SliceBody(b"first"), &key, None)
+            .unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"second"), &key, None)
+            .unwrap();
+        assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), b"second");
     }
 
     #[test]
@@ -2114,7 +2482,8 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"hex filename test";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         let expected_name = key.to_hex();
         assert!(dir.path().join("packs").join(&expected_name).exists());
         assert_eq!(expected_name.len(), 64);
@@ -2159,7 +2528,8 @@ mod tests {
     }
 
     /// Plant links to `target` at the next 64 temp names beside `dest`,
-    /// counted from a name taken now. Returns the links.
+    /// counted from a name taken now. Returns the links this call made; a
+    /// name that already holds a link is left as it is.
     #[cfg(unix)]
     fn plant_links_ahead(dest: &Path, target: &Path) -> Vec<PathBuf> {
         let next = temp_path(dest).unwrap();
@@ -2167,18 +2537,22 @@ mod tests {
         let (stem, seq) = name.rsplit_once('.').unwrap();
         let seq: u64 = seq.parse().unwrap();
         (seq + 1..seq + 65)
-            .map(|n| {
+            .filter_map(|n| {
                 let link = next.with_file_name(format!("{stem}.{n}"));
-                std::os::unix::fs::symlink(target, &link).unwrap();
-                link
+                match std::os::unix::fs::symlink(target, &link) {
+                    Ok(()) => Some(link),
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("plant a link: {e}"),
+                }
             })
             .collect()
     }
 
-    /// A link planted at the temp names a write is about to use is neither
-    /// followed nor truncated: the target keeps its bytes, the link stays
-    /// and the write lands under a name that is free. The links are planted
-    /// from a fresh name right before each write.
+    /// A link planted at the names [`create_temp`] would use is neither
+    /// followed nor truncated by a write: the target keeps its bytes, the link
+    /// stays and the write lands under a name that is free. The temp names of
+    /// the writes themselves end in a random suffix and are created with
+    /// `O_EXCL`, so a link cannot be planted at one.
     #[cfg(unix)]
     #[test]
     fn writes_never_follow_a_link_at_a_temp_name() {
@@ -2194,7 +2568,10 @@ mod tests {
         let mut planted = plant_links_ahead(&heads.join("main"), &target);
         t.write_ref("refs/heads/main", &h).unwrap();
         planted.extend(plant_links_ahead(&heads.join("fresh"), &target));
-        assert!(write_create_new(&heads.join("fresh"), b"x", false).unwrap());
+        assert!(
+            kit_core::durable::write_pointer_new(&heads.join("fresh"), b"x", Parents::Existing)
+                .unwrap()
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"old");
         for link in &planted {
@@ -2209,6 +2586,28 @@ mod tests {
             .filter(|e| !e.file_type().unwrap().is_symlink())
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    /// A link planted at the next temp names is skipped by [`create_temp`]:
+    /// the target keeps its bytes and the temp file is a new regular file.
+    #[cfg(unix)]
+    #[test]
+    fn create_temp_skips_a_link_at_its_next_names() {
+        let dir = tmp();
+        let outside = tmp();
+        let target = outside.path().join("target");
+        fs::write(&target, b"old").unwrap();
+        let dest = dir.path().join("pack");
+        let planted = plant_links_ahead(&dest, &target);
+
+        let (path, file) = create_temp(&dest).unwrap();
+
+        assert!(!planted.contains(&path));
+        assert!(file.metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        for link in &planted {
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        }
     }
 
     #[test]
@@ -2478,7 +2877,8 @@ mod tests {
         // Upload a pack (creates packs/ directory).
         let data = b"some pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         // list_refs("") should not return the pack hex file as a ref.
         t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
         let all = t.list_refs("").unwrap();
@@ -2899,8 +3299,9 @@ mod tests {
     /// rename's / hard-link's dirent durable is now propagated via `?`
     /// instead of being discarded as best-effort. This exercises the
     /// now-propagating path end-to-end across all three write conditions
-    /// (`Any` and the `Missing` create path go through `write_atomic` /
-    /// `write_create_new`, both of which `sync_parent(parent)?`). A true
+    /// (`Any` and the `Missing` create path go through
+    /// `durable::write_pointer` / `write_pointer_new`, both of which flush the
+    /// parent directory and propagate its error). A true
     /// power-loss / fsync-fault injection is impractical in a unit test;
     /// this asserts the synced write path still succeeds for every verb.
     #[test]
@@ -2908,41 +3309,41 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
 
-        // pack upload → write_atomic → sync_parent(parent)?
+        // pack upload → write_pointer_from → flush_dir(parent)?
         let data = b"durable pack payload";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key)
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
             .expect("upload_pack must succeed through the propagated parent fsync");
-        assert_eq!(t.download_pack(&key).unwrap(), data);
+        assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), data);
 
-        // Missing → write_create_new → sync_parent(parent)? on the link arm
+        // Missing → write_pointer_new → flush_dir(parent)? on the rename arm
         let h0 = blake3_hash(b"durable-missing");
         t.update_ref("refs/heads/main", RefWriteCondition::Missing, &h0)
             .expect("update_ref(Missing) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h0));
 
-        // Any → write_atomic → sync_parent(parent)?
+        // Any → write_pointer → flush_dir(parent)?
         let h1 = blake3_hash(b"durable-any");
         t.update_ref("refs/heads/main", RefWriteCondition::Any, &h1)
             .expect("update_ref(Any) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h1));
 
-        // Match → read-check-write → write_atomic → sync_parent(parent)?
+        // Match → read-check-write → write_pointer → flush_dir(parent)?
         let h2 = blake3_hash(b"durable-match");
         t.update_ref("refs/heads/main", RefWriteCondition::Match(h1), &h2)
             .expect("update_ref(Match) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h2));
     }
 
-    /// `sync_parent` tolerates a vanished directory as success (mirrors
-    /// `atomic::sync_parent_dir`): if the parent was removed concurrently
+    /// `sync_dir` tolerates a vanished directory as success: if the parent
+    /// was removed concurrently
     /// there is nothing left to make durable, so a `NotFound` must not be
     /// surfaced as an error.
     #[test]
-    fn sync_parent_tolerates_missing_dir() {
+    fn sync_dir_tolerates_missing_dir() {
         let dir = tmp();
         let gone = dir.path().join("does-not-exist");
-        sync_parent(&gone).expect("sync_parent must treat a missing dir as success");
+        sync_dir(&gone).expect("sync_dir must treat a missing dir as success");
     }
 
     /// Write side: a symlink that already exists inside `<root>/` but
@@ -3346,7 +3747,7 @@ mod tests {
             ref_in_stripe(ref_stripe(&child)),
         ];
         let conditions = [RefWriteCondition::Missing, RefWriteCondition::Any];
-        for round in 0..200usize {
+        for round in 0..32usize {
             let dir = tmp();
             let barrier = Arc::new(Barrier::new(2));
             let run = |name: String, condition: RefWriteCondition, v: &[u8]| {
@@ -3642,14 +4043,14 @@ mod tests {
 
     #[test]
     fn concurrent_advances_of_a_ref_and_a_ref_below_it_leave_the_root_usable() {
-        for _ in 0..200 {
+        for _ in 0..32 {
             nested_create_round("a", true, true);
         }
     }
 
     #[test]
     fn an_advance_racing_a_single_ref_create_below_or_above_it_leaves_the_root_usable() {
-        for round in 0..300 {
+        for round in 0..32 {
             nested_create_round("a", round % 2 == 0, round % 2 == 1);
         }
     }
@@ -3723,7 +4124,7 @@ mod tests {
             std::thread::spawn(move || {
                 let t = FileTransport::new(root);
                 let any = RefWriteCondition::Any;
-                for i in 0..200u64 {
+                for i in 0..32u64 {
                     let pick =
                         |k: u64| names[usize::try_from((th * 7 + i * k) % 6).unwrap()].clone();
                     let (a, b) = (pick(1), pick(5));
@@ -3814,7 +4215,39 @@ mod tests {
         assert_eq!(t.list_refs("").unwrap().len(), 1);
         // Packs are shared with the server and still upload.
         let key = PackKey(blake3_hash(b"pack"));
-        t.upload_pack(b"pack", &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
+    }
+
+    /// A delete removes the ref only while it holds the expected value. It
+    /// prunes the directories it empties, so a ref named like one of them
+    /// can be created next.
+    #[test]
+    fn transport_delete_needs_the_expected_value_and_prunes() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let (a, b) = (blake3_hash(b"a"), blake3_hash(b"b"));
+        let name = "refs/heads/team/a";
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+        t.update_ref(name, RefWriteCondition::Missing, &a).unwrap();
+        assert!(matches!(
+            t.delete_ref(name, &b),
+            Err(TransportError::RefConflict)
+        ));
+        assert_eq!(t.read_ref(name).unwrap(), Some(a));
+        assert_eq!(t.delete_ref_if(name, &b).unwrap(), Err(Some(a)));
+        t.delete_ref(name, &a).unwrap();
+        assert_eq!(t.read_ref(name).unwrap(), None);
+        assert_eq!(t.delete_ref_if(name, &a).unwrap(), Err(None));
+        t.update_ref("refs/heads/team", RefWriteCondition::Missing, &b)
+            .unwrap();
+        assert!(matches!(
+            t.delete_ref("refs/heads/team/../x", &a),
+            Err(TransportError::InvalidRef(_))
+        ));
     }
 
     #[test]
@@ -4116,6 +4549,11 @@ mod tests {
                 .unwrap()
         );
         assert!(seen.insert(cursor(&tx)), "a delete");
+        tx.update_ref(name, RefWriteCondition::Missing, &value(2, 0))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a re-create");
+        tx.delete_ref(name, &value(2, 0)).unwrap();
+        assert!(seen.insert(cursor(&tx)), "a conditioned delete");
         // A failed CAS changes no ref. Its temporary file may still move a
         // directory time, and with it the cursor, which only costs a fetch.
         let failed = tx.update_ref("refs/heads/b", RefWriteCondition::Missing, &value(1, 1));

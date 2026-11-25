@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use kit_attest::Signer as _;
-use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store as attest_store};
+use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement};
 use kit_core::layout::{self, RepoLayout};
 use kit_core::object::{Object, ObjectType};
 use kit_core::observer::Observer;
@@ -513,7 +513,8 @@ fn translate_upstream(
     // Written only now, after the read-only probe: the marker brackets
     // exactly the window where torn objects can exist (store writes
     // until the map/ref-state commit below).
-    write_durable(&marker, b"").map_err(|e| step(Class::CannotCreate, "marker", e))?;
+    kit_core::durable::write_pointer(&marker, b"", kit_core::durable::Parents::Existing)
+        .map_err(|e| step(Class::CannotCreate, "marker", e))?;
 
     let direction = map::read_direction(state)
         .map_err(|e| plain(Class::General, e))?
@@ -764,6 +765,7 @@ fn translate_upstream(
         &imported,
         &prior_by_ref,
         kp,
+        observer,
     )?;
 
     map::store_import_ref_state(state, &new_state)
@@ -809,23 +811,6 @@ fn skip(
     });
 }
 
-/// `std::fs::write` + content fsync + parent-dir fsync — for tiny
-/// state files whose EXISTENCE is the signal (the crash marker).
-fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if let Some(parent) = path.parent()
-        && let Ok(d) = std::fs::File::open(parent)
-    {
-        let _ = d.sync_all();
-    }
-    Ok(())
-}
-
 /// SPEC-GIT-IMPORT §5: subject = kit head, predicate carries the git
 /// locator + canonical remote identity, signed with the import key.
 fn mint_attestations(
@@ -835,6 +820,7 @@ fn mint_attestations(
     imported: &[Imported],
     prior: &HashMap<&str, &map::RefState>,
     kp: &KeyPair,
+    observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     let identity = remote_identity(url);
     let remote_url = attestation_remote(&identity);
@@ -900,8 +886,7 @@ fn mint_attestations(
         let encoded = envelope
             .encode()
             .map_err(|e| step(Class::General, "encode envelope", e))?;
-        attest_store::save(layout, kit_hash, encoded.as_bytes())
-            .map_err(|e| step(Class::CannotCreate, "save attestation", e))?;
+        super::save_attestation(layout, &obj_store, kit_hash, encoded.as_bytes(), observer)?;
     }
     Ok(())
 }

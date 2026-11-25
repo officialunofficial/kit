@@ -20,7 +20,7 @@
 //!   works.
 //! * `pubkey_hex` is the raw public key bytes in lowercase hex.
 //!
-//! Exit code is 0 iff every listed attestation is bound to the requested
+//! Exit code is 0 iff at least one listed attestation is bound to the requested
 //! commit and has `any_verified = true`, nonzero otherwise.
 //!
 //! `--format=json` emits one JSON object to stdout describing the
@@ -80,6 +80,9 @@ struct Args {
     /// Filter signatures by algorithm.
     #[arg(long, value_name = "ALG")]
     algorithm: Option<String>,
+    /// Require this exact in-toto predicate type.
+    #[arg(long, value_name = "URI")]
+    predicate_type: Option<String>,
     /// Emit a machine-readable JSON result object to stdout alongside
     /// the human report on stderr.
     #[arg(long, value_enum, default_value = "default")]
@@ -249,7 +252,9 @@ pub fn run(args: &[String]) -> u8 {
     for item in &checked {
         write_report(&mut report, item, filter);
     }
-    let all_ok = checked.iter().all(Checked::is_verified);
+    let all_ok = checked.iter().any(|item| {
+        item.is_verified() && predicate_matches(item, parsed.predicate_type.as_deref())
+    });
 
     drop(report);
     if all_ok {
@@ -258,7 +263,7 @@ pub fn run(args: &[String]) -> u8 {
         }
         {
             let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "ok: all attestations verified");
+            let _ = writeln!(stderr, "ok: at least one attestation verified");
         }
         exit::OK
     } else {
@@ -266,16 +271,47 @@ pub fn run(args: &[String]) -> u8 {
             emit_json(
                 &commit_hash,
                 false,
-                Some("at least one attestation failed verification"),
+                Some("no matching attestation has a trusted signature"),
                 &checked,
             );
         }
         {
             let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "bad: at least one attestation failed verification");
+            let _ = writeln!(
+                stderr,
+                "bad: no matching attestation has a trusted signature"
+            );
         }
         exit::DATAERR
     }
+}
+
+// Recheck the content id when reading a predicate so a concurrent replacement
+// cannot pair one envelope's trusted verdict with another envelope's predicate.
+fn predicate_matches(item: &Checked, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let Ok(bytes) = kit_core::bounded_read::read_capped(
+        &item.path,
+        kit_attest::store::MAX_ENVELOPE_SIZE as u64,
+    ) else {
+        return false;
+    };
+    if item.id != Some(kit_attest::attestation_id(&bytes)) {
+        return false;
+    }
+    let Ok(env) = kit_attest::envelope::decode_expecting(&bytes, kit_attest::PAYLOAD_TYPE_IN_TOTO)
+    else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&env.payload) else {
+        return false;
+    };
+    value
+        .get("predicateType")
+        .and_then(serde_json::Value::as_str)
+        == Some(filter)
 }
 
 /// Write the human lines for one envelope. The filter hides signatures of

@@ -154,6 +154,14 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
     result_len.min(stream_len.saturating_mul(CAP_MULTIPLIER))
 }
 
+/// The longest stream [`encode`] writes for a result of `result_len` bytes:
+/// the header and every byte inserted, one opcode per 127 inserted bytes. It
+/// reserves this much once, so its output never grows past it.
+#[must_use]
+pub const fn max_encoded_len(result_len: usize) -> usize {
+    HEADER_LEN + result_len + result_len / 127 + 1
+}
+
 /// Build a v1 delta stream that reconstructs `result` from `base`.
 ///
 /// The writer is a rolling-polynomial-hash-on-16-byte-blocks scan (see
@@ -178,7 +186,7 @@ pub(crate) fn compute_cap_hint(result_len: usize, _base_len: usize, stream_len: 
 pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
     check_length_bounds(base.len(), result.len())?;
 
-    let mut out = Vec::with_capacity(HEADER_LEN + result.len());
+    let mut out = Vec::with_capacity(max_encoded_len(result.len()));
     write_header(&mut out, base.len(), result.len());
 
     // Build hash table: hash(block) -> first-seen position. We cap

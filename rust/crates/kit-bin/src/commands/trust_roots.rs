@@ -384,14 +384,33 @@ pub fn save(path: &Path, entries: &[TrustEntry]) -> Result<(), (String, u8)> {
 /// The file a write to `path` must replace. For a symlink it is the file the
 /// link resolves to, or the place a dangling link points at.
 fn link_target(path: &Path) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+
+    const MAX_LINKS: usize = 40;
     match std::fs::canonicalize(path) {
-        Ok(resolved) => Ok(resolved),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::fs::read_link(path) {
-            Ok(link) => Ok(path.parent().unwrap_or(Path::new("")).join(link)),
-            Err(_) => Ok(path.to_path_buf()),
-        },
-        Err(e) => Err(e),
+        Ok(resolved) => return Ok(resolved),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+
+    // Canonicalization requires the final file to exist. Walk a dangling
+    // chain one link at a time, resolving relative targets beside each link.
+    let mut target = path.to_path_buf();
+    for followed in 0..=MAX_LINKS {
+        match std::fs::symlink_metadata(&target) {
+            Ok(meta) if meta.is_symlink() => {
+                if followed == MAX_LINKS {
+                    break;
+                }
+                let link = std::fs::read_link(&target)?;
+                target = target.parent().unwrap_or(Path::new("")).join(link);
+            }
+            Ok(_) => return Ok(target),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(target),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Error::other("too many symlinks in trust catalog path"))
 }
 
 /// Cross-check that `keyid` is consistent with the declared
@@ -419,12 +438,18 @@ pub fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
     }
 }
 
-/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`.
+/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`. The cut is at the
+/// last character boundary within 16 bytes, because a keyid from a fetched
+/// envelope can hold multi-byte characters.
 #[must_use]
 pub fn short_keyid(keyid: &str) -> String {
     match keyid.split_once(':') {
         Some((prefix, body)) if body.len() > 16 => {
-            format!("{prefix}:{}…", &body[..16])
+            let end = (0..=16)
+                .rev()
+                .find(|&i| body.is_char_boundary(i))
+                .unwrap_or(0);
+            format!("{prefix}:{}…", &body[..end])
         }
         _ => keyid.to_owned(),
     }
@@ -433,6 +458,16 @@ pub fn short_keyid(keyid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_keyid_cuts_on_a_character_boundary() {
+        // Byte 16 is inside the 3-byte character that starts at byte 15.
+        let keyid = format!("ed25519:{}€{}", "a".repeat(15), "b".repeat(8));
+        assert_eq!(short_keyid(&keyid), format!("ed25519:{}…", "a".repeat(15)));
+        // A cut exactly on a boundary keeps all 16 bytes.
+        let keyid = format!("ed25519:{}", "é".repeat(9));
+        assert_eq!(short_keyid(&keyid), format!("ed25519:{}…", "é".repeat(8)));
+    }
 
     #[test]
     fn parse_missing_file_is_empty() {

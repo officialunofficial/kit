@@ -26,20 +26,22 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::atomic::write_atomic;
+use crate::durable::{Flushed, Group, Parents, Staged};
 use crate::hash::{self, HASH_LEN, Hash};
 use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
-use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError, check_tree_leaves};
 
 /// Magic bytes — ASCII `"KIDX"`.
 pub const MAGIC: [u8; 4] = *b"KIDX";
 /// Checksummed index format. Other versions are rejected without rewriting.
 pub const FORMAT_VERSION: u8 = 0x03;
-/// Hard cap on a serialised index file (64 MiB), per SPEC-INDEX §4.
-pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard cap on a serialised index file (256 MiB), per SPEC-INDEX §5.
+/// Fits two million entries with an average path length of 64 bytes:
+/// 41 + 2,000,000 × (67 + 64) = 262,000,041 bytes.
+pub const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 /// Hard cap on a single entry's path length (SPEC-INDEX §2).
 pub const MAX_PATH_LEN: usize = 4096;
 
@@ -618,7 +620,63 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
     if bytes.len() as u64 > MAX_INDEX_BYTES {
         return Err(IndexError::TooLarge);
     }
-    write_atomic(&path, &bytes, true)?;
+    crate::durable::write_pointer(&path, &bytes, Parents::Create)?;
+    Ok(())
+}
+
+/// An index staged in a [`Group`]: its temp file is written out and invisible
+/// until [`publish_staged_index`].
+#[derive(Debug)]
+#[must_use = "a staged index is invisible until it is published"]
+pub struct StagedIndex(Staged);
+
+impl StagedIndex {
+    /// The temp file, for a check of its mtime before the publish.
+    #[must_use]
+    pub fn temp_path(&self) -> &Path {
+        self.0.temp_path()
+    }
+}
+
+/// An index of `len` bytes is over [`MAX_INDEX_BYTES`].
+fn exceeds_index_limit(len: usize) -> bool {
+    len as u64 > MAX_INDEX_BYTES
+}
+
+/// Stage the write of `idx`, as [`write_index`] makes it but in two steps, so
+/// the bytes of the index share the flush of the objects it names.
+///
+/// # Errors
+/// [`IndexError::TooLarge`], or an I/O error when the temp file cannot be
+/// written or the group is poisoned.
+pub fn stage_index(
+    group: &mut Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> IndexResult<StagedIndex> {
+    let bytes = idx.serialize();
+    if exceeds_index_limit(bytes.len()) {
+        return Err(IndexError::TooLarge);
+    }
+    Ok(StagedIndex(group.stage(
+        &layout.index_file(),
+        &bytes,
+        Parents::Create,
+    )?))
+}
+
+/// Publish a staged index. The caller flushes `group` afterwards, and reports
+/// success only when that flush returned: the rename is durable then.
+///
+/// # Errors
+/// `after` does not cover the index's bytes and the objects it names, or the
+/// rename failed.
+pub fn publish_staged_index(
+    group: &mut Group,
+    staged: StagedIndex,
+    after: &Flushed,
+) -> IndexResult<()> {
+    group.publish_sibling(staged.0, after)?;
     Ok(())
 }
 
@@ -631,8 +689,15 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
 ///
 /// # Errors
 /// Propagates object-store errors and returns [`IndexError::NotTree`]
-/// if `tree_hash` does not point at a tree object.
+/// if `tree_hash` does not point at a tree object. A tree that expands to
+/// more than [`crate::store::MAX_TREE_LEAVES`] files, or to paths an index
+/// file could not hold, fails with
+/// [`StoreError::TreeTooLarge`] before any entry is built.
 pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
+    check_tree_leaves(store, tree_hash).map_err(|e| match e {
+        StoreError::TreeTooDeep => IndexError::TreeTooDeep,
+        e => IndexError::Store(e),
+    })?;
     let mut entries = Vec::new();
     push_tree_entries(store, tree_hash, "", &mut entries, 0)?;
     Ok(Index::from_entries(entries))
@@ -1388,6 +1453,14 @@ mod tests {
     }
 
     #[test]
+    fn the_index_limit_is_inclusive() {
+        let limit = usize::try_from(MAX_INDEX_BYTES).unwrap();
+        assert!(!exceeds_index_limit(limit));
+        assert!(exceeds_index_limit(limit + 1));
+        assert!(!exceeds_index_limit(0));
+    }
+
+    #[test]
     fn staged_count_excludes_removed() {
         let mut idx = Index::new();
         idx.entries.push(IndexEntry {
@@ -1717,5 +1790,30 @@ mod tests {
         let mut via_upsert = Index::new();
         via_upsert.upsert_entry(blob_entry("a.txt"));
         assert_eq!(via_field_push, via_upsert);
+    }
+    #[test]
+    fn index_bound_fits_two_million_files_with_64_byte_paths() {
+        let required = 41 + 2_000_000 * (67 + 64);
+        assert!(MAX_INDEX_BYTES >= required);
+        // Exercise both byte readers above the old 64 MiB bound.
+        let entries = (0..530_000)
+            .map(|i| IndexEntry {
+                path: format!("{i:064}"),
+                status: EntryStatus::Blob,
+                object_hash: [1; 32],
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            })
+            .collect();
+        let idx = Index::from_entries(entries);
+        let bytes = idx.serialize();
+        assert!(bytes.len() > 64 * 1024 * 1024);
+        assert_eq!(deserialize(&bytes).unwrap().entries.len(), 530_000);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        write_index(&layout, &idx).unwrap();
+        assert_eq!(read_index(&layout).unwrap().entries.len(), 530_000);
     }
 }

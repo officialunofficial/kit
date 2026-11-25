@@ -21,6 +21,10 @@ pub enum ChainState {
     /// An authorized self-contained reset, including a broken-chain escape.
     /// `prior` is the live ref value, even though the new node has no predecessor.
     Reset { prior: Option<Hash> },
+    /// No ref exists, and the new node grafts on `tail`, the head node of
+    /// another published chain (a tag map on its branch's packmap). The ref
+    /// is created with `Missing`; the node's `prev` is `tail`.
+    Graft { tail: Hash },
 }
 
 /// The most packs a rollover node lists (SPEC-TRANSPORT-CONNECT §7.4). A node of
@@ -112,6 +116,7 @@ pub fn plan_advance(
             (Some(head), None, rolled.as_slice())
         }
         ChainState::Reset { prior } => (prior, None, packs),
+        ChainState::Graft { tail } => (None, Some(tail), packs),
     };
     let bytes = encode_packlist(prev, packs)?;
     if max_node_bytes.is_some_and(|limit| bytes.len() as u64 > limit) {

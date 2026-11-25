@@ -6,10 +6,20 @@
 # /usr/local/share/zsh/site-functions/_kit on macOS Homebrew), then
 # restart zsh or run `compinit`.
 #
-# Scope: subcommand completion + common flags. Argument-level completion
-# (branch names, remotes) is deferred.
+# Argument names come from the private, local-only kit __complete helper.
 
 _kit() {
+    if (( CURRENT > 2 )) && [[ $PREFIX != -* ]]; then
+        local -a names
+        names=("${(@f)$(kit __complete "${words[@]:1:$((CURRENT - 2))}" 2>/dev/null)}")
+        if (( ${#names} )) && [[ -n $names[1] ]]; then
+            if (( CURRENT == 3 )) && [[ $words[2] == switch || $words[2] == checkout ]]; then
+                names+=('-' '@{-1}')
+            fi
+            compadd -a names
+            return
+        fi
+    fi
     local -a commands
     commands=(
         'init:Create a new kit repository'
@@ -173,14 +183,16 @@ _kit() {
                     _arguments \
                         '(-c -C)-c[create a new branch and switch to it]:new:' \
                         '(-c -C)-C[create-or-reset a branch and switch to it]:new:' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '1:target:(- @{-1})'
                     ;;
                 checkout)
                     _arguments \
                         '(-b -B)-b[create a branch and switch to it]:new:' \
                         '(-b -B)-B[create-or-reset a branch and switch to it]:new:' \
                         '(-f --force)'{-f,--force}'[discard local changes that block the switch]' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '1:target:(- @{-1})'
                     ;;
                 merge-base)
                     _arguments \
@@ -327,6 +339,8 @@ _kit() {
                         '--all[pull from every configured remote]' \
                         '(--rebase --no-ff)--rebase[replay the current branch onto the fetched branch]' \
                         '(--rebase --no-ff)--no-ff[always create a merge commit]' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
                         '--format[output format]:format:(default json)' \
                         '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
@@ -337,6 +351,8 @@ _kit() {
                     _arguments \
                         '--all[fetch from every configured remote]' \
                         '(-p --prune)'{-p,--prune}'[delete remote-tracking refs gone from the remote]' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
                         '--format[output format]:format:(default json)' \
                         '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
@@ -345,7 +361,9 @@ _kit() {
                     ;;
                 push)
                     _arguments \
-                        '--all[mirror every local branch]' \
+                        '(--tags)--all[mirror every local branch]' \
+                        '(--all -u --set-upstream)--tags[push every local tag]' \
+                        '(--all --tags -f --force --force-with-lease -u --set-upstream)--delete[delete a remote branch or tag]' \
                         '(-f --force --force-with-lease)-f[overwrite the remote branch unconditionally]' \
                         '(-u --set-upstream)'{-u,--set-upstream}'[record the pushed remote as upstream]' \
                         '(--force --force-with-lease)--force[overwrite the remote branch unconditionally (skip CAS)]' \
@@ -356,6 +374,8 @@ _kit() {
                 clone)
                     _arguments \
                         '--sparse[sparse-checkout pattern]:pattern:' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--help[show help]'
                     ;;
                 branch)
@@ -502,7 +522,9 @@ _kit() {
                         'apply[apply stash entry without removing it]' \
                         'drop[remove stash entry]' \
                         'clear[remove all stash entries]' \
-                        'show[show diff of stash entry]'
+                        'show[show diff of stash entry]' \
+                        '-u[include non-ignored untracked files]' \
+                        '--include-untracked[include non-ignored untracked files]'
                     ;;
                 remote)
                     _values 'remote subcommand' \
@@ -628,8 +650,13 @@ _kit() {
                                 '--force[overwrite a non-empty directory]' \
                                 '--format[output format]:fmt:(default json)' \
                                 '--help[show help]' \
-                                '1:subcommand:(export verify)' \
+                                '1:subcommand:(export verify repair-indexes)' \
                                 '2:revision:'
+                            ;;
+                        repair-indexes)
+                            _arguments \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify repair-indexes)'
                             ;;
                         verify)
                             _arguments \
@@ -638,13 +665,14 @@ _kit() {
                                 '--show-unreferenced[show unreferenced objects (local mode)]' \
                                 '--format[output format]:fmt:(default json)' \
                                 '--help[show help]' \
-                                '1:subcommand:(export verify)' \
+                                '1:subcommand:(export verify repair-indexes)' \
                                 '2:commit-id:'
                             ;;
                         *)
                             _values 'closure subcommand' \
                                 'export[export a commit object-set closure]' \
-                                'verify[verify a commit object-set closure]'
+                                'verify[verify a commit object-set closure]' \
+                                'repair-indexes[rebuild damaged local pack indexes from verified packs]'
                             ;;
                     esac
                     ;;

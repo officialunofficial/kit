@@ -25,7 +25,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `kit key` CLI surface.
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.
 - [SPEC-OBJECTS](SPEC-OBJECTS.md) &mdash; on-disk object model and canonical serialization over BLAKE3 IDs.
-- [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; packfile wire format for object exchange.
+- [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; packfile and local pack index formats.
 - [SPEC-REFS](SPEC-REFS.md) &mdash; ref names, storage, and CAS update variants.
 - [SPEC-RELEASE-THRESHOLD](SPEC-RELEASE-THRESHOLD.md) &mdash; BLS threshold signatures for release-party attestation.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.

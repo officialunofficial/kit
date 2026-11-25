@@ -7,6 +7,540 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `kit clone --no-checkout` (`-n`) fetches, sets the branch and HEAD, and writes no worktree file and no index; `kit checkout <branch>` fills the worktree later. `kit_sync::SyncOptions` gains `checkout`, set with `with_checkout`.
+
+### Changed
+
+- `kit checkout` in a repository with no `.kit/index` file, as `kit clone --no-checkout` leaves it, is the first checkout, as in git: nothing is tracked yet, so no file counts as a local change and no tracked path is removed. A file the checkout would write over still refuses it.
+- **Breaking:** the ssh `ListRefs` request and reply page, as Connect's do (SPEC-TRANSPORT §4.2.3): `kit serve` returns at most 1,000 refs a page, and `kit+ssh` remotes read every page. A new `kit serve` refuses a `ListRefs` with no `page_size`, so a client from before this change cannot list refs on it and has to be upgraded; a new client against an old `kit serve` works as before, up to the old limit of one frame.
+- `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed: no remote lists in one frame any more, so a tag push no longer refuses a create over a listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
+- `kit commit` of a plain commit no longer reads every tree of the new commit to rebuild the index it already holds, and no longer writes it again; a commit with a staged removal, a merge or an amend still rebuilds it.
+- `kit add` of files that are unchanged, and `kit add -A` or `-u` on a clean tree, no longer rewrite the index.
+- The applied-packs, verified-tip, checkpoint and cursor records are written with a temporary file and a rename and no device flush, since they only save work; a push saves 2 flushes and a fetch 4. The remote-tracking ref stays durable.
+- `kit pull` leaves `HEAD` alone when it already names the pulled branch.
+- `kit add` and `kit commit` make 3 full flushes on macOS in place of 4, and an amend does too (a commit that concludes a merge makes 4): the bytes of the objects and of the new ref, then the names of the objects and the bytes of the index, then the names of the ref and of the index share one flush each. Nothing changes on disk. For library users, `WriteBatch::commit_in` makes a batch's objects visible on the flushes of a `kit_core::durable::Group`, and `kit_core::refs`, `kit_core::index` and `kit_core::ops::recovery` stage a write on a group.
+- On macOS, each object of a batch gets an `fsync(2)` writeout in place of `F_BARRIERFSYNC`; the batch's full flush still makes the objects durable before a ref or the index names them.
+- `kit status`, `kit add -A` and the safety check before a restore, such as `kit pull`'s, take the `lstat` of the tracked files on the thread pool before they walk the worktree, as git's `core.preloadindex` does, so they wait less on a tree of thousands of files. A tree below 512 tracked files, a machine with one thread and a wasm build stat each file as they reach it. For library users, `kit_core::worktree::TrackedStats` holds the stats.
+- `kit pull` reads each directory of the worktree once for its safety check, not twice, and no longer walks the directories its restore leaves alone a third time, since the safety check has refused every untracked path outside the ignore rules there already. For library users, `kit_core::worktree::DirListings` and `build_tree_filtered_listed_with_source` return what the walk read, and `kit_core::ops::restore::restore_tree_to_worktree_gated` is the restore for a caller that has run that check.
+- `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
+- Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
+
+### Fixed
+
+- A tree that expands to more than 2,000,000 files (or 4,000,000 entries counting directories, so a chain of empty directories too), or to paths an index file could not hold, such as a chain of trees that each name the level below twice, is now refused before anything is built or written, by `index::from_tree`, the restore and `check_nested_repositories`, and so by `kit clone`, `kit pull`, `kit checkout` and `kit status`. `diff_trees` and `merge_trees` add no pass over unchanged trees: each walk counts the entries it compares, and the entries of the subtrees only one side has (a diff counts the old side's and the new side's separately, so a renamed directory counts once on each side), files and directories both, and stops at 4,000,000 entries or twice an index file's bytes of paths, so two trees that differ at every path, or a wide tree of names that share one large subtree, are refused too. The size is memoised per tree, so a chain of 40 trees fails in milliseconds and not after a walk of every path. `kit_core::StoreError` gains `TreeTooLarge`, and `kit_core::{MAX_TREE_LEAVES, check_tree_leaves}` are public.
+- `kit gc` no longer stops on a recovery log whose last line was cut short by a crash or a full disk: readers ignore a last line without its newline, `record` cuts it off before it appends, and a tab in the branch field fails the parse, and appends from linked trees take a `recovery-log.lock`, so a later entry is no longer glued to the torn bytes and left out of the gc roots.
+- `.kit/config` is written with an fsync of the file and of its directory, and `kit remote`, `kit config` and the upstream a push or `kit branch` records read and write it under one `config.lock`, so commands that run at once keep every change.
+- An unreadable `gc-auto` stamp is replaced by the stamp of a step that never ran, so the next automatic maintenance step is due again at the floor and not a week later.
+- `kit init` and `kit clone` into a `.kit` that a killed `init` left with no format marker and no objects now start over, and no longer report an existing repository.
+- A per-object write that creates a loose shard directory now flushes `objects/`, so the directory entry survives a power loss.
+- `kit diff`, `kit show`, `kit log -p`, `diff --stat`, the pull and merge diffstat, `add -p` and the 3-way merge now build no line table for a blob of more than 1,000,000 lines. The diff shows it as binary ("Binary files differ"), and the merge records a conflict. `kit blame` counts the lines of a file before it splits it, so a file over its 100,000-line limit is refused without a per-line allocation. A blob of newlines used to cost about 120 bytes of memory per byte.
+- `kit ls-tree -r` stops at the 128-level nesting limit that checkout uses and prints "tree nesting exceeds 128 levels", where a hostile chain of nested trees overflowed the stack.
+- Long `kit status`, `kit clean`, the commit summary, the conflict lines of `merge`, `cherry-pick`, `rebase` and the conflict notes, and the `cherry-pick` and `revert` unresolved-marker errors now quote a file name that holds a control character or a non-ASCII byte, as `kit status -s` and git do. The restore and pull refusals and the `merge --continue` and `rebase --continue` marker errors write a control character in a file name as `\u{..}`. A name cannot write an escape sequence to the terminal. `kit_sync::SourceError` now escapes control characters in the text that came from a remote (`RemoteError`, `InvalidRef`, and the message of `Remote`) and cuts that text to 256 bytes, as `TransportError` does.
+- `kit remote add` and `kit remote rename` refuse a name that is a path prefix of another remote's name (`team` and `team/upstream`), or the reverse, because the two would share a directory of tracking refs, and a fetch or prune of one changed the other's. `libkit::remote::Error` gains `OverlappingName`.
+- `kit verify-attest` no longer panics on a key id whose 16th byte is inside a multi-byte character.
+- `SECURITY.md` lists 0.10.x as the supported version.
+- `kit fetch`, `pull` and `clone` now check that the tip of each remote branch is a commit or a remix before they write its tracking ref. A branch that points at a tree, a blob or another object fails the fetch with `remote branch '<name>' points at a <type>, not a commit`, and no tracking ref is written for it. `kit_sync::SyncError` and `libkit::transfer::Error` gain a `BranchTipNotCommit { branch, found }` variant.
+- A file remote no longer blocks `kit clone`, `fetch`, `pull` or `push` when a pack, a packmap or a ref file in it is a named pipe, a device or a socket. kit opens these files without blocking and refuses one that is not a regular file before it reads, with `ref file is not a regular file`; a directory of other refs still reads as no ref.
+- The repair after a missing object now flushes the fetch-records directories after removing the verified-tip and applied-packs records, so a power loss cannot bring them back and undo the repair.
+- `kit commit` now refuses, and `kit status` warns, while a pull that stopped partway has moved HEAD to the pulled commit and left the index holding the pre-pull entry at a path the pull changed; before, a plain commit recorded a signed revert of the pulled change and `commit -a` recorded the half-restored files. `kit pull` finishes the restore. For library users, `libkit::commit::unfinished_pull` makes the check, and `libkit::commit::begin` and `create` return the new `Error::PullUnfinished` and `Error::ReadPullState`; `kit_core::ops::pull_state::PullState::at_head` reads the record that HEAD names.
+- On a case-insensitive disk, two spellings of one branch (`main` and `Main`) now share one ref lock, and `kit switch`, `checkout`, `worktree add` and `branch -d`/`-m` treat them as one branch when a sibling tree has it checked out, so two trees can no longer commit to one branch file and lose commits. The lock file names of refs with upper-case letters change, so an older and a newer kit running on one repository at once do not exclude each other for those refs.
+- `kit worktree remove` takes its locks before it checks the tree for local work, so a file staged while it waits is no longer deleted.
+- `kit clone`, `fetch` and `pull` over `kit+ssh` no longer fail for a repository whose branch listing is over one 1 MiB frame (about 13,400 branches with 30-character names, or 1,930 with 495-character names). `kit serve` pages the listing.
+- The automatic maintenance step no longer deletes an old pack that lost its index unless its collection ran its mark and found no live object needing the pack; `kit closure repair-indexes` now rebuilds the index of such a pack after verifying it.
+- A pack or index with a wrong version field in one local pack pair is now reported as damage to that pair, which readers skip, instead of making every packed object unreadable with an "update kit" message; a pair whose two files carry the same newer version still asks for a newer kit.
+- A local pack index with an id outside its fanout bucket is now reported as damage naming the pair, not as a missing object; a pair that fails to open fails short-id lookups and listings only for the shards it can hold, and the repair hint appears only when the index is the damaged file.
+- `kit gc` drops loose duplicates in batches like pack retirement, so one exclusive lock hold stays short, and counts those holds in the reported hold.
+- A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
+- A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
+- `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
+- `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.
+- `kit reset --hard` now ends a merge, cherry-pick or revert in progress, as git does, so the next commit no longer records the discarded merge as a second parent. `kit status` names an operation in progress.
+- The state of a merge, cherry-pick or revert is now written with temp, sync and rename, and its head marker last, so a failed write (a full disk, for example) leaves no operation in progress. `kit commit` refuses a merge that has no conflict list. For library users, `kit_core::ops::conflict_state::clear_operation_state` clears the three.
+- `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` now treat an operation result tree that the store cannot read as absent, instead of failing with `check operation changes`.
+- `kit reset` in every mode but `--soft` now ends a merge, cherry-pick or revert in progress, and drops the record of a pull that stopped before its restore, so a later commit of the pre-pull version of a pulled file is no longer refused.
+- `kit merge`, `kit cherry-pick` and `kit revert` record a paused operation before they write its conflict markers, and its conflict list after, so a crash between the two leaves an operation that `--abort` can undo and that `--continue` refuses, and never markers with no operation behind them. `kit_core::ops::conflict_state` gains `begin_merge_state`, `begin_cherry_pick_state` and `begin_revert_state`.
+- `kit commit` during a cherry-pick or a revert now refuses while a conflict has markers or is not staged, and when the operation's conflict list is missing, as it does for a merge, and ends the operation when it commits, so a later `--abort` cannot move the branch back over the commit. `libkit::commit::Error` gains `OperationStateIncomplete`.
+- `kit merge --abort` keeps a file that the merge added and the user then edited and stopped tracking with `kit rm --cached`, as git does.
+- `kit merge --abort` when a crash left the merge state over a finished merge commit now clears the state and leaves the branch on the merge commit, where it moved the branch back and left the commit for `gc` to delete.
+
+## [0.10.0] - 2026-11-22
+
+### Upgrading from 0.9
+
+- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints a line like the one below. `fetch`, `push` and `pull` print `error: fetch: store: `, `error: push: store: ` and `error: pull: store: ` in place of `error: not a kit repo: `, and the rest of the text is the same. Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
+
+  ```text
+  error: not a kit repo: repository object-addressing format is Some("bmt-v2\nP"), expected "bmt-v2". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.
+  ```
+- Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back. Examples are `add`, `commit`, `stash`, and a `fetch` that finds the remote changed or runs with `--prune`, even if it downloads nothing. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
+- Kit 0.9 and older reject `gc.auto` as an unknown config key, in the repository config and in the user config (`$XDG_CONFIG_HOME/kit/config`), so remove the key before running one of them.
+- Embedders that build kit-core with `history-mmr`, or that cross-check kit proofs with the upstream verifiers, must move to Commonware 2026.11.0 together with kit.
+
+### Added
+
+- Fetch, pull and clone (which runs pull) run best-effort local pack maintenance after applying packs or pruning remote-tracking refs, and `kit commit` runs it after it publishes. Set `gc.auto = false` to disable it.
+- Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
+- Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first. A pack is rewritten only when a quarter or more of its payload is garbage, so less than a quarter of an old pack's bytes can stay dead after `kit gc`.
+- The maintenance step after fetch, pull, clone and commit also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
+- Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
+- A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 256 MiB of pack and index files, so on Linux the median hold of 64 MiB packs is about 15 ms. On macOS (Apple silicon, APFS) each hold ends with two directory flushes, and holds of up to 124 ms were measured on a store of 28.7 GiB.
+- The maintenance step after fetch, pull, clone and commit verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
+- `kit commit` runs the due maintenance step after it publishes, so a repository that never fetches no longer builds up packs. The step prints only its maintenance line on standard error, and `kit add` alone does not run it. A step that has never run is due as soon as the store holds 32 packs, and not a week later. After that it is due again once the store holds 32 more packs than the last finished step left.
+- `kit commit`, `kit fetch` and `kit pull` can take up to about 5 seconds longer when a maintenance step is due, and longer when it retires packs. The first commit after a large `kit add` runs a full step: after adding 16 GiB (265 packs) it took about 1 s instead of 0.25 s on macOS and used several seconds of CPU on several threads. It happens once; the next commit is back to its usual time. Set `gc.auto = false` to turn the step off.
+- A `kit clone` that finds fewer than 32 pairs leaves an empty maintenance stamp, so the first fetch or commit that finds 32 pairs runs a full step. A clone that finds 32 or more pairs runs the step itself.
+- `gc.auto` is listed by `kit config`, and `kit config gc.auto false` sets it.
+- The `collection` value of the maintenance JSON can be `progress`: the step retired or copied what its limits allowed and left planned work, and the next step is due in an hour.
+- The library default `kit_sync::SyncOptions::auto_maintenance` is `true`. An embedder that calls fetch, pull or clone through `kit-sync` or `libkit` gets the maintenance step unless it calls `with_auto_maintenance(false)`.
+- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
+- A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
+- `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
+- `kit gc` prints `warning: kept damaged local pack: …` for each local pack it found damaged and kept, and `warning: kept the local packs gc meant to rewrite or merge: …` when copying the packs it meant to rewrite or merge failed. The exit code does not change.
+- Garbage collection drops loose objects when a verified, durable packed copy can take their place.
+- The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
+- Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs, so a repository a 0.10 fetch or clone wrote to needs kit 0.10 or newer.
+- `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the chunks of a large file into local packs in a repository that declares capability `P`, so adding a large file no longer leaves one loose file per chunk.
+- `kit add` seals a full local pack on a background thread while it hashes and writes the next one, so adding many large files is faster.
+- The seal of a local pack digests the pack file on a pool of up to 8 threads, so adding or fetching many large files spends less wall time in the seal.
+- Fetch and clone seal each local pack on a worker thread while they receive the next window, so up to two windows are staged at once. On Linux a fetch of 1 GiB in four large files takes as long as 0.9 (3.2 s against 3.3 s), and a fetch of 1 GiB in files of 300 kB to 1 MB takes about as long as 0.9 (0.96 of its time on a quiet host). On macOS (Apple silicon) that fetch takes 2.1 s against 8.1 s, and a clone 3.1 s against 9.3 s. The peak memory of a clone of 1 GiB of large files was about 29 MiB higher than 0.9 on macOS (median of six runs, 241 to 257 MiB against 216 to 220 MiB), and lower than 0.9 on Linux (97.5 against 106.7 MiB in the fetch of 1 GiB in four large files).
+- `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the small files of a large batch (past the first 64, up to 16,384 serialized bytes each) into local packs in a repository that declares capability `P`, so adding 100,000 small files makes a few packs and about 150 syncs where it made one loose file and one sync each. Smaller batches and larger files keep the loose path.
+- Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
+- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days, and does not keep a pack longer than 1 GiB.
+- `FetchReport::savings` and the `DownloadResumed`, `DownloadRestarted` and `PackReused` events report the bytes a fetch did not download again.
+- Read and verify raw local object packs in repositories that declare capability `P`.
+- Run `kit closure repair-indexes` to rebuild damaged local pack indexes from verified packs.
+
+### Changed
+
+- **Breaking:** The Commonware crates move to 2026.11.0. Roots, proofs and ids do not change. The new `ruint` and `ruint-macro` crates enter the dependency tree through `commonware-codec`. A program that builds kit-core with the `history-mmr` feature or that cross-checks kit proofs with the upstream verifiers must use Commonware 2026.11.0 too, because the upstream inclusion verifiers take their arguments in a new order.
+- Fetch and clone of large files hash each packed object once on the way into a local pack, where each was hashed four times in all, so a fresh fetch or clone of 1 GiB of large files on Linux no longer costs more CPU than 0.9.
+- A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. **Breaking:** Kit 0.9 and older cannot open a repository that this version created or wrote to.
+- Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size. A run of more than about 512 chunk reads is first probed with a sample of its chunks, and one that shares nothing with the old file where it sits is sent without deltas, so a rewritten region costs a sample, not the region. A run that shares content is paired as before, within 131,072 chunk reads per file and 1,048,576 per push.
+- Re-pushing a file that grew past 1 MiB sends the chunks it shares with its old single-object version as deltas against that version, within a per-file read and pair budget. The search stops after 16 chunks in a row that share nothing with that version.
+- Re-pushing a rewritten large file to a `kit serve`, `kit+file` or direct `kit+s3` remote sends its new chunk manifest as a delta against the manifest the remote holds when that is smaller, so one edited chunk of a 1 GiB file no longer sends the whole manifest. Hosted remotes keep full manifests.
+- Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
+- Fetch and clone write each object above 262,154 bytes once, to its final file, and no longer copy it through a spool and read it back, so a clone of such files reads and writes no more bytes than 0.9 did.
+- Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
+- Opening a local pack no longer holds the shared handle-cache lock, so concurrent reads and the garbage collection mark no longer queue behind one slow open.
+- The garbage collection mark reads a packed chunk head, and a packed object of at most 16 KiB, in one read instead of three or four. The local pack handle cache keeps up to a quarter of the open-file limit (96 to 1,024 files), looks a handle up in a hash table, and closes an evicted file after it releases the lock, so a warm `kit gc -n` on a store of hundreds of packs no longer queues on that lock or reopens packs.
+- The `kit` command raises its soft open-file limit to at most 8,192 (never above the hard limit) at startup, so where the default is low (256 on macOS) the pack handle cache holds up to 1,024 handles and a warm `kit gc -n` on hundreds of packs no longer reopens packs.
+- **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
+- Open packed stores without scanning pack headers and speed up lookups across many local packs.
+- Commands that read a few objects, such as `cat-file`, `log -n 1` and a no-op `fetch`, find local packs with far less CPU: a store of up to 40 packs probes its index files instead of loading every row, and a larger one builds its object routes in near-linear time and with fewer system calls per pack. Resolving a short hash no longer checksums every index.
+- Fetch checks that each local pack is still current once, not at every read, while it checks that the fetched history is complete and while it verifies the signatures of that history, and it reads the type of an object and its payload head in one read. The full completeness check that an unsigned fetch makes on a large clone takes about half the CPU.
+- **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
+- **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
+- **Breaking:** Damage in a local pack or its index is `StoreError::LocalPackDamaged { pack, reason }`, not `StoreError::Io` with kind `InvalidData`. Match the variant instead of the I/O kind. A failed read of a pack or index stays `StoreError::Io`.
+- **Breaking:** `libkit::config::Config` has a new public `gc_auto` field. Build a `Config` from `Config::default()` instead of a struct literal.
+- **Breaking:** `GcReport` and `UnpackReport` are `#[non_exhaustive]`. Build one with `Default::default()` and read its fields. `GcReport` also reports packed payload bytes, packs retired, leftovers and loose duplicates pruned, and damaged packs it kept.
+- **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
+- `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
+- **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
+- A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
+- A push to a file or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. It skips the pack only when the remote holds it at the pack's own length, with no retry on that check, so a short pack left under the key is sent again instead of getting a ref published over it. An ssh remote cannot give the stored length, and a remote that issues upload tickets is unchanged, so a push to either sends such a pack again. Packs below 8 MiB are unchanged, and a failed length check uploads the pack.
+
+### Removed
+
+- **Breaking:** Remove `libkit::transfer::pull_with_source` and `fetch_with_source`. Call `pull_with_options` or `fetch_with_options` with a `SyncOptions`.
+- **Breaking:** Remove `libkit::transfer::push_branch_with_depth` and `push_branch_with_limits`. Call `push_branch_steps`, which takes the same depth and pack bound plus a `PushControl` and a step callback.
+
+### Fixed
+
+- The `url` dependency is 2.5.9, which fixes a stack overflow in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
+- `kit add` hashes the chunks of a large file on several threads on a host with more than 16 of them, where a full batch of 64 chunks stayed on one thread. `kit_core::worktree::STREAM_HASH_BATCH` is public.
+- `kit restore Makefile` restores the top-level `Makefile` only, not also a `Makefile` in another directory that another pathspec selects.
+- `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.
+- A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
+- `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
+- Push records its verified data packs locally so the next fetch can skip them. Writing the record adds two flush calls to a push.
+- Continue SSH transfers in a fresh session after 10,000 requests.
+- Report tags that landed before a tag push failed.
+- A clone interrupted after it made its branch, before it wrote the files, undoes the branch
+  and `HEAD`, so running the same clone again resumes it.
+- Fetch writes no cursor record when a local tag changes while it runs, so the next fetch
+  restores a tag deleted meanwhile.
+- `kit push --delete <remote> <name>` deletes a tag whose name is too long for a branch.
+- Add `ObjectStore::sync_shards`, which makes the directory entries of object shards durable
+  with one device flush.
+- Fetch makes the objects a new tag reaches durable before it writes the tag, also when another
+  process stored them and has not yet flushed them.
+- Let checkout finish switching branches after the first Ctrl-C during a restore. A second Ctrl-C stops it immediately.
+- Keep untracked restore temporary files out of status and add.
+- Keep all symlinks intact when saving a trust catalog through a dangling chain.
+- Reduce stderr writes when printing the commit summary.
+- Resolve relative clone destinations once before restoring objects.
+- Stage the new spelling and remove the old one when `add -A` sees a case-only rename.
+- Check out committed case-only file renames on case-insensitive volumes.
+- A plain push leases the tracking ref it checked, so a fetch during the push can no longer let it replace a remote head without `--force`.
+- A gc during a push no longer prunes the tip of the tracking ref the push writes.
+- Ctrl-C during the attestation phase of fetch or push exits 75 instead of reporting success.
+- Refuse a push that would make a branch's pack chain longer than a fetch reads, instead of leaving a branch no new client can fetch.
+
+## [0.9.0] - 2026-11-19
+
+### Security
+
+- Redact credentials, queries, fragments, and local paths from Git export attestations and close remaining import redaction gaps. Earlier envelopes retain their old values: remove affected `.kit/attestations/<commit>/<id>.dsse` files and clear the staging ref with `git --git-dir=.kit/git/<remote>/repo.git update-ref -d refs/kit/attestations` to prevent exports from carrying them forward. The next attested export replaces the mirror ref under its lease. This cannot erase old Git objects or copies others hold; rotate exposed credentials and coordinate history cleanup with the mirror host.
+
+### Added
+
+- Fetch publishes a remote tag once its closure is present and its name and signatures pass the
+  configured checks. It uses the tag map when local objects are insufficient. Fetch refuses
+  conflicting local tags, leaves existing tags in place, and retries refused tags next time.
+  `FetchReport` adds `tags_fetched`, `tags_rejected`, `tag_warnings`, and `tag_listing_failed`.
+  `SyncOptions` adds `tags`.
+- `kit_core::ops::check_closure_present_above` takes a stop poll and a `Known` answer per
+  object. `Known::Present` asserts that the whole closure is present, so the walker skips that
+  object and its descendants. `Presence::Missing` reports a missing object or one marked
+  `Known::Missing` because its closure is incomplete. Its path runs from that object to the root.
+- Stable releases update the Homebrew formula after publishing, using the published release
+  checksums and a tap write credential.
+- Support capability-gated Connect attestation reads and atomic writes with upload reservations.
+- Fetch, clone and pull portable attestations by default, with opt-out and explicit refetch controls.
+- Add `libkit::transfer::fetch_with_options` and `pull_with_options` for explicit attestation controls.
+- Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
+- Trust extra CA certificates for S3 HTTPS endpoints through `KIT_SSL_CA_FILE`.
+- Complete local branch, remote, and tag names in bash, zsh, and fish.
+- Return to the previous branch or detached HEAD with `switch -`, `checkout -`, or `@{-1}`.
+- Accept `stash push -u` and `--include-untracked`; refuse existing untracked destinations before restoring files.
+- Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
+- Save selected file or directory paths with `stash push [--] <path>...`, preserving other
+  worktree and staged changes.
+- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 512 MiB per fetch.
+- Gc skips and reports attested subjects with missing objects or incomplete closures, sharing history scans across roots.
+- Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
+- Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
+- Packs on disk in `kit-core`. `PackWriter::spool` builds a pack in an
+  unnamed file and `finish_spool` seals it, hashing it once for both the
+  trailer and the key. `PackSpool` takes a downloaded pack as it arrives and
+  checks its length, key and trailer in one pass. Only it makes the
+  `VerifiedPack` that `PackReader::read_verified` unpacks one window at a
+  time, with memory bounded by constants rather than by the pack's length
+  (SPEC-PACKFILE §11.1). The constants `PACK_ENTRY_READ_COST`, `RESIDENT_ENTRY_MAX`, `UNPACK_MEMORY_CAP`,
+  `STAGE_WINDOW_BYTES`, `MAX_FRAME_PAYLOAD`, `MAX_RAW_FRAME_PAYLOAD` and
+  `SPOOL_BUFFER` name its bounds. `transfer::DeltaSpool` keeps a push's
+  delta streams in a file and encodes each pair of target and base once
+  across plans.
+- Transfer bodies in `kit-core`: the `PackBody` and `PackSink` traits,
+  `SliceBody`, `MemorySink`, `read_body`, `write_body` and
+  `saturating_usize`; `SpooledPack` is a `PackBody` and `PackSpool` a
+  `PackSink`. `CountingWriter` sizes a pack without keeping it.
+  `ObjectStore::spool_dir`, `pack::sweep_spool_dir`,
+  `transfer::MAX_PACKLIST_NODE_BYTES` and `delta::max_encoded_len`. The
+  `fault-injection` feature (`kit_core::fault`) fails writes for tests.
+- `kit push --tags` and `kit push <remote> <tag>` push tags, each with its
+  tag map `refs/kit/tagmap/<t>` (SPEC-TRANSPORT §7.2). A tag map grafts on
+  the nearest branch the remote holds, and the tags that share it upload
+  once. `--force` and `--force-with-lease` both allow replacing a remote tag and
+  compare against the value read from the remote. The old value stays fetchable.
+  An unsigned annotated tag is refused. In
+  kit-sync, `PushTarget::Tags` and `PushReport::tags`; in kit-core,
+  `transfer::plan_pack_tips`, `packmap::ChainState::Graft` and
+  `protocol::RefListing`; in libkit, `transfer::push_tags_with_source` and
+  `push::resolve_push_name`.
+- `kit push --delete <remote> <branch>|<tag>` deletes a remote branch with
+  its packmap, or a tag with its tag map, each under `Match`, the head first
+  (SPEC-TRANSPORT §7.3). A branch's lease is its tracking ref, which goes
+  too. It works over file, ssh and Connect; S3 refuses every delete before
+  any write. `kit serve` deletes on an `UpdateRef` with an empty `new_id`
+  under `MATCH`; a `kit serve` that predates deletes refuses with
+  "new_id must be 32 bytes", which the client surfaces. In kit-core, the
+  required `Transport::delete_ref`, the default `Transport::delete_refs` and
+  `TransportError::Unsupported`; in kit-sync, `RemoteSource::delete_refs`,
+  `PushTarget::Delete`, `DeleteTarget`, `DeletedRef`, `DeleteError`,
+  `PushReport::deleted` and `SourceError::Unsupported`; in libkit,
+  `transfer::push_delete_with_source`; in kit-transport-file,
+  `FileTransport::delete_ref_if`.
+- `kit_core::transfer::packlist_node_bound`, the most bytes a packlist node
+  that lists a given number of packs can take. kit-client sizes the node of
+  a plan with it, where it restated the node layout.
+- `kit_core::worktree::build_tree_from_index_against` builds the index tree
+  and opens only the staged objects that differ from a base tree.
+  `kit_sync::worktree::ensure_restore_safe_from` checks a restore that leaves
+  the entries of a base tree alone without opening their objects.
+
+### Changed
+
+- Reduce full device flushes during batched object writes on macOS and iOS.
+- Skip rename content reads in status when there are no staged deletions.
+- Compact the applied-pack cache from 1 million digests to 900,000 per remote.
+- Keep up to 32 sparse witnesses per repository within a 512 MiB cache budget.
+- Read loose chunk headers into a fixed buffer and check remote snapshot membership without repeated searches.
+- Attestation readers ignore unrecognized Statement fields. New validity rules require a new predicate URI.
+- Reconnect between packs when a push over SSH reaches the session byte limit.
+- **Breaking:** Chunked blob manifests reject unknown profile IDs at or above `0x8000_0000`, including in empty manifests. Handle `KitError::UnknownChunkerProfile` in exhaustive matches. Supported manifests keep their object IDs.
+- Reduce memory use in status and diff on worktrees with many modified files. Rereads fail if a file no longer contains the captured bytes.
+- Use one metadata lookup per file during the `add .` scan.
+- Stop `reflog -n` after the requested entries without reading older ancestors.
+- **Breaking:** `cat-file --batch` streams blob content with bounded memory. An
+  unreadable chunk can leave a partial record on stdout.
+- Probe reachable object types concurrently during garbage collection.
+- Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
+- Stop empty attestation directories from keeping otherwise unreachable commits alive.
+- Stop push planning at the remote head for short linear advances.
+- Skip unrelated ignored directories during restore checks.
+- Avoid loading unrelated verified-tip records during unchanged fetches.
+- Retry skipped attestations when their subjects arrive locally.
+- Cache broken attestation heads, bound node bytes, and walk only new nodes.
+- Compact attestation logs atomically while preserving concurrent appends and refused writes.
+- Skip the mirror warning for the sanitized `local` placeholder.
+- Defer compressed attestations when decoding support is unavailable.
+- **Breaking:** The attestation cache resets once for v2 records. Update complete literals and
+  patterns for the hidden public `kit_sync::attestation_records::Record`, which now has
+  a `pending` field for missing subjects.
+- Clear obsolete pending attestation packs after log removal or compaction.
+- Publish locally authored attestations with `kit push --attestations` or
+  `push.attestations = true`. Publication is permanent. If the batch preflight finds that
+  an append would exceed the 4,096-pack compaction threshold, an append-only (`u`) grant stops
+  publication at that batch and warns. Compaction requires `f`. The warning leaves earlier
+  batches and successful code publication intact.
+- **Breaking:** `kit-core` lowers `MAX_TAG_NAME_BYTES` from 502 to 496. New and transferred tags
+  allow up to 29 segments so their tag map refs fit. Fetch warns and skips tags past either
+  limit. Existing local tags past the limits remain readable, writable, and deletable.
+- **Breaking:** `kit-sync` requires `RemoteSource::list_refs(prefix)`. Return prefix-stripped
+  names sorted by name.
+- **Breaking:** `kit-sync` adds `tags`, `tag_digest`, `attestations`, and `attestmap_head` to
+  the hidden public `CursorRecord`. Update complete struct literals and patterns. Fetch uses
+  `kit-fetch-cursor-v3` and discards older cursor records, so the next fetch lists the remote
+  again.
+- **Breaking:** `libkit` adds a `tags: bool` argument to `fetch_with_source` and
+  `pull_with_source`. They return `FetchReport` and `PullReport`, respectively. `fetch_all`,
+  `pull_all`, and `pull_all_with` fetch tags and return reports. Read
+  `FetchReport::branches_fetched` for the branch count. Check `tags_incomplete()` even on
+  success, using `PullReport::fetch` for pulls.
+- **Breaking:** `kit-core` adds `UnpackReport::signed` for stored commits, remixes, and tags.
+  Update complete literals and patterns. File-backed reads leave `stored` empty.
+- **Breaking:** `kit-core` makes `PreparedDelta::incoming` and `PackFill::of` generic over the
+  output type of the pack writer. Specify the type when taking either as a function item
+  without enough context to infer it.
+- **Breaking:** `kit-core` changes `PlannedDelta::stream` from `Vec<u8>` to `DeltaBytes`. Use
+  `bytes()` or `into_vec()` and handle I/O errors.
+- **Breaking:** `kit-core` consolidates `Transport` pack and blob transfers, removing the
+  `*_via_ref` and `*_streaming` methods. Use `upload_pack` and `download_pack` with optional ref
+  hints and a `PackBody` or `PackSink`, respectively. The caller verifies the downloaded bytes
+  against the requested key. `upload_blob` and `download_blob` take optional ref hints. Blob
+  downloads return `Vec<u8>` and take a `u64` byte limit. `pack_exists` takes an `Option<&str>` hint.
+- **Breaking:** `kit-core` removes `protocol::PackChunk`. Use a `PackBody` or `PackSink` for
+  pack transfers.
+- **Breaking:** `kit-core` removes `protocol::PACK_BODY_LIMIT_USIZE`. Convert `PACK_BODY_LIMIT`
+  explicitly if you need a `usize`.
+- **Breaking:** `kit-sync` drops the `_via_ref` suffix from `RemoteSource::download_blob`,
+  `download_pack`, `upload_pack`, and `upload_blob`. Keep the full ref hint. Use a `PackSink`
+  for pack downloads and a `PackBody` for pack uploads. Blob downloads still return `Vec<u8>`.
+- **Breaking:** `kit-client` takes `&dyn PackBody` in `Client::upload_pack` and `upload_part`.
+  `Client::download_pack` takes a `PackSink` and returns `Reply<u64>`. For streamed RPC
+  downloads, the caller or its sink must verify the bytes against the requested pack key before
+  using them.
+- **Breaking:** `kit-client` changes `HttpTransport::fetch_pack_location` to write to a
+  `PackSink` with a `u64` byte limit and return `Result<(), _>`.
+- **Breaking:** `kit-sync` changes `ClientSource::download_pack_unhinted` to write to a
+  `PackSink`. Verify the pack key before using those bytes. `upload_pack_unhinted` takes a
+  `PackBody`.
+- **Breaking:** `kit-transport-s3` removes multipart upload, its `test-small-multipart-caps`
+  feature, and the associated `S3_SINGLE_PUT_MAX` and `MULTIPART_PART_SIZE` constants. Pack
+  uploads use a single PUT.
+- **Breaking:** `kit-core` requires `Transport::delete_ref(name, expected)`. Implement a
+  conditional delete or return `TransportError::Unsupported`.
+- **Breaking:** `kit-sync` removes `Copy` from `PushReport` because it holds per-tag results.
+  Borrow or clone the report.
+- **Breaking:** `kit-core` removes `merkle::build_chunks_range_proof`. Use
+  `build_chunks_multi_proof` over the same chunk positions.
+- **Breaking:** `kit-core` moves `pack::serialized_limit` to `protocol::max_pack_bytes`.
+- **Breaking:** `kit-core` changes `PackFill::seals_before` to take a resolved `u64` limit.
+  Resolve the advertised `Option<u64>` with `protocol::max_pack_bytes`.
+- **Breaking:** `kit-core` adds a fifth argument to `pack::rewrite_excluding`. Pass the largest
+  pack it may write, or `protocol::PACK_BODY_LIMIT` for the previous limit.
+- **Breaking:** `kit-core` changes `ReadLimit::BodyLimit` to `BodyLimit(u64)`. Pass the byte
+  limit at construction and update patterns.
+- **Breaking:** `kit-core` removes the shallow argument from `PushWalk::run` and `run_one`. The
+  new `run_tips` also takes no shallow argument.
+- **Breaking:** `kit-sync` removes `PushControl::shallow`. Push skips **.kit/shallow**.
+- **Breaking:** `libkit` adds `fetch_attestations` and `push_attestations` strings to `Config`.
+  Update complete literals and patterns.
+- **Breaking:** `libkit` adds `attestations` and `remote_url` to `PushSettings`. Fill both
+  fields or use `Default` for the unset values.
+- **Breaking:** `libkit` adds `attestations_pushed` to `Pushed`. Update complete literals and
+  patterns.
+- **Breaking:** `kit-rpc` adds `ticket_ids` (protobuf field 6) to `UpdateRefRequest` and
+  `UpdateRefRequestView`. Update complete Rust literals.
+- **Breaking:** `kit-rpc` adds `supports_attestations` (protobuf field 23) to
+  `GetServerInfoResponse` and `GetServerInfoResponseView`. Update complete Rust literals.
+- **Breaking:** `kit-core` raises `MAX_INDEX_BYTES` from 64 MiB to 256 MiB. Older versions
+  refuse indexes above 64 MiB.
+- **Breaking:** `kit-sync` changes `DEFAULT_TRANSFER_TIMEOUT` from five minutes to one minute of
+  inactivity.
+- **Breaking:** `kit-transport-connect` changes `PACK_TRANSFER_TIMEOUT` from 300 seconds to 60
+  seconds of inactivity, using the `kit-sync` default.
+- **Breaking:** Stash snapshots now require a scope marker. Apply or pop any existing stash
+  with kit 0.8.1 before upgrading. In 0.9.0, `stash apply` and `stash pop` refuse old
+  stashes with `stash manifest format is invalid`.
+- **Breaking:** `verify-attest` succeeds when at least one bound envelope has a trusted
+  signature. Use `--predicate-type` to limit the match to one predicate type. Untrusted
+  envelopes still appear in the report.
+- **Breaking:** On Unix, `add` refuses filenames with literal backslashes. Nested and
+  global ignore rules can also change which files `add` stages.
+- **Breaking:** Full disk errors from `add` and `checkout` report the disk problem and exit
+  with status 74. Status 73 still reports an existing branch.
+- **Breaking:** On case-insensitive filesystems, restore refuses aliases and case-only renames
+  before writing tracked files.
+- **Breaking:** `kit_bin::signal::install()` requires `kit_bin::signal::enable()`. The binary
+  opts in before dispatch. Embedded dispatch preserves the host's handlers unless the host opts
+  in. Embedders own cancellation.
+- **Breaking:** Fetch stops checking object closure at verified tips. To repair missing objects,
+  run `kit closure verify <ref> --history`, then `kit fetch` for the affected remote. The next fetch
+  downloads that remote's pack chain again.
+- **Breaking:** Status, commit, plain checkout, cached diff, clean merge, revert, and pull
+  recovery can skip reading objects for unchanged HEAD entries.
+  Use `kit closure verify` to check for missing objects in those entries.
+- **Breaking:** Write grants reject patterns under `refs/kit/tagmap/` and require an exact
+  `refs/kit/attestmap` scope for attestation writes. In that scope, `u` permits appends and `f`
+  permits rewrites and compaction.
+- **Breaking:** Even an up-to-date branch push reads the remote head. An ordinary push recreates
+  a deleted remote branch. `--force-with-lease` checks the tracking lease when a single-branch
+  push updates the ref. `push --all` uses its ordinary rules even with that flag.
+- **Breaking:** Clone, fetch, and pull take tags by default. Use `--tags` to request them
+  explicitly or `--no-tags` to opt out. A tag refusal or listing failure exits with status 1 and
+  can leave branches and other tags published. JSON output can report `ok: false` alongside ref
+  updates.
+- **Breaking:** `kit-sync` requires a full branch or tag ref in `packmap::walk_pack_chain` and
+  `resolve_pack_chain`. Pass `refs/heads/<branch>` or `refs/tags/<tag>`.
+- **Breaking:** Update exhaustive matches for `kit-core`'s `PackError` variants `Io`,
+  `KeyMismatch`, and `CompressionUnavailable`. Without `pack-zstd`, compressed entries return
+  `CompressionUnavailable` where they returned `ZstdDecompress`.
+- **Breaking:** Update exhaustive matches for `kit-core`'s `ChainState::Graft`,
+  `StashError::PathspecNoMatch`, and `RestoreError::{NestedRepository, UnsweptPath}`.
+- **Breaking:** The implicit discriminants of `kit_attest::GrantError`,
+  `kit_transport_connect::GrantCondition`, `kit_sync::SyncEvent`, and `libkit::add::Event`
+  have changed. Use named variants or explicit application-defined codes.
+- **Breaking:** Update exhaustive matches for `kit-sync`'s `PushError::NoSuchTag`,
+  `PushError::Delete`, and `SourceError::Unsupported`.
+- **Breaking:** `kit push <remote> <name>` refuses a bare name shared by a branch and a
+  tag. Use `refs/heads/<name>` or `refs/tags/<name>` to select one.
+- Outside a cursor hit, a fetch that takes tags lists `refs/tags/`. It also lists
+  `refs/kit/tagmap/` when it needs a tag's pack chain.
+- Verified blob reads reuse the read buffer for the payload. Reassembling a chunked blob
+  reserves its full output size once.
+- `add` refuses an index above its byte limit before hashing files or writing
+  objects; the error names the limit and file count.
+- A pack transfer over Connect or S3 fails after 60 s with no data moving,
+  not after a total time (300 s over Connect), and is retried like a lost
+  connection; a slow link that keeps moving now finishes a large pack.
+  `kit-client` reports such a stall as `FailureKind::Stalled`.
+- **Breaking:** `kit clone` into an unfinished clone of the same remote resumes it,
+  keeping the packs it already has and checking everything again; any other
+  existing destination is still refused. `kit_sync::init_clone_dir` returns
+  such a clone where it returned `AlreadyInitialized`.
+- `RemoteSource` adds `inspection_max_objects` and `ref_listing`. A ticketed Connect advance can
+  pair a tag with its tag map. A grant on the tag covers its map, and a repair that leaves the
+  tag unchanged needs `c` permission.
+- Fetch and push stream object packs through unnamed files in **.kit/tmp/**. Fetch unpacks one
+  window at a time. Push keeps delta streams in a file. Memory and file transports copy in 1 MiB
+  chunks (SPEC-TRANSPORT §1.1).
+- The ssh and S3 transports stream packs both ways. ssh reads each 800 KiB
+  chunk of an upload from the pack's body as it sends it (SPEC-TRANSPORT
+  §4.2). S3 hashes the body once for the SigV4 payload hash, then sends it
+  in one sized `PUT`, and writes a `200` answer's body to the sink as it
+  arrives (§6.7). A retry reads the body again from offset 0. A body over
+  `PACK_BODY_LIMIT` is refused with `PayloadTooLarge` before it is read;
+  S3 used to answer `ServerError { status: 413 }`. A push and a fetch of a pack of about 1 GiB each hold
+  under 96 MiB of heap over ssh and S3 as well.
+- Connect streams packs both ways. An upload resumes with the parts that lack receipts. A failed
+  or invalid download location falls back to the RPC. A sink failure ends the download without
+  fallback or retry.
+- Connect bounds streamed error responses to 1 MiB and streamed download frames to 4 MiB.
+- **Breaking:** A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
+  a sink that failed refuses every later attempt (`PackSink::failed`).
+  `SyncError` maps `PackError::Io` and `PackError::Store(StoreError::Io)`
+  to `SyncError::Io`, and a push maps a store or delta-spool I/O error the
+  same way.
+- The signature check after an unpack reads only the commits, remixes and
+  tags the pack stored, in runs whose objects stay within 256 MiB.
+- Delta encoders of a push start in runs whose memory stays within 256 MiB.
+- Fetch, push and gc remove spool files left in `.kit/tmp/` when they
+  start.
+- A zstd frame in a pack writer keeps only its bytes, not the compressor's
+  worst-case reservation.
+- A pack writer refuses a frame over `MAX_FRAME_PAYLOAD` (SPEC-PACKFILE §5).
+  No kit writer made one.
+- `PackWriter` takes its output as a type parameter, `Vec<u8>` by default. A push seals each
+  pack with one BLAKE3 pass using `PackWriter::finish_with_key`.
+- On Linux, a clone or an add of many small files flushes them faster: objects
+  of at most 16 KiB, header included, are flushed by up to 256 threads instead
+  of 64, and a batch of them is renamed into place on a pool. Each file still
+  gets its own `fdatasync` before its rename. A large object never grows the
+  pool past 64 threads, a batch of only large objects renames them on one
+  thread, and other platforms are unchanged.
+- A restore and a pull recovery run one safety check in kit-sync, where
+  each had its own. Recovery keeps its refusal texts and its stricter
+  rules: the index, never seeded from HEAD, must equal the tree from before
+  the pull or the target as a whole, and an untracked directory no ignore
+  rule matches is refused whatever it holds. It now takes an ignored path in
+  a directory the target deletes, as a pull does: the sweep keeps it.
+- A clean restore with a base checks the directories it will skip as
+  unchanged before it sweeps or writes anything, and refuses with the new
+  `RestoreError::UnsweptPath` when one holds an untracked path the sweep
+  would remove, where it trusted its caller's check.
+- A push reads and compresses a batch of large objects on all cores, as it
+  does a batch of many small ones. A batch is still at most 64 MiB.
+- Ctrl-C and SIGTERM stop a local command such as `add`, `checkout` or
+  `gc` at once; they ran to the end. A second Ctrl-C stops `push`, `pull`,
+  `fetch`, `clone`, `log`, `merge`, `rebase` and the other commands that
+  stop at a checkpoint or finish a multi-step operation. `checkout` and
+  `reset --hard` now write the files before HEAD and the index, as git
+  does, so a stopped one leaves them where they were; the next restore
+  that writes into a directory removes the temp files it left there.
+- `kit gc` checks the chunks of large files 32 at a time, so its mark no
+  longer waits on a cold disk for one chunk after another.
+- **Breaking:** `kit commit` and `kit tag -a` exit with status 64 when they need an editor,
+  stdin is not a terminal, and no editor is configured. `kit rebase -i` applies that terminal
+  check before looking for commits to edit. Set `GIT_EDITOR`, `VISUAL`, or `EDITOR` to use an
+  editor without a terminal.
+- Plain checkout still checks objects for files it writes, overwrites, or removes. Full restores
+  such as `checkout -f` and `reset --hard` still open every object they restore.
+
+### Fixed
+
+- Skip Git bridge and Git import attestations with private locators before uploading attestation packs.
+- Honor case-insensitive values for `fetch.attestations` and `push.attestations`.
+- Keep branches cloneable when a push recreates them during deletion, and repair a missing packmap when pushing the same tip again.
+- **Breaking:** Reject attestation envelopes with unescaped control characters in JSON key IDs or payload types, including previously stored envelopes.
+- Hash worktree cache misses across directories in one shared thread pool.
+- Stop limited history at merge frontiers and closed ranges at their excluded endpoint.
+- Keep native path components in ignore checks.
+- Retire synchronization caches when remote configuration changes.
+- Stop automated bisect when another command changes the session, preserving its state and worktree.
+- **Breaking:** Editor selection checks `VISUAL` before `EDITOR`. `GIT_EDITOR` still takes
+  precedence.
+- Include the received size and limit in oversized Connect frame errors.
+- Preserve early S3 upload refusals and report their error codes without retrying; keep retrying timeouts and throttling.
+- Resume unfinished clones that already fetched tags, validating those tags again.
+- Find generated protocol output through Cargo when the build directory is configured.
+- `kit pull --rebase` and `kit pull --no-ff` verify the history of the tracking
+  tip before changing the worktree, index or HEAD, including a tip left by an
+  opt-out fetch for a branch the remote no longer lists.
+- Pull and clean restore accept untracked files inside nested repositories they
+  preserve, while still refusing paths they would overwrite or remove.
+- Forced checkout, hard reset and stash save refuse repository conflicts before
+  changing files, the index or HEAD, and explain how to resolve the conflict.
+- Sparse checkout preserves untracked files outside its selected paths, including
+  files beneath directories that contain selected descendants.
+- A restore no longer removes a nested repository, which is a `.kit` or
+  `.git` entry of any type (a `.git` file included) and the directory that
+  holds it. The clean sweep leaves an untracked directory that holds one
+  whole, as `git clean -d` does: `kit sparse-checkout` removed the files
+  beside its `.git`, and `restore_tree` removed all of it. A pull or a
+  checkout that writes a tracked file over a directory with one in it, at
+  any depth, used to remove the directory; its safety check now refuses
+  first with its untracked-overwrite text, naming the `.kit` or `.git`
+  entry or the untracked directory that holds it. A restore without that check refuses with the new
+  `RestoreError::NestedRepository`. kit-core's new
+  `ops::restore::nested_repository` finds the entry.
+- The S3 transport no longer reads an error answer's body. A missing ref's
+  `404` from a store that names the key, request and host in its error
+  document (MinIO does, in about 350 bytes) failed `read_ref` with
+  `PayloadTooLarge`, so a push to a new S3 remote failed.
+
 ## [0.8.1] - 2026-11-15
 
 ### Security

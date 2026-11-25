@@ -474,3 +474,19 @@ fn reflog_verifies_intermediate_rebase_replay_commit_in_ancestry() {
         "intermediate rebase-replayed commit must be included in first-parent ancestry:\n{text}"
     );
 }
+
+#[test]
+fn limited_reflog_does_not_read_older_missing_commits() {
+    let td = init_repo();
+    let root = td.path();
+    commit_file(root, "f", "one", "old");
+    let old = ok(root, &["rev-parse", "HEAD"]);
+    let old = String::from_utf8(old.stdout).unwrap();
+    let old = old.trim();
+    commit_file(root, "f", "two", "new");
+    fs::remove_file(root.join(".kit/objects").join(&old[..2]).join(&old[2..])).unwrap();
+    assert!(run(root, &["reflog", "-n", "1"]).status.success());
+    assert!(run(root, &["reflog", "-n", "0"]).status.success());
+    assert!(!run(root, &["reflog"]).status.success());
+    assert!(!run(root, &["reflog", "-n", "2"]).status.success());
+}

@@ -6,12 +6,14 @@
 //! publishes, is checked with the same function `kit verify` uses, failing
 //! closed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
+#[cfg(test)]
 use kit_core::store::ObjectStore;
+use kit_core::store::{ClosureSource, ObjectSource, StoreError};
 use rayon::prelude::*;
 
 use crate::error::SyncError;
@@ -88,42 +90,116 @@ fn verify_chunk_size() -> usize {
 /// CPU-bound, so a large fetch's verification pass parallelizes cleanly
 /// across cores.
 ///
-/// The parallel path processes `stored` in fixed-size chunks of
-/// [`verify_chunk_size`] entries, verifying each chunk in full before
+/// The parallel path processes `signed` in runs of at most
+/// [`verify_chunk_size`] entries, verifying each run in full before
 /// starting the next, rather than fanning the whole slice out in one
 /// `par_iter` — rayon's `try_for_each` only best-effort short-circuits
 /// (already-dispatched work keeps running once an error is found), so a
 /// single flat fan-out over a very large hostile fetch could still force
 /// reading and Ed25519-verifying a large fraction of the batch past the
-/// first invalid signature before the rejection propagates. Chunking
-/// bounds that wasted work to at most one chunk: a hostile remote can
-/// force at most `verify_chunk_size()` extra reads/verifies beyond the
-/// object that actually fails, never the rest of `stored`. Which entry's
-/// error surfaces first is not guaranteed to match `stored`'s order
-/// *within* a chunk, but the chunk containing the first invalid entry
-/// (in `stored`'s order) is always the one whose error is returned,
-/// since later chunks are never started.
+/// first invalid signature before the rejection propagates. Runs bound
+/// that wasted work to at most one run, and the run containing the first
+/// invalid entry is always the one whose error is returned, since later
+/// runs are never started.
 ///
-/// Within each chunk (or the whole slice, below the fan-out threshold),
+/// A run also holds at most [`VERIFY_INFLIGHT_BYTES`] of objects, each
+/// charged twice its recorded size (its bytes and the parsed object are
+/// held at once), decided from the sizes before any object is read. An
+/// object over the budget is checked alone. So the check's memory does
+/// not grow with the pack or with the number of workers.
+///
+/// Within each run (or the whole slice, below the fan-out threshold),
 /// [`verify_slice`] first checks every signature in one
 /// [`sign::verify_ed25519_batch`] call per worker thread. The batch accepts
 /// exactly the signatures [`sign::verify_ed25519`] accepts (SPEC-SIGNING
 /// §1), so fetch and `kit verify` never disagree. Only when a batch fails
 /// does [`verify_slice`] check each object on its own to name the bad one.
 pub(crate) fn verify_new_object_signatures(
-    store: &ObjectStore,
-    stored: &[Hash],
+    store: &(impl ObjectSource + Sync + ?Sized),
+    signed: &[(Hash, u32)],
     require_signed: bool,
 ) -> Result<(), SyncError> {
     if !require_signed {
         return Ok(());
     }
-    if stored.len() < verify_fanout_threshold() {
-        return verify_slice(store, stored, false);
+    let mut start = 0;
+    for len in verify_runs(signed, verify_chunk_size(), VERIFY_INFLIGHT_BYTES) {
+        let run = &signed[start..start + len];
+        start += len;
+        let hashes: Vec<Hash> = run.iter().map(|(h, _)| *h).collect();
+        #[cfg(test)]
+        test_counts::note_run(
+            run[0].0,
+            run.iter().map(|&(_, size)| verify_charge(size)).sum(),
+        );
+        verify_slice(store, &hashes, hashes.len() >= verify_fanout_threshold())?;
     }
-    stored
-        .chunks(verify_chunk_size())
-        .try_for_each(|chunk| verify_slice(store, chunk, true))
+    Ok(())
+}
+
+/// Bytes the parallel signature check may hold at once, 256 MiB.
+pub(crate) const VERIFY_INFLIGHT_BYTES: u64 = 256 << 20;
+
+/// What checking one object costs in memory: its bytes and the parsed object.
+fn verify_charge(size: u32) -> u64 {
+    2 * u64::from(size)
+}
+
+/// Split `signed` into consecutive runs of at most `max_entries` objects
+/// whose summed [`verify_charge`] stays within `budget`. An object over the
+/// budget is a run of its own.
+fn verify_runs(signed: &[(Hash, u32)], max_entries: usize, budget: u64) -> Vec<usize> {
+    let mut runs = Vec::new();
+    let (mut held, mut count) = (0u64, 0usize);
+    for &(_, size) in signed {
+        let charge = verify_charge(size);
+        if count > 0 && (count >= max_entries || held.saturating_add(charge) > budget) {
+            runs.push(count);
+            (held, count) = (0, 0);
+        }
+        held = held.saturating_add(charge);
+        count += 1;
+    }
+    if count > 0 {
+        runs.push(count);
+    }
+    runs
+}
+
+/// What the signature checks of tests did: the objects read in full, and
+/// each run's first object and charge. Keyed by object, so tests running at
+/// once see only their own.
+#[cfg(test)]
+pub(crate) mod test_counts {
+    use std::sync::Mutex;
+
+    use kit_core::hash::Hash;
+
+    static READS: Mutex<Vec<Hash>> = Mutex::new(Vec::new());
+    static RUNS: Mutex<Vec<(Hash, u64)>> = Mutex::new(Vec::new());
+
+    pub(super) fn note_read(hash: Hash) {
+        READS.lock().unwrap().push(hash);
+    }
+
+    pub(super) fn note_run(first: Hash, charge: u64) {
+        RUNS.lock().unwrap().push((first, charge));
+    }
+
+    /// How many times each of `hashes` was read in full.
+    pub(crate) fn reads_of(hashes: &[Hash]) -> usize {
+        let reads = READS.lock().unwrap();
+        reads.iter().filter(|h| hashes.contains(h)).count()
+    }
+
+    /// The charge of each run that started at one of `hashes`.
+    pub(crate) fn runs_from(hashes: &[Hash]) -> Vec<u64> {
+        let runs = RUNS.lock().unwrap();
+        runs.iter()
+            .filter(|(first, _)| hashes.contains(first))
+            .map(|&(_, charge)| charge)
+            .collect()
+    }
 }
 
 /// Verify the signature on a single already-read object through
@@ -179,32 +255,24 @@ fn verify_batch(batch: &[BatchEntry], parallel: bool) -> bool {
     batch.par_chunks(size).all(check)
 }
 
-/// Read every object in `hashes` (in parallel iff `parallel`, matching
-/// [`verify_new_object_signatures`]'s existing sequential/rayon split),
-/// then verify their signatures. Every hash is read (there's no cheaper
-/// way to learn an object's type), but only Commit/Remix/Tag entries are
-/// retained afterward — see the read step's own comment for why that
-/// matters for a chunk dominated by large blobs.
+/// Read every object in `hashes` (in parallel iff `parallel`), then verify
+/// their signatures. Only Commit/Remix/Tag entries are retained.
 ///
 /// The signed objects are checked as a batch first. If the batch fails,
 /// each object is checked with [`verify_one_object`], in parallel iff
 /// `parallel`, so the first failure names the offending hash.
-fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), SyncError> {
-    // Every hash in `hashes` still has to be *read* to learn its type —
-    // the pack format doesn't index that separately — but only
-    // Commit/Remix/Tag objects are ever inspected below, by
-    // `verify_one_object`. Dropping a
-    // Blob/Tree/ChunkedBlob/Delta right after the type check, instead of
-    // keeping it in `entries` for the rest of this call, matters
-    // concretely: a single `Blob` can be up to `worktree::CHUNK_THRESHOLD`
-    // (1 MiB — larger files are chunked, per this crate's whole design),
-    // so a `verify_chunk_size()`-sized chunk (up to 512 entries)
-    // dominated by such blobs previously held up to ~512 MiB of fully
-    // decoded, never-inspected object bytes resident at once. This way,
-    // at most one blob per rayon worker (or one at all, sequentially) is
-    // ever live simultaneously.
+fn verify_slice(
+    store: &(impl ObjectSource + Sync + ?Sized),
+    hashes: &[Hash],
+    parallel: bool,
+) -> Result<(), SyncError> {
+    // The caller lists the commits, remixes and tags an unpack stored, so
+    // no blob is read here. An object of another kind is still dropped
+    // right after it is read, rather than kept for the rest of the call.
     let read_signed_one = |h: &Hash| -> Result<Option<(Hash, Object)>, SyncError> {
         let obj = store.read_object(h)?;
+        #[cfg(test)]
+        test_counts::note_read(*h);
         Ok(match obj {
             Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => Some((*h, obj)),
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => None,
@@ -252,6 +320,76 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
 /// 32 bytes of id per signed object it delivered.
 pub(crate) type VerifiedHistory = HashSet<Hash>;
 
+/// Checks the signatures of one chunk of a history walk.
+type ChunkCheck<'a> = dyn Fn(&[(Hash, Object)]) -> Result<(), SyncError> + 'a;
+
+/// The signature failures one fetch found in history walks: each object
+/// whose history holds an object that failed its signature check, mapped to
+/// that object's hex id and the failure. A walk that reaches one of them
+/// fails at once with the same failure, so many tags over one bad history
+/// cost one walk. It lives for one fetch. Each failure is stored once, and
+/// each object holds only its index.
+#[derive(Default)]
+pub(crate) struct FailedHistory {
+    /// Each failure: the failing object's hex id and the reason.
+    failures: Vec<(String, String)>,
+    /// The index in `failures` of each failure's hex id.
+    index: HashMap<String, u32>,
+    /// Each object whose history holds a failure, and that failure's index.
+    at: HashMap<Hash, u32>,
+}
+
+impl FailedHistory {
+    /// The failure in the history of `h`: the failing object's hex id and
+    /// the reason.
+    pub(crate) fn get(&self, h: &Hash) -> Option<&(String, String)> {
+        self.at.get(h).map(|&i| &self.failures[i as usize])
+    }
+
+    /// Add `at` and every object on the walk path from the walk's tip to it,
+    /// each with the failure of `hash`. At most `cap` objects are held; past
+    /// that the memory is cleared, which makes later walks longer only.
+    fn remember(
+        &mut self,
+        via: &HashMap<Hash, Hash>,
+        at: Hash,
+        hash: &str,
+        reason: &str,
+        cap: usize,
+    ) {
+        let mut next = Some(at);
+        let mut failure = self.failure(hash, reason);
+        while let Some(h) = next {
+            if self.at.len() >= cap {
+                self.at.clear();
+                self.failures.clear();
+                self.index.clear();
+                failure = self.failure(hash, reason);
+            }
+            self.at.insert(h, failure);
+            next = via.get(&h).copied();
+        }
+    }
+
+    /// The index of the failure of `hash`, added when new.
+    fn failure(&mut self, hash: &str, reason: &str) -> u32 {
+        if let Some(&i) = self.index.get(hash) {
+            return i;
+        }
+        let i = u32::try_from(self.failures.len()).unwrap_or(u32::MAX);
+        self.failures.push((hash.to_owned(), reason.to_owned()));
+        self.index.insert(hash.to_owned(), i);
+        i
+    }
+}
+
+/// The missing objects one fetch found in history walks and closure checks:
+/// each object whose closure lacks a missing object, mapped to that object.
+/// A walk that reaches one of them ends at once as at the missing object.
+/// Unlike a signature failure, this holds only while the object is missing,
+/// so its owner drops an entry once the store holds its object.
+pub(crate) type MissingHistory = HashMap<Hash, Hash>;
+
 /// Verify the signature of every commit, remix and tag in the history of
 /// `tip`: `tip` itself, the parents of each commit and remix, and the target
 /// of each tag, recursively. Trees and blobs carry no signature and name no
@@ -280,59 +418,182 @@ pub(crate) type VerifiedHistory = HashSet<Hash>;
 /// decoded objects is held at a time, and `observer` is polled for
 /// cancellation after each full chunk.
 pub(crate) fn verify_history_signatures(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     verified: &mut VerifiedHistory,
 ) -> Result<(), SyncError> {
-    let cap = kit_core::ops::graph::MAX_REACHABLE;
-    let chunk = verify_chunk_size();
-    let check = |entries: &[(Hash, Object)]| {
-        verify_entries(entries, entries.len() >= verify_fanout_threshold())
+    let mut walk = HistoryWalk {
+        verified,
+        anchored: None,
+        failed: None,
+        missing: None,
+        cap: kit_core::ops::graph::MAX_REACHABLE,
+        read: 0,
     };
-    let mut seen: HashSet<Hash> = HashSet::new();
-    let mut pending = vec![*tip];
-    let mut entries: Vec<(Hash, Object)> = Vec::new();
-    while let Some(h) = pending.pop() {
-        if verified.contains(&h) || !seen.insert(h) {
-            continue;
-        }
-        if seen.len() > cap {
-            return Err(SyncError::ClosureTooLarge(cap));
-        }
-        // A leaf carries no signature and names no signed object, so only
-        // its type prologue is read, like the closure check does: a parent or
-        // tag target that is a large blob costs no full read.
-        if !matches!(
-            store.object_type(&h)?,
-            ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
-        ) {
-            continue;
-        }
-        let obj = store.read_object(&h)?;
-        match &obj {
-            Object::Commit(c) => pending.extend(&c.parents),
-            Object::Remix(r) => pending.extend(&r.parents),
-            // The target is followed whatever type the tag declares: the
-            // walk decides by the type of the object it reads, so a tag
-            // that calls a commit a tree does not hide it.
-            Object::Tag(t) => pending.push(t.target),
-            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+    walk.run(store, observer, tip)
+}
+
+/// One [`verify_history_signatures`] walk, with the knobs the tag phase of a
+/// fetch adds: more verified history, a memory of failures and missing
+/// objects, and a cap it can lower in a test.
+pub(crate) struct HistoryWalk<'a> {
+    pub(crate) verified: &'a mut VerifiedHistory,
+    /// More objects whose history was verified in full, which the walk stops
+    /// at like `verified` but does not copy into it.
+    pub(crate) anchored: Option<&'a HashSet<Hash>>,
+    /// When set, a walk fails at once on an object it holds, and a failed
+    /// walk adds the failing object and the objects on its walk path to it.
+    pub(crate) failed: Option<&'a mut FailedHistory>,
+    /// When set, a walk ends at once on an object it holds, as at a missing
+    /// object, and a walk that finds an object missing adds that object and
+    /// the objects on its walk path to it.
+    pub(crate) missing: Option<&'a mut MissingHistory>,
+    /// The most objects one walk visits.
+    pub(crate) cap: usize,
+    /// Commits, remixes and tags the walk read in full, counted on success
+    /// and failure.
+    pub(crate) read: usize,
+}
+
+impl HistoryWalk<'_> {
+    /// Walk the history of `tip` as [`verify_history_signatures`] describes.
+    pub(crate) fn run(
+        &mut self,
+        store: &(impl ClosureSource + ?Sized),
+        observer: &dyn Observer<SyncEvent>,
+        tip: &Hash,
+    ) -> Result<(), SyncError> {
+        let mut progress_at = std::time::Instant::now();
+        observer.event(&SyncEvent::SignatureProgress { done: 0 });
+        let chunk = verify_chunk_size();
+        let check = |entries: &[(Hash, Object)]| {
+            verify_entries(entries, entries.len() >= verify_fanout_threshold())
+        };
+        let tracking = self.failed.is_some() || self.missing.is_some();
+        // The object that first named each one, to find the walk path to a
+        // failing or missing object. Kept only when either is remembered.
+        let mut via: HashMap<Hash, Hash> = HashMap::new();
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut pending = vec![*tip];
+        let mut entries: Vec<(Hash, Object)> = Vec::new();
+        while let Some(h) = pending.pop() {
+            if self.verified.contains(&h)
+                || self.anchored.is_some_and(|anchored| anchored.contains(&h))
+                || !seen.insert(h)
+            {
                 continue;
             }
-        }
-        entries.push((h, obj));
-        if entries.len() >= chunk {
-            check(&entries)?;
-            entries.clear();
-            if observer.cancelled() {
-                return Err(SyncError::Interrupted);
+            if let Some(failed) = self.failed.as_deref_mut()
+                && let Some((hash, reason)) = failed.get(&h).cloned()
+            {
+                failed.remember(&via, h, &hash, &reason, self.cap);
+                return Err(SyncError::UnsignedOrInvalidObject { hash, reason });
+            }
+            if let Some(object) = self.missing.as_deref().and_then(|m| m.get(&h).copied()) {
+                return Err(self.missing_at(&via, h, object));
+            }
+            if seen.len() > self.cap {
+                return Err(SyncError::ClosureTooLarge(self.cap));
+            }
+            // A leaf carries no signature and names no signed object, so only
+            // its type prologue is read, like the closure check does: a parent or
+            // tag target that is a large blob costs no full read.
+            let ty = match store.object_type(&h) {
+                Err(StoreError::ObjectNotFound(_)) => return Err(self.missing_at(&via, h, h)),
+                ty => ty?,
+            };
+            if !matches!(ty, ObjectType::Commit | ObjectType::Remix | ObjectType::Tag) {
+                continue;
+            }
+            let obj = match store.read_object(&h) {
+                Err(StoreError::ObjectNotFound(_)) => return Err(self.missing_at(&via, h, h)),
+                obj => obj?,
+            };
+            self.read += 1;
+            let before = pending.len();
+            match &obj {
+                Object::Commit(c) => pending.extend(&c.parents),
+                Object::Remix(r) => pending.extend(&r.parents),
+                // The target is followed whatever type the tag declares: the
+                // walk decides by the type of the object it reads, so a tag
+                // that calls a commit a tree does not hide it.
+                Object::Tag(t) => pending.push(t.target),
+                Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+                    continue;
+                }
+            }
+            if tracking {
+                for child in &pending[before..] {
+                    via.entry(*child).or_insert(h);
+                }
+            }
+            entries.push((h, obj));
+            if entries.len() >= chunk {
+                self.check_chunk(&entries, &check, &via)?;
+                if progress_at.elapsed() >= std::time::Duration::from_millis(100) {
+                    observer.event(&SyncEvent::SignatureProgress { done: self.read });
+                    progress_at = std::time::Instant::now();
+                }
+                entries.clear();
+                if observer.cancelled() {
+                    return Err(SyncError::Interrupted);
+                }
             }
         }
+        self.check_chunk(&entries, &check, &via)?;
+        observer.event(&SyncEvent::SignatureProgress { done: self.read });
+        self.verified.extend(seen);
+        Ok(())
     }
-    check(&entries)?;
-    verified.extend(seen);
-    Ok(())
+
+    /// The error of a walk that reached `at`, whose closure lacks `object`,
+    /// remembered on the walk path when missing objects are remembered.
+    fn missing_at(&mut self, via: &HashMap<Hash, Hash>, at: Hash, object: Hash) -> SyncError {
+        if let Some(missing) = self.missing.as_deref_mut() {
+            remember_missing(missing, via, at, object, self.cap);
+        }
+        SyncError::Store(StoreError::ObjectNotFound(hash::to_hex(&object)))
+    }
+
+    /// Check one chunk, and remember a signature failure when failures are
+    /// remembered.
+    fn check_chunk(
+        &mut self,
+        entries: &[(Hash, Object)],
+        check: &ChunkCheck<'_>,
+        via: &HashMap<Hash, Hash>,
+    ) -> Result<(), SyncError> {
+        let result = check(entries);
+        if let Err(SyncError::UnsignedOrInvalidObject { hash, reason }) = &result
+            && let Some(failed) = self.failed.as_deref_mut()
+            && let Some(at) = kit_core::refs::parse_lowercase_hash(hash.as_bytes())
+        {
+            failed.remember(via, at, hash, reason, self.cap);
+        }
+        result
+    }
+}
+
+/// Add `at` and every object on the walk path from the walk's tip to it to
+/// `missing`, each mapped to the missing `object`. `missing` holds at most
+/// `cap` objects; past that it is cleared, which makes later walks longer
+/// only.
+pub(crate) fn remember_missing(
+    missing: &mut MissingHistory,
+    via: &HashMap<Hash, Hash>,
+    at: Hash,
+    object: Hash,
+    cap: usize,
+) {
+    let mut next = Some(at);
+    while let Some(h) = next {
+        if missing.len() >= cap {
+            missing.clear();
+        }
+        missing.insert(h, object);
+        next = via.get(&h).copied();
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +604,17 @@ mod tests {
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
+    }
+
+    /// Each object with its stored size, as an unpack lists signed objects.
+    fn sized(store: &ObjectStore, hashes: &[Hash]) -> Vec<(Hash, u32)> {
+        hashes
+            .iter()
+            .map(|h| {
+                let len = store.object_metadata(h).unwrap().len();
+                (*h, u32::try_from(len).unwrap())
+            })
+            .collect()
     }
 
     // ---- verify_new_object_signatures — sequential/rayon fan-out parity ----
@@ -384,7 +656,7 @@ mod tests {
             .collect();
         assert!(stored.len() >= verify_fanout_threshold());
 
-        verify_new_object_signatures(&store, &stored, true)
+        verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect("every commit in the batch is validly signed");
     }
 
@@ -404,8 +676,9 @@ mod tests {
         let store = ObjectStore::init(&layout).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
 
+        let batch = store.batch();
         let blob = |seed: usize| -> Hash {
-            store
+            batch
                 .write(
                     &kit_core::serialize::serialize(&Object::Blob(kit_core::object::Blob {
                         data: format!("unsigned blob fixture #{seed}").into_bytes(),
@@ -421,11 +694,12 @@ mod tests {
         let mut stored: Vec<Hash> = Vec::with_capacity(2 * LARGE_BATCH);
         for i in 0..LARGE_BATCH {
             stored.push(blob(i));
-            stored.push(store.write(&signed_commit_bytes(&kp, i)).unwrap());
+            stored.push(batch.write(&signed_commit_bytes(&kp, i)).unwrap());
         }
+        batch.commit().unwrap();
         assert!(stored.len() >= verify_fanout_threshold());
 
-        verify_new_object_signatures(&store, &stored, true)
+        verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect("unsigned entries must not affect verifying the signed ones");
 
         // Tamper one of the commits — must still be caught even though
@@ -438,7 +712,7 @@ mod tests {
         let tampered_bytes = kit_core::serialize::serialize(&Object::Commit(c)).unwrap();
         stored[commit_index] = store.write(&tampered_bytes).unwrap();
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect_err("a tampered commit must still be caught alongside unsigned entries");
         assert!(matches!(err, SyncError::UnsignedOrInvalidObject { .. }));
     }
@@ -466,7 +740,7 @@ mod tests {
         let tampered_hash = store.write(&tampered_bytes).unwrap();
         stored[LARGE_BATCH / 2] = tampered_hash;
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect_err("a batch with one bad signature must be rejected");
         assert!(matches!(err, SyncError::UnsignedOrInvalidObject { .. }));
     }
@@ -500,9 +774,10 @@ mod tests {
         let tampered_bytes = kit_core::serialize::serialize(&Object::Commit(c)).unwrap();
         let tampered_hash = store.write(&tampered_bytes).unwrap();
         stored[0] = tampered_hash;
-        stored.extend((0..chunk_size * 3).map(|i| h(&format!("never-written-{i}"))));
+        let mut signed = sized(&store, &stored);
+        signed.extend((0..chunk_size * 3).map(|i| (h(&format!("never-written-{i}")), 100)));
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &signed, true)
             .expect_err("the tampered signature in the first chunk must reject the fetch");
         match err {
             SyncError::UnsignedOrInvalidObject { hash: got, .. } => {
@@ -515,7 +790,7 @@ mod tests {
     /// A commit over the tree `seed` names, parented on `parents`, signed
     /// with `kp` when `signed`.
     fn history_commit(
-        store: &ObjectStore,
+        store: &impl kit_core::store::ObjectSink,
         kp: &kit_core::sign::KeyPair,
         seed: usize,
         parents: Vec<Hash>,
@@ -535,7 +810,7 @@ mod tests {
             c.signature = kit_core::sign::sign_commit(&c, kp).unwrap().0;
         }
         store
-            .write(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
+            .put(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
             .unwrap()
     }
 
@@ -548,11 +823,13 @@ mod tests {
         let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
         let line = |root_signed: bool, offset: usize| {
-            let root = history_commit(&store, &kp, offset, Vec::new(), root_signed);
+            let batch = store.batch();
+            let root = history_commit(&batch, &kp, offset, Vec::new(), root_signed);
             let mut tip = root;
             for seed in 1..verify_chunk_size() + 8 {
-                tip = history_commit(&store, &kp, offset + seed, vec![tip], true);
+                tip = history_commit(&batch, &kp, offset + seed, vec![tip], true);
             }
+            batch.commit().unwrap();
             (root, tip)
         };
         let (_, clean) = line(true, 0);
@@ -674,6 +951,33 @@ mod tests {
         ));
     }
 
+    /// Runs of the check hold at most `VERIFY_INFLIGHT_BYTES` of objects: a
+    /// batch of signed objects recorded at 1 MiB each is checked in runs of at
+    /// most 128, and one recorded over the budget runs alone.
+    #[test]
+    fn the_signature_check_runs_within_its_inflight_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = kit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let hashes: Vec<Hash> = (0..300)
+            .map(|i| store.write(&signed_commit_bytes(&kp, 10_000 + i)).unwrap())
+            .collect();
+        let mut signed: Vec<(Hash, u32)> = hashes.iter().map(|&h| (h, 1 << 20)).collect();
+        signed[200].1 = u32::MAX;
+
+        verify_new_object_signatures(&store, &signed, true).unwrap();
+
+        // 128 objects fill the budget; the 72 up to the large one, the large
+        // one alone, then the 99 after it.
+        let mib = 1 << 20;
+        assert_eq!(
+            test_counts::runs_from(&hashes),
+            vec![256 * mib, 144 * mib, verify_charge(u32::MAX), 198 * mib]
+        );
+        assert_eq!(test_counts::reads_of(&hashes), 300);
+    }
+
     #[test]
     fn verify_new_object_signatures_require_signed_false_skips_a_large_batch() {
         // `require_signed = false` must short-circuit to `Ok(())` without
@@ -683,11 +987,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = kit_core::layout::RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).unwrap();
-        let stored: Vec<Hash> = (0..LARGE_BATCH)
-            .map(|i| h(&format!("never-written-{i}")))
+        let signed: Vec<(Hash, u32)> = (0..LARGE_BATCH)
+            .map(|i| (h(&format!("never-written-{i}")), 100))
             .collect();
 
-        verify_new_object_signatures(&store, &stored, false)
+        verify_new_object_signatures(&store, &signed, false)
             .expect("require_signed=false must no-op regardless of batch size");
     }
 }

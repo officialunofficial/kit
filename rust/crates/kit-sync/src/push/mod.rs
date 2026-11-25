@@ -1,33 +1,153 @@
 //! Native repository push: bounded packs and conditioned ref publication.
+use crate::packmap::packmap_ref;
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
-use kit_core::pack::{
-    self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_limit,
-};
-use kit_core::protocol::{PackKey, UploadLimits};
+use kit_core::object::ObjectType;
+use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
+use kit_core::protocol::{self, PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
+mod attestations;
+mod delete;
+mod deltas;
 mod error;
 mod force;
 mod packmap;
 mod split;
+mod tags;
+pub use delete::{DeleteError, DeleteTarget, DeletedRef};
+use deltas::DeltaEncoder;
+#[cfg(test)]
+use deltas::encode_delta_candidates_batch;
+#[cfg(test)]
+use deltas::{DELTA_CANDIDATE_BATCH_CAP, cache_delta_bases, delta_plan_fanout_threshold};
 pub use error::PushError;
-use packmap::{advance_packmap, commit_head};
+use packmap::{PACKMAP_CAS_ATTEMPTS, advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
+pub use tags::{
+    MAX_BASE_WALK_COMMITS, TagPushOutcome, TagPushRejection, TagPushResult, TagSelection,
+};
 
 struct PreparedPlan {
     pack: transfer::PackPlan,
     force: Option<force::Snapshot>,
 }
 
+#[derive(Default)]
+struct PushRecord {
+    /// Packs uploaded and checked.
+    checked: HashSet<Hash>,
+    /// Checked packs a ref now names.
+    advanced: Vec<PackKey>,
+}
+
+/// What the entries of one pack under construction carry, gathered for the
+/// push record.
+#[derive(Default)]
+struct PackEntries {
+    /// The commits, remixes and tags, with a bound of their size: checked
+    /// after the upload.
+    signed: Vec<(Hash, u32)>,
+}
+
+impl PackEntries {
+    fn clear(&mut self) {
+        self.signed.clear();
+    }
+}
+
 struct PushContext<'a> {
     source: &'a dyn RemoteSource,
     observer: &'a dyn Observer<SyncEvent>,
+    /// The push's delta spool and pack spools live in this store's spool
+    /// directory.
+    deltas: DeltaEncoder,
+    spool_dir: std::path::PathBuf,
+    record: Option<RefCell<PushRecord>>,
+}
+impl<'a> PushContext<'a> {
+    fn new(
+        source: &'a dyn RemoteSource,
+        observer: &'a dyn Observer<SyncEvent>,
+        store: &ObjectStore,
+    ) -> Self {
+        let spool_dir = store.spool_dir();
+        pack::sweep_spool_dir(&spool_dir);
+        Self {
+            source,
+            observer,
+            // A replacement manifest goes as a delta only to a remote that
+            // says it takes one; every other source, a hosted one included,
+            // is sent full manifests.
+            deltas: DeltaEncoder::new(spool_dir.clone()).with_manifests(
+                if source.accepts_manifest_deltas() {
+                    transfer::ManifestDeltas::Held
+                } else {
+                    transfer::ManifestDeltas::Full
+                },
+            ),
+            spool_dir,
+            record: None,
+        }
+    }
+
+    /// A context for tests that build no pack.
+    #[cfg(test)]
+    fn unspooled(source: &'a dyn RemoteSource, observer: &'a dyn Observer<SyncEvent>) -> Self {
+        let spool_dir = std::env::temp_dir();
+        Self {
+            source,
+            observer,
+            deltas: DeltaEncoder::new(spool_dir.clone()),
+            spool_dir,
+            record: None,
+        }
+    }
 }
 impl PushContext<'_> {
+    fn record_advance(&self, keys: impl IntoIterator<Item = Hash>) {
+        if let Some(record) = &self.record {
+            let mut record = record.borrow_mut();
+            for key in keys {
+                if record.checked.remove(&key) {
+                    record.advanced.push(PackKey::from_hash(key));
+                }
+            }
+        }
+    }
+
+    fn persist_advances(&self, layout: &kit_core::layout::RepoLayout, remote: &str) {
+        let Some(record) = &self.record else {
+            return;
+        };
+        let mut record = record.borrow_mut();
+        if record.advanced.is_empty() {
+            return;
+        }
+        // The record tells the next fetch that these packs' objects are in
+        // this store, so it can skip them. Every object a pack carries is
+        // reachable from a ref this push published or read, and a ref only
+        // names objects whose bytes and locations are durable
+        // (SPEC-OBJECTS §10.1), so the record needs no flush of the object
+        // directories before it is written.
+        let mut applied =
+            crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
+        for key in record.advanced.drain(..) {
+            if let Err(error) = applied.record_applied(&key) {
+                self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
+                    remote: remote.to_owned(),
+                    error: error.to_string(),
+                });
+            }
+        }
+        crate::fetch::persist_record(&mut applied, self.observer, remote);
+    }
+
     /// Whether force pushes take the guarded force driver. It needs only a
     /// serialized advance: it appends, and it re-plans when a concurrent
     /// reset drops the chain its plan depends on, which an ordered force
@@ -49,11 +169,12 @@ fn repository_operation_error(tx: &PushContext<'_>, error: SourceError) -> PushE
 /// How the tracking lease is used for a branch push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushLease {
-    /// Unconditional head update; split steps still lease the prior step.
+    /// Overwrite the remote head even if the new tip does not fast-forward it.
     Force,
     /// Require the last locally tracked remote tip, allowing divergence.
     WithLease,
-    /// Require both ancestry from the tracked tip and its live CAS lease.
+    /// Require both ancestry from the tracked tip and its live CAS lease. A
+    /// branch the remote no longer holds is created.
     FastForward,
 }
 /// Repository refs to publish.
@@ -68,11 +189,25 @@ pub enum PushTarget {
         remote: String,
         lease: PushLease,
     },
+    /// Local tags, and no branch. Without `force`, a remote tag that holds
+    /// another value is refused; with it, the tag moves from the value the
+    /// push read.
+    Tags {
+        selection: TagSelection,
+        force: bool,
+    },
+    /// Delete one remote branch or tag, with its chain ref, under `Match`
+    /// (SPEC-TRANSPORT §7.3). A deleted branch's tracking ref goes too.
+    Delete(DeleteTarget),
 }
 /// Caller-supplied policy. Nothing is loaded from config or the environment.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PushOptions<'a> {
+    /// Publish locally authored attestations after code refs succeed.
+    pub attestations: bool,
+    /// Resolved endpoint, included in the disposable push cache key.
+    pub remote_url: String,
     /// Branch mapping or mirror selection.
     pub target: PushTarget,
     /// Local tracking-ref namespace.
@@ -88,12 +223,15 @@ pub struct PushOptions<'a> {
     /// single commit cannot fit a ticketed advance otherwise, and then only as
     /// large as that commit needs, up to what the format and the remote allow.
     pub pack_payload_cap: u64,
-    /// Observer, split bounds, shallow boundaries and host authority hook.
+    /// Observer, split bounds and host authority hook.
     pub control: PushControl<'a>,
 }
 
-/// The default payload bound of one pushed pack, 256 MiB. A push builds one
-/// pack in memory at a time, so the bound is the memory a pack costs.
+/// The default payload bound of one pushed pack, 256 MiB. A push spools each
+/// pack to disk, so the bound sets the size of each upload, not the memory
+/// the push itself needs; a transport that buffers the body (SPEC-TRANSPORT
+/// §1.1) holds the whole pack: this size by default, more when the cap is
+/// raised or one object is larger.
 pub const DEFAULT_PACK_PAYLOAD_CAP: u64 = 256 * 1024 * 1024;
 
 impl PushOptions<'_> {
@@ -107,6 +245,8 @@ impl PushOptions<'_> {
 impl Default for PushOptions<'_> {
     fn default() -> Self {
         Self {
+            attestations: false,
+            remote_url: String::new(),
             target: PushTarget::All { force: false },
             remote_name: "default",
             sync_policy: kit_core::store::SyncPolicy::Batch,
@@ -116,16 +256,36 @@ impl Default for PushOptions<'_> {
         }
     }
 }
-/// Completed branches, advances and the selected single-branch tip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Completed branches, advances, the selected single-branch tip, the
+/// result of each pushed tag, and the ref a delete removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PushReport {
+    /// Published envelope count.
+    pub attestations_pushed: usize,
+    /// Nonfatal attestation diagnostics.
+    pub attestation_warnings: Vec<String>,
     /// Completed branches.
     pub refs: usize,
-    /// Published advances across completed branches.
+    /// Published advances across completed branches. A branch push whose
+    /// remote already held the tip publishes none.
     pub steps: usize,
     /// Tip of a selected single branch; absent for a mirror push.
     pub tip: Option<Hash>,
+    /// One result per tag of a tag push, sorted by name.
+    pub tags: Vec<TagPushResult>,
+    /// The ref a delete removed.
+    pub deleted: Option<DeletedRef>,
+}
+
+impl PushReport {
+    /// Whether the push refused any tag.
+    #[must_use]
+    pub fn tags_rejected(&self) -> bool {
+        self.tags
+            .iter()
+            .any(|tag| matches!(tag.outcome, TagPushOutcome::Rejected(_)))
+    }
 }
 /// Push repository refs and durably record each published tracking ref.
 /// The observer is supplied through `options.control.observer`.
@@ -140,12 +300,36 @@ pub fn push(
     let layout = kit_core::layout::discover(dir)?;
     let mut store = ObjectStore::open(&layout)?;
     store.set_sync_policy(options.sync_policy);
-    let tx = PushContext {
-        source,
-        observer: options.control.observer,
+    let mut tx = PushContext::new(source, options.control.observer, &store);
+    tx.record = Some(RefCell::default());
+    let mut report = {
+        // Held until the last tracking ref is written, as a fetch holds it:
+        // a gc that runs during the push deletes nothing, so a tracking ref
+        // never names a tip gc removed (see `ObjectStore::prune_guard`).
+        let _prune_guard = store.prune_guard()?;
+        let result = push_refs(&layout, &store, &tx, options);
+        tx.persist_advances(&layout, options.remote_name);
+        result?
     };
-    push_refs(&layout, &store, &tx, options)
+    if options.attestations {
+        attestations::run(&layout, &store, &tx, options, &mut report)?;
+        tx.observer.event(&SyncEvent::AttestationsPushed {
+            count: report.attestations_pushed,
+        });
+        // The permanence warning is delivered before the first ref publication.
+        for message in report
+            .attestation_warnings
+            .iter()
+            .filter(|message| message.as_str() != attestations::PERMANENCE_WARNING)
+        {
+            tx.observer.event(&SyncEvent::AttestationWarning {
+                message: message.clone(),
+            });
+        }
+    }
+    Ok(report)
 }
+#[allow(clippy::too_many_lines)] // one arm per push target
 fn push_refs(
     layout: &kit_core::layout::RepoLayout,
     store: &ObjectStore,
@@ -155,12 +339,27 @@ fn push_refs(
     match &options.target {
         PushTarget::All { force } => {
             let refs_list = refs::list_refs_with(layout, crate::worktree::fanout_read_batch)?;
-            let control = repository_control(layout, options)?;
             let mut tracking = refs::RemoteRefBatch::new(layout, options.remote_name)?;
             let mut report = PushReport {
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
                 refs: 0,
                 steps: 0,
                 tip: None,
+                tags: Vec::new(),
+                deleted: None,
+            };
+            // The branches the remote holds, read once: a branch it lost is
+            // created, as the push of one branch creates it. A listing gone
+            // stale can only refuse a push: the remote checks the condition.
+            let held: std::collections::HashSet<String> = if *force {
+                std::collections::HashSet::new()
+            } else {
+                tx.list_branches()?
+                    .into_iter()
+                    .filter(|b| b.hash.is_some())
+                    .map(|b| b.name)
+                    .collect()
             };
             let result: Result<(), PushError> = (|| {
                 for r in refs_list {
@@ -171,22 +370,32 @@ fn push_refs(
                     let condition = if *force {
                         refs::RefWriteCondition::Any
                     } else {
-                        lease(layout, options.remote_name, &r.name)?
+                        match lease(layout, options.remote_name, &r.name)? {
+                            refs::RefWriteCondition::Match(_) if !held.contains(&r.name) => {
+                                refs::RefWriteCondition::Missing
+                            }
+                            condition => condition,
+                        }
                     };
                     tx.observer.event(&SyncEvent::PushBranchStarted {
                         branch: r.name.clone(),
                     });
-                    report.steps += run_steps(
-                        tx,
-                        store,
-                        &r.name,
-                        tip,
-                        condition,
-                        options.rebaseline_threshold,
-                        options.pack_payload_cap,
-                        &control,
-                        &mut |published| Ok(tracking.write(&r.name, &published)?),
-                    )?;
+                    report.steps +=
+                        run_steps(
+                            tx,
+                            store,
+                            &r.name,
+                            tip,
+                            condition,
+                            options.rebaseline_threshold,
+                            options.pack_payload_cap,
+                            &options.control,
+                            &mut |published| {
+                                publish_tracking(layout, tx, || {
+                                    Ok(tracking.write(&r.name, &published)?)
+                                })
+                            },
+                        )?;
                     report.refs += 1;
                 }
                 Ok(())
@@ -202,20 +411,65 @@ fn push_refs(
         } => {
             let tip = refs::read_ref(layout, local)?
                 .ok_or_else(|| SyncError::RemoteBranchMissing(local.clone()))?;
-            if matches!(policy, PushLease::FastForward)
-                && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
+            refs::check_pushable_branch(remote)?;
+            // Read once: the fast-forward check and the lease must use the
+            // same value. A fetch that moved the tracking ref between two
+            // reads could pass the check against one tip and lease another,
+            // so a plain push would replace a head it never checked.
+            let tracked = refs::read_remote_ref(layout, options.remote_name, remote)?;
+            // The remote's head decides, not the tracking ref: the remote
+            // may have lost the branch since this repository last saw it.
+            let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
+            let at_tip = head == Some(tip);
+            if at_tip && tx.read_ref(&packmap_ref(remote))?.is_some() {
+                publish_tracking(layout, tx, || {
+                    Ok(refs::write_remote_ref(
+                        layout,
+                        options.remote_name,
+                        remote,
+                        &tip,
+                    )?)
+                })?;
+                return Ok(PushReport {
+                    attestations_pushed: 0,
+                    attestation_warnings: Vec::new(),
+                    refs: 1,
+                    steps: 0,
+                    tip: Some(tip),
+                    tags: Vec::new(),
+                    deleted: None,
+                });
+            }
+            if !at_tip
+                && matches!(policy, PushLease::FastForward)
+                && head.is_some()
+                && let Some(tracked) = tracked
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
             {
                 return Err(PushError::NonFastForwardPush {
                     branch: remote.clone(),
                 });
             }
-            let condition = if matches!(policy, PushLease::Force) {
-                refs::RefWriteCondition::Any
+            let condition = if at_tip {
+                // Rebuild the missing packmap only for the head we saw.
+                refs::RefWriteCondition::Match(tip)
             } else {
-                lease(layout, options.remote_name, remote)?
+                let lease = tracked.map_or(
+                    refs::RefWriteCondition::Missing,
+                    refs::RefWriteCondition::Match,
+                );
+                match (policy, lease) {
+                    (PushLease::Force, _) => refs::RefWriteCondition::Any,
+                    // A fast-forward push of a branch the remote does not hold
+                    // creates it: there is nothing on the remote to overwrite.
+                    (PushLease::FastForward, refs::RefWriteCondition::Match(_))
+                        if head.is_none() =>
+                    {
+                        refs::RefWriteCondition::Missing
+                    }
+                    (_, condition) => condition,
+                }
             };
-            let control = repository_control(layout, options)?;
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
             });
@@ -227,40 +481,85 @@ fn push_refs(
                 condition,
                 options.rebaseline_threshold,
                 options.pack_payload_cap,
-                &control,
+                &options.control,
                 &mut |published| {
-                    Ok(refs::write_remote_ref(
-                        layout,
-                        options.remote_name,
-                        remote,
-                        &published,
-                    )?)
+                    publish_tracking(layout, tx, || {
+                        Ok(refs::write_remote_ref(
+                            layout,
+                            options.remote_name,
+                            remote,
+                            &published,
+                        )?)
+                    })
                 },
             )?;
             Ok(PushReport {
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
                 refs: 1,
                 steps,
                 tip: Some(tip),
+                tags: Vec::new(),
+                deleted: None,
             })
         }
+        PushTarget::Tags { selection, force } => {
+            push_tag_report(layout, store, tx, options, selection, *force)
+        }
+        PushTarget::Delete(target) => Ok(PushReport {
+            attestations_pushed: 0,
+            attestation_warnings: Vec::new(),
+            refs: 0,
+            steps: 0,
+            tip: None,
+            tags: Vec::new(),
+            deleted: Some(delete::delete(layout, tx, options.remote_name, target)?),
+        }),
     }
 }
-fn repository_control<'a>(
+
+fn push_tag_report(
     layout: &kit_core::layout::RepoLayout,
-    options: &PushOptions<'a>,
-) -> Result<PushControl<'a>, PushError> {
-    let mut control = PushControl {
-        authority: options.control.authority,
-        max_steps: options.control.max_steps,
-        max_chain: options.control.max_chain,
-        shallow: refs::load_shallow_boundaries(layout)?
-            .unwrap_or_default()
-            .into_iter()
-            .collect(),
-        observer: options.control.observer,
-    };
-    control.shallow.extend(&options.control.shallow);
-    Ok(control)
+    store: &ObjectStore,
+    tx: &PushContext<'_>,
+    options: &PushOptions<'_>,
+    selection: &TagSelection,
+    force: bool,
+) -> Result<PushReport, PushError> {
+    let tags = tags::push_tags(
+        layout,
+        store,
+        tx,
+        options.remote_name,
+        selection,
+        force,
+        options.pack_payload_cap,
+    )?;
+    Ok(PushReport {
+        attestations_pushed: 0,
+        attestation_warnings: Vec::new(),
+        refs: 0,
+        steps: 0,
+        tip: None,
+        tags,
+        deleted: None,
+    })
+}
+/// Write a tracking ref under the worktree lock, as a fetch publishes one.
+/// gc holds that lock across its mark and sweep, so it either marks from
+/// the new ref or finishes before the ref exists; the prune guard the push
+/// holds keeps its sweep from deleting anything meanwhile.
+fn publish_tracking(
+    layout: &kit_core::layout::RepoLayout,
+    tx: &PushContext<'_>,
+    write: impl FnOnce() -> Result<(), PushError>,
+) -> Result<(), PushError> {
+    let _lock = crate::lock::wait_for_worktree_lock(
+        layout,
+        tx.observer,
+        &crate::lock::LockWait::new(None),
+    )?;
+    write()
 }
 
 fn lease(
@@ -289,10 +588,7 @@ pub fn push_branch_steps(
     if !source.supports_push() {
         return Err(SourceError::ProtocolError.into());
     }
-    let tx = PushContext {
-        source,
-        observer: control.observer,
-    };
+    let tx = PushContext::new(source, control.observer, store);
     run_steps(
         &tx,
         store,
@@ -357,9 +653,15 @@ fn run_steps(
     };
     refs::check_pushable_branch(branch)?;
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
+        // A repair must rebuild the current tip in one advance. Publishing
+        // an intermediate commit would rewind the branch.
         return single(None, pack_payload_cap);
     };
-    let plan = transfer::plan_pack_with(store, tip, remote_tip, encode_delta_candidates_batch)?;
+    tx.observer.event(&SyncEvent::PushPlanning { done: 0 });
+    let plan = tx.deltas.plan(store, tip, remote_tip)?;
+    tx.observer.event(&SyncEvent::PushPlanning {
+        done: plan.raw.len() + plan.deltas.len(),
+    });
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     // The total, not the ticketed count: compression can merge packs and carry
     // one past the ticket threshold, and only the exact dry seal below knows.
@@ -373,7 +675,7 @@ fn run_steps(
     if remote_tip.is_some_and(|remote| !store.contains(&remote)) {
         return single(None, pack_payload_cap);
     }
-    match build_and_upload_packs(PackSink::Count, store, plan, cap, limits, tx.observer) {
+    match dry_seal(store, plan, cap, limits, tx.observer) {
         Err(PushError::PushTooLarge { .. }) => {}
         Err(error @ PushError::Sync(SyncError::Interrupted)) => return Err(error),
         _ => return single(None, pack_payload_cap),
@@ -385,6 +687,7 @@ fn run_steps(
         payload_cap: pack_payload_cap,
     } = split::plan_split(
         store,
+        &tx.deltas,
         tip,
         remote_tip,
         limits,
@@ -458,6 +761,9 @@ fn publish_steps(
         }
         if let Err(cause) = outcome {
             return Err(match published {
+                // Every later advance would be refused too: a re-run cannot
+                // resume, and the error says what to do instead.
+                Some(_) if matches!(cause, PushError::PackChainTooLong { .. }) => cause,
                 Some(head) => PushError::SplitInterrupted {
                     branch: branch.to_owned(),
                     head: kit_core::hash::to_hex(&head),
@@ -499,8 +805,7 @@ fn push_step_recovering(
             plan,
         );
     }
-    let plan = plan.map(|prepared| prepared.pack);
-    let once = |retry, plan| {
+    let once = |condition, retry, plan| {
         push_branch_once(
             tx,
             store,
@@ -513,20 +818,49 @@ fn push_step_recovering(
             plan,
         )
     };
-    match once(None, plan) {
+    let recovering = |condition, plan| match once(condition, None, plan) {
         Err(PushError::TicketRejected | PushError::PacklistNotInRepository) => {
-            once(Some(RetryReason::Replanned), None)
+            once(condition, Some(RetryReason::Replanned), None)
         }
-        Err(PushError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
+        Err(PushError::DeltaBaseUnavailable) => {
+            once(condition, Some(RetryReason::LostDeltaBase), None)
+        }
         result => result,
+    };
+    if !matches!(condition, refs::RefWriteCondition::Any) {
+        return recovering(condition, plan.map(|prepared| prepared.pack));
     }
+
+    // On an ordered transport a delete can remove both refs between the
+    // packmap write and the head write. Lease the observed head so this
+    // write cannot recreate it from a plan based on the deleted packmap.
+    refs::check_pushable_branch(branch)?;
+    let head_ref = crate::packmap::branch_head_ref(branch);
+    for _ in 0..PACKMAP_CAS_ATTEMPTS {
+        if tx.observer.cancelled() {
+            return Err(SyncError::Interrupted.into());
+        }
+        let condition = tx.read_ref(&head_ref)?.map_or(
+            refs::RefWriteCondition::Missing,
+            refs::RefWriteCondition::Match,
+        );
+        match recovering(condition, None) {
+            Err(PushError::NonFastForwardPush { .. }) => {}
+            result => return result,
+        }
+    }
+    Err(PushError::NonFastForwardPush {
+        branch: branch.to_owned(),
+    })
 }
 
 /// The remote head a push plans against, read before it plans.
 enum LeaseHead {
     /// The head, which the push's head condition holds for.
     Holds(Option<Hash>),
-    /// The head is already the tip: an earlier attempt landed.
+    /// The lease holds for the tip, but a repair must send its entire closure.
+    MissingPackmap,
+    /// The head is already the tip and has a packmap: an earlier attempt landed.
     Landed,
 }
 
@@ -538,8 +872,8 @@ enum LeaseHead {
 /// after the head moved away and back and a reset dropped what the plan
 /// left out; the head write would then publish a tip the packmap cannot
 /// rebuild. Such a push would fail its head condition at once, so it is
-/// refused before it plans. A head that is already `tip` means an earlier
-/// attempt landed, and the push writes nothing more.
+/// refused before it plans. A head at `tip` with a packmap can also be
+/// the result of an earlier attempt that landed.
 fn lease_head(
     tx: &PushContext<'_>,
     branch: &str,
@@ -552,10 +886,17 @@ fn lease_head(
         refs::RefWriteCondition::Missing => head.is_none(),
         refs::RefWriteCondition::Match(lease) => head == Some(lease),
     };
+    if head == Some(tip) {
+        let has_packmap = tx.read_ref(&packmap_ref(branch))?.is_some();
+        if holds && !has_packmap {
+            return Ok(LeaseHead::MissingPackmap);
+        }
+        if !holds && has_packmap {
+            return Ok(LeaseHead::Landed);
+        }
+    }
     if holds {
         Ok(LeaseHead::Holds(head))
-    } else if head == Some(tip) {
-        Ok(LeaseHead::Landed)
     } else {
         Err(PushError::NonFastForwardPush {
             branch: branch.to_owned(),
@@ -621,8 +962,7 @@ fn push_branch_once(
         // The packs the estimate counts, not only its ticketed ones: a real
         // seal can merge two estimated packs into one that is ticketed.
         && estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?.len() > budget
-        && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
-            PackSink::Count,
+        && let Err(PushError::PushTooLarge { packs, limit, .. }) = dry_seal(
             store,
             plan.clone(),
             effective_cap,
@@ -656,17 +996,7 @@ fn push_branch_once(
     // an extra clone — see that function's doc comment).
     let self_contained = plan.self_contained;
     let head_ref = format!("refs/heads/{branch}");
-    let pack_keys = build_and_upload_packs(
-        PackSink::Upload {
-            tx,
-            head_ref: &head_ref,
-        },
-        store,
-        plan,
-        effective_cap,
-        limits,
-        tx.observer,
-    )?;
+    let pack_keys = build_and_upload_packs(tx, &head_ref, store, plan, effective_cap, limits)?;
 
     // Chain the packs onto the packmap and move the head together. A
     // transactional transport applies both atomically; the default writes
@@ -682,7 +1012,9 @@ fn push_branch_once(
         rebaseline_threshold,
         condition,
         tip,
-    )
+    )?;
+    tx.record_advance(pack_keys);
+    Ok(())
 }
 
 /// The plan for `tip`, or `None` when an earlier attempt already landed it.
@@ -704,6 +1036,7 @@ fn plan_branch(
     } else {
         match lease_head(tx, branch, condition, tip)? {
             LeaseHead::Holds(head) => head,
+            LeaseHead::MissingPackmap => None,
             LeaseHead::Landed => return Ok(None),
         }
     };
@@ -711,12 +1044,7 @@ fn plan_branch(
     // (the remote already holds this closure) yields an empty plan and takes
     // the cheap head-only path below WITHOUT walking the packmap chain. Only
     // a push that actually has objects to send pays the O(depth) chain probe.
-    Ok(Some(transfer::plan_pack_with(
-        store,
-        tip,
-        remote_tip,
-        encode_delta_candidates_batch,
-    )?))
+    Ok(Some(tx.deltas.plan(store, tip, remote_tip)?))
 }
 
 /// The per-pack payload cap: `requested`, bounded by the pack format and
@@ -763,8 +1091,8 @@ fn estimate_pack_sizes_with(
         .iter()
         .map(|hash| {
             store
-                .object_metadata(hash)
-                .map(|meta| Incoming::raw(meta.len(), meta.len()))
+                .object_size(hash)
+                .map(|size| Incoming::raw(size, size))
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
@@ -772,16 +1100,25 @@ fn estimate_pack_sizes_with(
     // stream as compressed, so it never counts fewer packs than a real seal
     // needs. It may count more. The plan lists the deltas of one base next to
     // each other, so none of them brings a base back.
-    let deltas = plan.deltas.iter().map(|delta| {
-        Incoming::delta(
-            (HASH_LEN + delta.stream.len()) as u64,
-            &delta.stream,
-            true,
-            0,
-        )
-    });
+    let deltas = plan
+        .deltas
+        .iter()
+        .map(|delta| {
+            Ok(Incoming::delta(
+                (HASH_LEN + delta.stream.len()) as u64,
+                &delta.stream.bytes().map_err(StoreError::Io)?,
+                true,
+                0,
+            ))
+        })
+        .collect::<Result<Vec<_>, PushError>>()?;
     for add in raw.into_iter().chain(deltas) {
-        if fill.seals_before(add, payload_cap, max_pack_bytes, max_entries) {
+        if fill.seals_before(
+            add,
+            payload_cap,
+            protocol::max_pack_bytes(max_pack_bytes),
+            max_entries,
+        ) {
             packs.push(fill.serialized_bound());
             fill = PackFill::default();
         }
@@ -795,19 +1132,28 @@ fn estimate_pack_sizes_with(
 
 /// Where sealed packs go: to the remote, or nowhere (an exact local dry run of
 /// the seal, for the split's pre-flight check).
-#[derive(Clone, Copy)]
-enum PackSink<'a> {
-    Upload {
-        tx: &'a PushContext<'a>,
-        head_ref: &'a str,
-    },
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SealKind {
+    Upload,
     Count,
 }
+
+/// Bytes of raw objects (or delta streams) read into memory and compressed
+/// for one batch of entries, 64 MiB. A single larger object is a batch of its
+/// own. The pack itself is spooled to disk, so the push holds one batch, not
+/// a pack; a transport that buffers the body still holds the pack.
+pub const PUSH_BATCH_BYTES: u64 = 64 << 20;
 
 /// Build `plan`'s entries into one or more packs, each staying under
 /// `payload_cap` bytes of wire payload, uploading each pack to `tx` as
 /// soon as it's sealed. Returns the ordered pack keys — build order is
 /// apply order, threaded straight into [`advance_packmap`].
+///
+/// Each pack is written to an unnamed spool file in the store's spool
+/// directory as its entries are added, sealed there, and uploaded from the
+/// file: its key and length come from the sealed spool before the first byte
+/// is sent, and every upload attempt reads that same file. The spool is
+/// dropped once the upload succeeds or fails.
 ///
 /// A single linear left-to-right pass over the plan's already-ordered
 /// `raw ++ deltas` sequence is enough: [`transfer::plan_pack_with`] never
@@ -822,35 +1168,169 @@ enum PackSink<'a> {
 /// checked against [`PackWriter::total_payload`]'s real (compressed)
 /// running total, so a sealed pack never exceeds `payload_cap` — it may
 /// under-fill when compression bites, yielding more packs than the
-/// theoretical minimum, never fewer. Peak memory is one pack of at most
-/// `payload_cap` ([`DEFAULT_PACK_PAYLOAD_CAP`] unless the caller sets
-/// another) PLUS one prepared batch, not every pack (or the whole plan)
-/// held at once. One object larger than the cap still goes into a pack of
-/// its own, and that pack is the only kind that can exceed the cap.
-/// [`size_capped_batch_lens`] caps each batch at `payload_cap`
-/// conservative bytes (the same budget the writer itself is bounded
-/// by) as well as [`pack_fanout_threshold`]-many entries, so a plan
-/// containing very large objects can't balloon a batch past what one
-/// sealed pack would have held anyway — see that function's doc
-/// comment for why both caps are needed.
+/// theoretical minimum, never fewer. One object larger than the cap still
+/// goes into a pack of its own, and that pack is the only kind that can
+/// exceed the cap. Entries are read and compressed in batches of at most
+/// [`PUSH_BATCH_BYTES`] and [`pack_fanout_threshold`] entries, so the memory
+/// the push itself holds is one batch (twice, raw bytes and frames), whatever
+/// the pack size; a transport that buffers the body also holds the pack.
 ///
-/// Takes `plan` BY VALUE (not `&PackPlan`): the delta compression
-/// fan-out needs owned `Vec<u8>` streams to hand to rayon, and
-/// `plan.deltas` already owns them — draining them out here is zero
-/// extra bytes copied, where borrowing would force a clone per entry
-/// just to satisfy ownership. The caller reads whatever it needs off
-/// `plan` (just `self_contained`) before making this call.
+/// Takes `plan` BY VALUE: each batch drains its deltas out of `plan.deltas`.
+/// The caller reads whatever it needs off `plan` (just `self_contained`)
+/// before making this call.
 fn build_and_upload_packs(
-    sink: PackSink<'_>,
+    tx: &PushContext<'_>,
+    head_ref: &str,
+    store: &ObjectStore,
+    plan: transfer::PackPlan,
+    payload_cap: u64,
+    limits: UploadLimits,
+) -> Result<Vec<Hash>, PushError> {
+    let mut pack_keys = Vec::new();
+    build_packs(
+        SealKind::Upload,
+        || PackWriter::spool(&tx.spool_dir).map_err(PushError::from),
+        |writer, ticketed, entries| {
+            let spooled = writer.finish_spool()?;
+            let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
+            let key = PackKey::from_hash(spooled.key());
+            if !already_stored(tx, &key, spooled.len(), head_ref, limits) {
+                tx.upload_pack(&spooled, &key, head_ref)
+                    .map_err(|error| repository_operation_error(tx, error))?;
+                // Upload is complete — report the real byte count handed to
+                // the transport, not an estimate.
+                tx.observer.event(&SyncEvent::PackUploaded {
+                    bytes: spooled.len(),
+                });
+            }
+            if let Some(record) = &tx.record
+                && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
+            {
+                record.borrow_mut().checked.insert(spooled.key());
+            }
+            pack_keys.push(spooled.key());
+            Ok(is_ticketed)
+        },
+        store,
+        plan,
+        limits,
+        payload_cap,
+        tx.observer,
+    )?;
+    Ok(pack_keys)
+}
+
+/// Sealed packs smaller than this go straight to the upload, with no
+/// existence check: the common one-commit push makes no extra request, and a
+/// small pack costs less to send again than to ask about.
+const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
+
+/// Whether the remote already holds the sealed pack `key` of `len` bytes, so
+/// the upload can be skipped. A pack key is the hash of the pack's bytes, and
+/// every transport that is not ticketed stores a pack whole or not at all (a
+/// file or ssh remote renames a finished temp file into place, an S3 `PUT`
+/// takes effect when it completes), so a key that is there with the length
+/// of the local pack names a complete pack and a re-run of an interrupted
+/// push sends only the packs it missed. A key whose stored length differs, as
+/// a damaged or truncated file would give, is not that pack: the push
+/// uploads over it, and never publishes a ref over a pack the remote does
+/// not fully hold. The length is the test, not a hash of the stored bytes: a
+/// pack damaged in place at its own length is not caught here. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
+/// a remote that issues no upload tickets is checked, with one request that
+/// is not retried. Any answer but a stored length equal to `len`, an error
+/// and an unknown length included, is "not stored": the push uploads.
+fn already_stored(
+    tx: &PushContext<'_>,
+    key: &PackKey,
+    len: u64,
+    head_ref: &str,
+    limits: UploadLimits,
+) -> bool {
+    limits.data_packs_per_advance.is_none()
+        && len >= STORED_PACK_CHECK_MIN_BYTES
+        && tx.pack_len(key, head_ref).ok().flatten() == Some(len)
+}
+
+/// The exact seal of `plan` that [`build_and_upload_packs`] would make, with
+/// nothing stored or sent: each pack goes into a writer that only counts its
+/// bytes. Returns how many packs the seal makes, or the error the real seal
+/// would return before its first upload past a limit.
+fn dry_seal(
     store: &ObjectStore,
     plan: transfer::PackPlan,
     payload_cap: u64,
     limits: UploadLimits,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<Vec<Hash>, PushError> {
-    let mut pack_keys = Vec::new();
-    let mut ticketed_count = 0;
-    let mut w = PackWriter::new();
+) -> Result<usize, PushError> {
+    let mut packs = 0;
+    build_packs(
+        SealKind::Count,
+        || Ok(pack::CountingWriter::counting()),
+        |writer, ticketed, _| {
+            let is_ticketed = check_sealed(writer.finish_count()?, limits, ticketed)?;
+            packs += 1;
+            Ok(is_ticketed)
+        },
+        store,
+        plan,
+        limits,
+        payload_cap,
+        observer,
+    )?;
+    Ok(packs)
+}
+
+/// Check a sealed pack of `len` bytes against the remote's limits before it
+/// is uploaded, `ticketed` being the ticketed packs sealed before it.
+/// Returns whether it takes a ticket.
+fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool, PushError> {
+    let is_ticketed = ticketed_pack(limits, len);
+    if let Some(budget) = limits.data_packs_per_advance
+        && is_ticketed
+        && ticketed >= budget
+    {
+        return Err(PushError::PushTooLarge {
+            packs: ticketed + 1,
+            limit: budget,
+            commit: None,
+            holds_remote_head: false,
+        });
+    }
+    if len > protocol::max_pack_bytes(limits.max_pack_bytes) {
+        return Err(PushError::from(SourceError::PayloadTooLarge(
+            kit_core::protocol::saturating_usize(len),
+        )));
+    }
+    Ok(is_ticketed)
+}
+
+/// The seal loop of [`build_and_upload_packs`] and [`dry_seal`]: `fresh`
+/// makes each pack's writer, and `seal` finishes one and returns whether it
+/// took a ticket, given the ticketed packs sealed before it.
+#[allow(clippy::too_many_arguments)]
+fn build_packs<W: std::io::Write>(
+    kind: SealKind,
+    mut fresh: impl FnMut() -> Result<PackWriter<W>, PushError>,
+    mut seal: impl FnMut(PackWriter<W>, usize, &PackEntries) -> Result<bool, PushError>,
+    store: &ObjectStore,
+    plan: transfer::PackPlan,
+    limits: UploadLimits,
+    payload_cap: u64,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<(), PushError> {
+    let mut ticketed = 0;
+    let mut entries = PackEntries::default();
+    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize, entries: &mut PackEntries| {
+        if observer.cancelled() {
+            return Err(PushError::Sync(SyncError::Interrupted));
+        }
+        if seal(w, *ticketed, entries)? {
+            *ticketed += 1;
+        }
+        entries.clear();
+        Ok(())
+    };
+    let mut w = fresh()?;
     let max_entries = pack_fanout_threshold().max(1);
     let transfer::PackPlan {
         raw, mut deltas, ..
@@ -861,13 +1341,14 @@ fn build_and_upload_packs(
     // *before* any object's content is actually read into memory.
     let raw_sizes: Vec<u64> = raw
         .iter()
-        .map(|h| Ok(store.object_metadata(h)?.len()))
+        .map(|h| Ok(store.object_size(h)?))
         .collect::<Result<_, PushError>>()?;
     let mut start = 0;
-    for len in size_capped_batch_lens(&raw_sizes, payload_cap, max_entries) {
+    for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk = &raw[start..start + len];
+        let parallel = batch_fans_out(len, raw_sizes[start..start + len].iter().sum());
         start += len;
-        for entry in prepare_raw_batch(store, chunk)? {
+        for (entry, signs) in prepare_raw_batch(store, chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(),
@@ -875,34 +1356,43 @@ fn build_and_upload_packs(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_pack(
-                    sink,
-                    &mut w,
-                    &mut pack_keys,
-                    &mut ticketed_count,
-                    limits,
-                    observer,
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut entries,
                 )?;
+            }
+            if signs {
+                entries.signed.push((
+                    entry.hash(),
+                    u32::try_from(entry.conservative_len()).expect("bounded object"),
+                ));
             }
             w.push_prepared_raw(entry)?;
             // Honest progress: one real object just got staged into
             // the outgoing pack. Never git's
             // Enumerating/Counting/Compressing lines — see `SyncEvent`.
-            report_packed(sink, observer);
+            report_packed(kind, observer);
         }
     }
 
-    // Delta entries: sizes are already known (`stream.len()`, no I/O),
-    // so batch lengths can be computed directly off them; `drain` then
-    // moves each batch's `PlannedDelta`s out of `deltas` without
-    // cloning their streams.
+    // Delta entries: sizes are known from the plan with no I/O, so batch
+    // lengths are computed directly off them. The planner only chooses
+    // blob and manifest delta targets, so none of these entries needs a
+    // signature check.
+    // `drain` then moves each
+    // batch's `PlannedDelta`s out of `deltas`, and each batch reads its
+    // streams back from the push's delta spool.
     let delta_sizes: Vec<u64> = deltas
         .iter()
         .map(|d| (HASH_LEN + d.stream.len()) as u64)
         .collect();
-    for len in size_capped_batch_lens(&delta_sizes, payload_cap, max_entries) {
+    let mut start = 0;
+    for len in size_capped_batch_lens(&delta_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
-        for entry in prepare_delta_batch(chunk) {
+        let parallel = batch_fans_out(len, delta_sizes[start..start + len].iter().sum());
+        start += len;
+        for entry in prepare_delta_batch(chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -910,67 +1400,49 @@ fn build_and_upload_packs(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_pack(
-                    sink,
-                    &mut w,
-                    &mut pack_keys,
-                    &mut ticketed_count,
-                    limits,
-                    observer,
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut entries,
                 )?;
             }
             w.push_prepared_delta(entry)?;
-            report_packed(sink, observer);
+            report_packed(kind, observer);
         }
     }
 
-    seal_pack(
-        sink,
-        &mut w,
-        &mut pack_keys,
-        &mut ticketed_count,
-        limits,
-        observer,
-    )?;
-    Ok(pack_keys)
+    seal_one(w, &mut ticketed, &mut entries)
 }
 
 /// Honest progress: one real object just got staged into the outgoing
 /// pack. Never git's Enumerating/Counting/Compressing lines — see
 /// `SyncEvent`. A dry seal stages nothing to send and reports nothing.
-fn report_packed(sink: PackSink<'_>, observer: &dyn Observer<SyncEvent>) {
-    if matches!(sink, PackSink::Upload { .. }) {
+fn report_packed(kind: SealKind, observer: &dyn Observer<SyncEvent>) {
+    if kind == SealKind::Upload {
         observer.event(&SyncEvent::ObjectsPacked { count: 1 });
     }
 }
 
 /// Split `sizes` (each item's conservative uncompressed byte size, in
 /// original order) into batch lengths such that each batch's summed
-/// size stays at-or-under `payload_cap` bytes AND at-or-under
+/// size stays at-or-under `byte_cap` bytes AND at-or-under
 /// `max_entries` items — whichever limit a batch hits first ends it.
 /// Mirrors [`should_seal`]'s "never true for an empty writer" escape
-/// hatch: a single item over `payload_cap` on its own (an oversized
-/// blob against a tiny test cap, say) still gets a one-item batch of
-/// its own rather than looping forever or being silently dropped.
+/// hatch: a single item over `byte_cap` on its own still gets a
+/// one-item batch of its own rather than looping forever or being
+/// silently dropped.
 ///
-/// The byte cap exists so [`build_and_upload_packs`]'s per-batch
-/// compression fan-out can't hold dramatically more raw content in
-/// memory at once than the single pack buffer it's feeding already
-/// does — without it, a count-only cap (`max_entries`, sized for
-/// rayon dispatch overhead, not memory) could group hundreds of
-/// near-`MAX_RAW_OBJECT_SIZE` (1 GiB) blobs into one batch and read +
-/// compress all of them before any of `payload_cap`'s own bookkeeping
-/// ever runs. The entry cap exists for the opposite corpus shape: many
-/// small objects would otherwise form one enormous `payload_cap`-sized
-/// (default 256 MiB) batch, both blowing past `pack_fanout_threshold`'s
-/// bench-measured parallel-dispatch sizing and stalling progress
-/// reporting for the whole batch's compression time.
-fn size_capped_batch_lens(sizes: &[u64], payload_cap: u64, max_entries: usize) -> Vec<usize> {
+/// [`build_packs`] passes [`PUSH_BATCH_BYTES`]: the batch is what a push
+/// reads and compresses at once, so the byte cap bounds its memory
+/// whatever the pack size, and the entry cap keeps a batch of many small
+/// objects within `pack_fanout_threshold`'s parallel-dispatch sizing and
+/// progress reporting timely.
+fn size_capped_batch_lens(sizes: &[u64], byte_cap: u64, max_entries: usize) -> Vec<usize> {
     let mut lens = Vec::new();
     let mut running: u64 = 0;
     let mut count = 0usize;
     for &size in sizes {
-        if count > 0 && (running.saturating_add(size) > payload_cap || count >= max_entries) {
+        if count > 0 && (running.saturating_add(size) > byte_cap || count >= max_entries) {
             lens.push(count);
             running = 0;
             count = 0;
@@ -994,11 +1466,10 @@ fn size_capped_batch_lens(sizes: &[u64], payload_cap: u64, max_entries: usize) -
 /// kit-benches --bench pack_build_fanout`.
 ///
 /// Also doubles as one of [`size_capped_batch_lens`]'s two caps: a
-/// batch that isn't cut short by `payload_cap` first comes out exactly
+/// batch that isn't cut short by [`PUSH_BATCH_BYTES`] first comes out exactly
 /// this many entries long (until the final, possibly-shorter
-/// remainder) — the same length `prepare_raw_batch`/
-/// `prepare_delta_batch` compare against to decide sequential vs.
-/// parallel, so a full-length batch always takes the parallel path.
+/// remainder), so such a batch always takes the parallel path. A batch the
+/// byte cap cuts short fans out by [`PACK_FANOUT_MIN_BYTES`] instead.
 const PACK_FANOUT_ENTRIES_PER_THREAD: usize = 8;
 
 /// The per-batch entry count [`build_and_upload_packs`] fans out across
@@ -1007,204 +1478,85 @@ fn pack_fanout_threshold() -> usize {
     crate::fanout::threshold(PACK_FANOUT_ENTRIES_PER_THREAD)
 }
 
-/// Read + compression-prepare one chunk of raw object hashes —
-/// sequentially below [`pack_fanout_threshold`], via rayon's global
-/// thread pool at or above it. Output mirrors `chunk`'s order 1:1
+/// Bytes from which a batch of two or more entries fans out whatever its
+/// entry count, 4 MiB. Reading and compressing that much takes milliseconds,
+/// far more than handing the entries to the pool costs.
+const PACK_FANOUT_MIN_BYTES: u64 = 4 << 20;
+
+/// Whether a batch of `len` entries and `bytes` uncompressed bytes is read and
+/// compressed on rayon's pool: when it reaches [`pack_fanout_threshold`], or
+/// when it holds two or more entries and [`PACK_FANOUT_MIN_BYTES`]. A batch
+/// of large objects is cut by [`PUSH_BATCH_BYTES`] long before it reaches
+/// the entry threshold, and it is the batch that gains most from the pool.
+/// The batch's bytes are bounded either way, so fanning out does not change
+/// what the push holds in memory.
+fn batch_fans_out(len: usize, bytes: u64) -> bool {
+    len >= pack_fanout_threshold() || (len >= 2 && bytes >= PACK_FANOUT_MIN_BYTES)
+}
+
+/// Read + compression-prepare one chunk of raw object hashes — on rayon's
+/// global thread pool when `parallel` (see [`batch_fans_out`]), sequentially
+/// otherwise. Output mirrors `chunk`'s order 1:1
 /// either way: `plan.raw` is already ordered (non-blobs before blobs,
 /// each group in BLAKE3 order — see [`transfer::PackPlan`]'s doc
 /// comment), and that order is the wire order the pack is built in, so
 /// a parallel fan-out must not reshuffle it.
-fn prepare_raw_batch(store: &ObjectStore, chunk: &[Hash]) -> Result<Vec<PreparedRaw>, PushError> {
-    crate::fanout::try_map_seq_or_par(chunk, pack_fanout_threshold(), |h| {
-        Ok(PackWriter::prepare_raw(*h, store.read(h)?))
-    })
-}
-
-/// The delta-entry counterpart of [`prepare_raw_batch`]. Delta streams
-/// are already resident in `chunk` (no store read needed), so this
-/// only fans out the zstd compression step. Takes `chunk` by value —
-/// `build_and_upload_packs` drains it straight out of `plan.deltas` —
-/// so `PackWriter::prepare_delta` can take each stream by move instead
-/// of cloning it.
-fn prepare_delta_batch(chunk: Vec<transfer::PlannedDelta>) -> Vec<PreparedDelta> {
-    if chunk.len() < pack_fanout_threshold() {
-        return chunk
-            .into_iter()
-            .map(|d| PackWriter::prepare_delta(d.base, d.stream))
-            .collect();
-    }
-    chunk
-        .into_par_iter()
-        .map(|d| PackWriter::prepare_delta(d.base, d.stream))
-        .collect()
-}
-
-/// Entries-per-thread budget below which [`encode_delta_candidates_batch`]
-/// diffs candidates sequentially instead of fanning out across rayon's
-/// thread pool, for a pool of a given size. Same crossover shape as
-/// [`PACK_FANOUT_ENTRIES_PER_THREAD`] but tuned separately, and lower:
-/// each entry here pays two disk reads (target + base) plus
-/// `delta::encode`'s block-hash-table build and greedy scan over the
-/// target's full length — a heavier per-item cost than the
-/// zstd-compression fan-out `PACK_FANOUT_ENTRIES_PER_THREAD` guards, so
-/// fewer entries per thread are enough to amortize dispatch.
-///
-/// `cargo bench -p kit-benches --bench delta_plan_fanout` on a 4-core
-/// host, isolating `delta::encode` over synthetic 64 KiB
-/// (FastCDC-average-sized) near-duplicate chunks:
-///
-///   n=256: sequential 46.99ms -> rayon 14.79ms (3.18x)
-///   n=128: sequential 22.85ms -> rayon  7.57ms (3.02x)
-///   n=64:  sequential 11.65ms -> rayon  3.67ms (3.18x)
-///   n=32:  sequential  5.52ms -> rayon  1.74ms (3.18x)
-///   n=16:  sequential  3.28ms -> rayon  1.22ms (2.69x)
-///   n=8:   sequential  1.38ms -> rayon  0.70ms (1.97x)
-///   n=4:   sequential  0.68ms -> rayon  0.42ms (1.63x)
-///   n=2:   sequential  0.34ms -> rayon  0.33ms (roughly flat)
-///   n=1:   sequential  0.17ms -> rayon  0.17ms (roughly flat)
-///
-/// Each candidate already costs ~0.17ms, comfortably above rayon's
-/// microsecond-scale dispatch overhead, so the crossover falls at the
-/// smallest candidate count worth fanning out at all rather than at a
-/// larger multiple of the pool size the other fan-outs need.
-const DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD: usize = 1;
-
-/// The candidate count [`encode_delta_candidates_batch`] fans out across
-/// rayon at — see [`DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD`].
-fn delta_plan_fanout_threshold() -> usize {
-    crate::fanout::threshold(DELTA_PLAN_FANOUT_ENTRIES_PER_THREAD)
-}
-
-/// [`transfer::plan_pack_with`]'s `encode_deltas` callback: diffs every
-/// delta candidate `plan_pack_with` found — sequentially below
-/// [`delta_plan_fanout_threshold`], via rayon's global thread pool at or
-/// above it. Each candidate's `delta::encode` is independent of every
-/// other candidate's (same shape as `prepare_raw_batch`'s per-object
-/// compression fan-out), so a push touching many changed blobs
-/// parallelizes the diffing itself, not just the downstream zstd pass
-/// `prepare_delta_batch` already fans out.
-///
-/// Processes at most [`DELTA_CANDIDATE_BATCH_CAP`] candidates at a time.
-/// Repeated bases share a cache capped at [`DELTA_BASE_CACHE_BYTES`];
-/// one-use bases and bases that do not fit are read by each encoder as
-/// before. Metadata checks avoid reading nonfitting bases twice. The
-/// cache is dropped before the next batch. Active encoders' target/base
-/// buffers and the accumulated encoded output are additional allocations;
-/// imported blobs can reach the store's 1 GiB object limit.
-///
-/// Order matches `candidates` 1:1, including across batch boundaries,
-/// satisfying `plan_pack_with`'s contract.
-fn encode_delta_candidates_batch(
+fn prepare_raw_batch(
     store: &ObjectStore,
-    candidates: &[transfer::DeltaCandidate],
-) -> Result<Vec<Option<transfer::PlannedDelta>>, StoreError> {
-    let mut results = Vec::with_capacity(candidates.len());
-    for batch in candidates.chunks(DELTA_CANDIDATE_BATCH_CAP) {
-        let base_bytes = cache_delta_bases(store, batch, DELTA_BASE_CACHE_BYTES)?;
-        results.extend(crate::fanout::try_map_seq_or_par(
-            batch,
-            delta_plan_fanout_threshold(),
-            |&c| match base_bytes.get(&c.base) {
-                Some(bytes) => transfer::encode_delta_candidate_with_base(store, c, bytes),
-                None => transfer::encode_delta_candidate(store, c),
-            },
-        )?);
+    chunk: &[Hash],
+    parallel: bool,
+) -> Result<Vec<(PreparedRaw, bool)>, PushError> {
+    let prepare = |h: &Hash| {
+        let bytes = store.read(h)?;
+        let signed = bytes.first().is_some_and(|tag| {
+            [ObjectType::Commit, ObjectType::Remix, ObjectType::Tag]
+                .iter()
+                .any(|ty| *ty as u8 == *tag)
+        });
+        Ok((PackWriter::prepare_raw(*h, bytes), signed))
+    };
+    if parallel {
+        chunk.par_iter().map(prepare).collect()
+    } else {
+        chunk.iter().map(prepare).collect()
     }
-    Ok(results)
 }
 
-/// Maximum number of candidates whose base objects are cached together.
-const DELTA_CANDIDATE_BATCH_CAP: usize = 64;
-
-/// Maximum retained payload bytes for reused bases, independent of blob sizes.
-const DELTA_BASE_CACHE_BYTES: usize = 64 * 1024 * 1024;
-
-fn cache_delta_bases(
-    store: &ObjectStore,
-    candidates: &[transfer::DeltaCandidate],
-    byte_budget: usize,
-) -> Result<std::collections::HashMap<Hash, Vec<u8>>, StoreError> {
-    let mut counts = std::collections::BTreeMap::<Hash, usize>::new();
-    for candidate in candidates {
-        *counts.entry(candidate.base).or_default() += 1;
+/// The delta-entry counterpart of [`prepare_raw_batch`]: reads each
+/// stream of `chunk` back from the push's delta spool and fans out the
+/// zstd compression step. Takes `chunk` by value — `build_packs` drains
+/// it straight out of `plan.deltas`.
+fn prepare_delta_batch(
+    chunk: Vec<transfer::PlannedDelta>,
+    parallel: bool,
+) -> Result<Vec<PreparedDelta>, PushError> {
+    let prepare = |d: transfer::PlannedDelta| {
+        Ok(PackWriter::prepare_delta(
+            d.base,
+            d.stream.into_vec().map_err(StoreError::Io)?,
+        ))
+    };
+    if parallel {
+        chunk.into_par_iter().map(prepare).collect()
+    } else {
+        chunk.into_iter().map(prepare).collect()
     }
-    let mut cache = std::collections::HashMap::new();
-    let mut remaining = byte_budget;
-    for (base, count) in counts {
-        if count < 2 || remaining == 0 {
-            continue;
-        }
-        if store.object_metadata(&base)?.len() > remaining as u64 {
-            continue;
-        }
-        let bytes = store.read(&base)?;
-        // Recheck after reading: metadata is only an optimization, never
-        // authority for the retained byte bound if a file changes meanwhile.
-        if bytes.len() <= remaining {
-            remaining -= bytes.len();
-            cache.insert(base, bytes);
-        }
-    }
-    Ok(cache)
 }
 
 /// [`PackFill::seals_before`] for the pack `w` is building.
-fn should_seal(
-    w: &PackWriter,
+fn should_seal<W>(
+    w: &PackWriter<W>,
     add: Incoming,
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
     max_entries: usize,
 ) -> bool {
-    PackFill::of(w).seals_before(add, payload_cap, max_pack_bytes, max_entries)
-}
-
-/// Finish `w`, upload it, record its key, and replace `w` with a fresh
-/// empty writer so the caller can keep pushing entries into the next
-/// pack.
-fn seal_pack(
-    sink: PackSink<'_>,
-    w: &mut PackWriter,
-    pack_keys: &mut Vec<Hash>,
-    ticketed_count: &mut usize,
-    limits: UploadLimits,
-    observer: &dyn Observer<SyncEvent>,
-) -> Result<(), PushError> {
-    if observer.cancelled() {
-        return Err(PushError::Sync(SyncError::Interrupted));
-    }
-    let sealed = std::mem::replace(w, PackWriter::new());
-    let pack = sealed.finish()?;
-    let is_ticketed = ticketed_pack(limits, pack.len() as u64);
-    if let Some(budget) = limits.data_packs_per_advance
-        && is_ticketed
-        && *ticketed_count >= budget
-    {
-        return Err(PushError::PushTooLarge {
-            packs: *ticketed_count + 1,
-            limit: budget,
-            commit: None,
-            holds_remote_head: false,
-        });
-    }
-    if pack.len() as u64 > serialized_limit(limits.max_pack_bytes) {
-        return Err(PushError::from(SourceError::PayloadTooLarge(pack.len())));
-    }
-    let pack_key = pack::pack_key(&pack);
-    if let PackSink::Upload { tx, head_ref } = sink {
-        tx.upload_pack_via_ref(&pack, &PackKey::from_hash(pack_key), head_ref)
-            .map_err(|error| repository_operation_error(tx, error))?;
-        // Upload is complete — report the real byte count handed to the
-        // transport, not an estimate.
-        observer.event(&SyncEvent::PackUploaded {
-            bytes: pack.len() as u64,
-        });
-    }
-    pack_keys.push(pack_key);
-    if is_ticketed {
-        *ticketed_count += 1;
-    }
-    Ok(())
+    PackFill::of(w).seals_before(
+        add,
+        payload_cap,
+        protocol::max_pack_bytes(max_pack_bytes),
+        max_entries,
+    )
 }
 
 #[cfg(test)]
@@ -1276,7 +1628,7 @@ mod tests {
                 "a sealed pack of {} bytes: {read:?}",
                 pack.len()
             );
-            assert!(pack.len() as u64 <= serialized_limit(max_pack_bytes));
+            assert!(pack.len() as u64 <= protocol::max_pack_bytes(max_pack_bytes));
             packs += 1;
         };
         for (id, bytes) in entries {
@@ -1437,12 +1789,8 @@ mod tests {
     fn the_pack_estimate_splits_at_the_payload_and_serialized_limits() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
-        let size = store.object_metadata(&hashes[0]).unwrap().len();
-        assert!(
-            hashes
-                .iter()
-                .all(|h| store.object_metadata(h).unwrap().len() == size)
-        );
+        let size = store.object_size(&hashes[0]).unwrap();
+        assert!(hashes.iter().all(|h| store.object_size(h).unwrap() == size));
         let plan = transfer::PackPlan {
             raw: hashes,
             deltas: Vec::new(),
@@ -1469,25 +1817,214 @@ mod tests {
         assert_eq!(packs(u64::MAX, Some(u64::MAX)), 1);
     }
 
+    /// The pack a push uploads from its spool, with its deltas read from the
+    /// delta spool, has the bytes and key of the same pack built in memory
+    /// with the deltas held inline.
+    #[test]
+    #[allow(clippy::too_many_lines)] // the fixture, both builds and the comparison
+    fn a_spooled_push_pack_has_the_bytes_and_key_of_the_in_memory_pack() {
+        use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+        let (_dir, store) = store();
+        let write = |object: &Object| {
+            store
+                .write(&kit_core::serialize::serialize(object).unwrap())
+                .unwrap()
+        };
+        let data = |seed: u8, edited: bool| {
+            let mut out = Vec::new();
+            for block in 0u32..2048 {
+                out.extend_from_slice(&kit_core::hash::hash(
+                    &[&block.to_le_bytes()[..], &[seed]].concat(),
+                ));
+            }
+            if edited {
+                out[1000] ^= 1;
+                out[40_000] ^= 1;
+            }
+            out
+        };
+        let commit = |files: Vec<(String, Vec<u8>)>, parents: Vec<Hash>| {
+            let mut entries: Vec<TreeEntry> = files
+                .into_iter()
+                .map(|(name, data)| TreeEntry {
+                    name: name.into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: write(&Object::Blob(Blob { data })),
+                })
+                .collect();
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            let tree = write(&Object::Tree(Tree { entries }));
+            write(&Object::Commit(Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::ed25519([1; 32]),
+                [1; 32],
+                b"files".to_vec(),
+                1_700_000_000,
+                [0u8; 64],
+            )))
+        };
+        let base = commit(
+            (0..6).map(|i| (format!("f{i}"), data(i, false))).collect(),
+            vec![],
+        );
+        let mut files: Vec<_> = (0..6).map(|i| (format!("f{i}"), data(i, true))).collect();
+        files.push(("new".to_owned(), data(9, false)));
+        let tip = commit(files, vec![base]);
+
+        let inline =
+            transfer::plan_pack_with(&store, tip, Some(base), encode_delta_candidates_batch)
+                .unwrap();
+        assert_eq!(inline.deltas.len(), 6);
+        let mut expected = Vec::new();
+        build_packs(
+            SealKind::Count,
+            || Ok(PackWriter::new()),
+            |w, _, _| {
+                expected.push(w.finish()?);
+                Ok(false)
+            },
+            &store,
+            inline,
+            UploadLimits::default(),
+            DEFAULT_PACK_PAYLOAD_CAP,
+            &crate::observer::NoopObserver,
+        )
+        .unwrap();
+
+        let remote = kit_transport_memory::MemoryTransport::new();
+        let source = crate::source::TransportSource::new(&remote);
+        let tx = PushContext::new(&source, &crate::observer::NoopObserver, &store);
+        let spooled = tx.deltas.plan(&store, tip, Some(base)).unwrap();
+        assert!(
+            spooled
+                .deltas
+                .iter()
+                .all(|d| matches!(d.stream, transfer::DeltaBytes::Spooled { .. }))
+        );
+        let keys = build_and_upload_packs(
+            &tx,
+            "refs/heads/main",
+            &store,
+            spooled,
+            DEFAULT_PACK_PAYLOAD_CAP,
+            UploadLimits::default(),
+        )
+        .unwrap();
+
+        let sent: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| {
+                kit_core::protocol::Transport::download_blob(
+                    &remote,
+                    &PackKey::from_hash(*key),
+                    None,
+                    u64::MAX,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(sent, expected);
+        let expected_keys: Vec<Hash> = expected.iter().map(|p| pack::pack_key(p)).collect();
+        assert_eq!(keys, expected_keys);
+    }
+
+    #[test]
+    fn a_stored_pack_is_skipped_only_at_its_own_length_from_the_check_size_on_a_remote_with_no_tickets()
+     {
+        use kit_core::protocol::Transport as _;
+        let remote = kit_transport_memory::MemoryTransport::new();
+        let source = crate::source::TransportSource::new(&remote);
+        let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+        let key = PackKey::new([7; 32]);
+        let ticketed = UploadLimits {
+            data_packs_per_advance: Some(4),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        let none = UploadLimits::default();
+        let check = |len, limits| already_stored(&tx, &key, len, "refs/heads/main", limits);
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+
+        // Not stored: every size uploads.
+        assert!(!check(min, none));
+        // A short pack under the key, whatever the local length, uploads.
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
+        assert!(!check(min, none));
+        assert!(!check(min + 1, none));
+        // The whole pack is there: skipped, from the check size on.
+        let whole = vec![0u8; usize::try_from(min).unwrap()];
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(&whole), &key, None)
+            .unwrap();
+        assert!(check(min, none));
+        // A longer or shorter pack under the key is not the local pack.
+        assert!(!check(min + 1, none));
+        assert!(!check(min - 1, none));
+        // A ticketed remote is never asked.
+        assert!(!check(min, ticketed));
+    }
+
+    #[test]
+    fn a_stored_pack_of_unknown_length_or_a_failing_check_is_uploaded() {
+        struct Source {
+            answer: Result<Option<u64>, SourceError>,
+        }
+        impl RemoteSource for Source {
+            fn pack_len(&self, _: &PackKey, _: &str) -> Result<Option<u64>, SourceError> {
+                match &self.answer {
+                    Ok(len) => Ok(*len),
+                    Err(_) => Err(SourceError::ProtocolError),
+                }
+            }
+            fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+                unimplemented!()
+            }
+            fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+                unimplemented!()
+            }
+            fn download_pack(
+                &self,
+                _: &PackKey,
+                _: &str,
+                _: &mut dyn kit_core::protocol::PackSink,
+            ) -> Result<(), SourceError> {
+                unimplemented!()
+            }
+        }
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+        let key = PackKey::new([7; 32]);
+        let stored = |answer| {
+            let source = Source { answer };
+            let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+            already_stored(&tx, &key, min, "refs/heads/main", UploadLimits::default())
+        };
+        assert!(stored(Ok(Some(min))));
+        // A transport that cannot give the length, a missing pack and a failed
+        // check all upload.
+        assert!(!stored(Ok(None)));
+        assert!(!stored(Err(SourceError::ProtocolError)));
+    }
+
     #[test]
     fn a_sealed_pack_longer_than_the_advertised_limit_is_refused() {
         let (id, bytes) = blob(&vec![7; 300]);
         let seal = |max_pack_bytes| {
             let mut w = PackWriter::new_raw_only();
             w.push_raw(id, &bytes).unwrap();
-            let mut keys = Vec::new();
             let limits = UploadLimits {
                 max_pack_bytes: Some(max_pack_bytes),
                 ..UploadLimits::default()
             };
-            seal_pack(
-                PackSink::Count,
-                &mut w,
-                &mut keys,
-                &mut 0,
-                limits,
-                &crate::observer::NoopObserver,
-            )
+            check_sealed(w.finish().unwrap().len() as u64, limits, 0)
         };
         let exact = serialized_bound(bytes.len() as u64, 1);
         assert!(seal(exact).is_ok());
@@ -1523,7 +2060,7 @@ mod tests {
         transfer::PlannedDelta {
             target: [salt; 32],
             base,
-            stream,
+            stream: stream.into(),
         }
     }
 
@@ -1555,7 +2092,7 @@ mod tests {
             let mut count = 0;
             for &(len, actual) in entries {
                 let add = Incoming::raw(len, if real { actual } else { len });
-                if fill.seals_before(add, 3 << 30, None, 7) {
+                if fill.seals_before(add, 3 << 30, protocol::PACK_BODY_LIMIT, 7) {
                     count += 1;
                     fill = PackFill::default();
                 }
@@ -1708,13 +2245,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_batch_fans_out_by_entries_or_by_bytes() {
+        let threshold = super::pack_fanout_threshold();
+        let min = super::PACK_FANOUT_MIN_BYTES;
+        assert!(super::batch_fans_out(threshold, 0));
+        assert!(!super::batch_fans_out(threshold - 1, min - 1));
+        // A batch the byte cap cut short: 255 objects of 256 KiB on 32
+        // threads stay one entry under the entry threshold.
+        assert!(super::batch_fans_out(
+            threshold - 1,
+            super::PUSH_BATCH_BYTES
+        ));
+        assert!(super::batch_fans_out(2, min));
+        // One entry has nothing to share with another thread.
+        assert!(!super::batch_fans_out(1, super::PUSH_BATCH_BYTES));
+    }
+
     // =================================================================
     // `prepare_raw_batch` / `prepare_delta_batch` — order preservation
     // and error propagation across BOTH the sequential and the rayon
-    // branch. `pack_fanout_threshold()` is read directly (rather than
-    // hardcoding a count) so a chunk built at exactly that length
-    // reliably lands in the parallel branch regardless of how many
-    // cores the test happens to run on.
+    // branch, for one entry and for several.
     // =================================================================
 
     fn store() -> (tempfile::TempDir, ObjectStore) {
@@ -1727,13 +2278,17 @@ mod tests {
     #[test]
     fn prepare_raw_batch_preserves_order_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let hashes: Vec<kit_core::hash::Hash> = (0..n)
                 .map(|i| store.write(format!("raw entry #{i}").as_bytes()).unwrap())
                 .collect();
-            let prepared = super::prepare_raw_batch(&store, &hashes).expect("prepare raw batch");
+            let prepared =
+                super::prepare_raw_batch(&store, &hashes, parallel).expect("prepare raw batch");
             assert_eq!(
-                prepared.iter().map(PreparedRaw::hash).collect::<Vec<_>>(),
+                prepared
+                    .iter()
+                    .map(|(raw, _)| raw.hash())
+                    .collect::<Vec<_>>(),
                 hashes,
                 "prepare_raw_batch must preserve input order at n={n}"
             );
@@ -1743,7 +2298,7 @@ mod tests {
     #[test]
     fn prepare_raw_batch_propagates_a_missing_object_error_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let mut hashes: Vec<kit_core::hash::Hash> = (0..n.saturating_sub(1))
                 .map(|i| store.write(format!("raw entry #{i}").as_bytes()).unwrap())
                 .collect();
@@ -1752,7 +2307,7 @@ mod tests {
             // surface through `prepare_raw_batch` rather than being
             // silently dropped or panicking on either branch.
             hashes.push(kit_core::hash::hash(b"never written"));
-            let err = super::prepare_raw_batch(&store, &hashes).expect_err(
+            let err = super::prepare_raw_batch(&store, &hashes, parallel).expect_err(
                 "a missing object must fail prepare_raw_batch instead of being dropped",
             );
             assert!(matches!(
@@ -1767,16 +2322,16 @@ mod tests {
     #[test]
     fn prepare_delta_batch_preserves_order_sequential_and_parallel() {
         use kit_core::transfer::PlannedDelta;
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let deltas: Vec<PlannedDelta> = (0..n)
                 .map(|i| PlannedDelta {
                     target: kit_core::hash::hash(format!("target #{i}").as_bytes()),
                     base: kit_core::hash::hash(format!("base #{i}").as_bytes()),
-                    stream: format!("delta stream #{i}").into_bytes(),
+                    stream: format!("delta stream #{i}").into_bytes().into(),
                 })
                 .collect();
             let expected_bases: Vec<_> = deltas.iter().map(|d| d.base).collect();
-            let prepared = super::prepare_delta_batch(deltas);
+            let prepared = super::prepare_delta_batch(deltas, parallel).unwrap();
             assert_eq!(
                 prepared.iter().map(PreparedDelta::base).collect::<Vec<_>>(),
                 expected_bases,
@@ -1821,7 +2376,7 @@ mod tests {
                 .map(|&c| {
                     transfer::encode_delta_candidate(&store, c)
                         .expect("encode delta candidate")
-                        .map(|p| p.stream)
+                        .map(|p| p.stream.into_vec().unwrap())
                 })
                 .collect();
             assert!(
@@ -1833,7 +2388,7 @@ mod tests {
                 super::encode_delta_candidates_batch(&store, &candidates)
                     .expect("encode delta candidates batch")
                     .into_iter()
-                    .map(|r| r.map(|p| p.stream))
+                    .map(|r| r.map(|p| p.stream.into_vec().unwrap()))
                     .collect();
             assert_eq!(
                 actual, expected,
@@ -1899,11 +2454,13 @@ mod tests {
                 uses,
             ));
         }
-        // Only one of the two repeated 128-byte bases fits. The 1 KiB
-        // base exceeds the budget and the 64-byte base is used only once.
-        let cache = super::cache_delta_bases(&store, &candidates, 192).unwrap();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        // One repeated base fits, including when it fills the entire budget.
+        // The 1 KiB base exceeds either budget and the 64-byte base is used once.
+        for byte_budget in [128, 192] {
+            let cache = super::cache_delta_bases(&store, &candidates, byte_budget).unwrap();
+            assert_eq!(cache.len(), 1);
+            assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        }
     }
 
     #[test]

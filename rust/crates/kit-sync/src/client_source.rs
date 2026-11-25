@@ -19,7 +19,7 @@ use kit_client::{
     RequestPolicy, Signer,
 };
 use kit_core::hash::Hash;
-use kit_core::protocol::PackKey;
+use kit_core::protocol::{PackBody, PackKey, PackSink};
 use kit_core::refs::Ref;
 
 use crate::SourceError;
@@ -143,6 +143,7 @@ fn source_error(error: ClientError) -> SourceError {
         // HttpTransport does not classify its string errors. Refused redirects
         // and malformed/oversized responses must not become transient failures.
         ClientError::Connection(_) => SourceError::ServerError { status: 503 },
+        ClientError::ServerStatus { status } => SourceError::ServerError { status },
         ClientError::RequestTimeout(cause) => SourceError::RemoteError(cause),
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
         ClientError::AdmissionRequired(challenges) => SourceError::AdmissionRequired { challenges },
@@ -157,11 +158,15 @@ fn source_error(error: ClientError) -> SourceError {
         ClientError::ReservedHeader(name) => SourceError::ReservedHeader(name),
         ClientError::EnvelopeExpired => SourceError::EnvelopeExpired,
         ClientError::Deadline => SourceError::Deadline,
+        // A local failure: the caller's sink, or reading the pack to send.
+        // The sink's owner reports its own error first.
+        ClientError::Sink(_) | ClientError::Pack(kit_core::pack::PackError::Io(_)) => {
+            SourceError::ProtocolError
+        }
         ClientError::Limit(_)
         | ClientError::Invalid(_)
         | ClientError::Pack(_)
         | ClientError::Packlist(_)
-        | ClientError::Sink(_)
         | ClientError::Signature { .. } => SourceError::InvalidResponse,
         // A future unclassified client variant is terminal, never retryable.
         other => SourceError::RemoteError(other.to_string()),
@@ -196,20 +201,40 @@ impl<
         Ok(self)
     }
 
-    /// Download a pack without a read-your-writes ref hint.
+    /// Download a pack into `sink` without a read-your-writes ref hint, as
+    /// [`RemoteSource::download_pack`] does with one.
     ///
     /// # Errors
-    /// Transport, remote, size or content-integrity failures.
-    pub fn download_pack_unhinted(&self, key: &PackKey) -> Result<Vec<u8>, SourceError> {
+    /// Transport, remote or size failures, or the sink's failure.
+    pub fn download_pack_unhinted(
+        &self,
+        key: &PackKey,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
+        self.download_into(key, None, kit_core::protocol::PACK_BODY_LIMIT, sink)
+    }
+
+    /// Stream a pack into `sink`. The client holds one bounded frame and no
+    /// pack bytes, and the sink's owner checks the key. A sink that has
+    /// failed ends the download: [`ClientSource::write_call`] never retries
+    /// a local failure, and kit-client never falls back on one.
+    fn download_into(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
         self.write_call("DownloadPack", false, None, |identity| {
             self.executor.block_on(self.client.download_pack(
                 &key.into_hash(),
-                None,
-                kit_core::protocol::PACK_BODY_LIMIT,
+                ref_hint,
+                max,
+                &mut *sink,
                 identity,
             ))
         })
-        .map(|reply| reply.value)
+        .map(|_| ())
     }
 
     /// Test pack membership without a ref hint.
@@ -245,6 +270,19 @@ impl<
 
     fn list_branches_with_page_limit(&self, max_pages: u32) -> Result<Vec<Ref>, SourceError> {
         self.list_refs_with_page_limit("refs/heads/", max_pages)
+    }
+
+    /// Delete the ref `name` if it holds `expected`: `UpdateRef` with
+    /// `delete` (SPEC-TRANSPORT-CONNECT §7.8). Another value or an absent ref
+    /// is [`SourceError::RefConflict`].
+    ///
+    /// # Errors
+    /// Writes are disabled, the ref moved, or the remote refused.
+    pub fn delete_ref(&self, name: &str, expected: &Hash) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_delete_ref(name, expected)
     }
 
     /// List every ref under `prefix`, following bounded, ordered pages.
@@ -307,32 +345,44 @@ impl<
     R: WriteRecovery + ?Sized,
 > RemoteSource for ClientSource<'_, T, S, C, E, O, P, R>
 {
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        self.pack_exists_via_ref(key, hint)
+    }
+    fn supports_attestations(&self) -> bool {
+        self.server_info()
+            .is_some_and(|info| info.supports_attestations == Some(true))
+    }
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
+        self.write_attestmap_committing(condition, tip, keys)
+    }
     fn supports_push(&self) -> bool {
         self.client.supports_writes()
     }
 
-    fn upload_pack_via_ref(
+    /// Streams the pack from its body: each request, part and retry reads
+    /// the body again, and the client holds one chunk at a time.
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        self.write_upload(bytes, key, name)
+        self.write_upload(pack, key, head_ref)
     }
 
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        name: &str,
-    ) -> Result<(), SourceError> {
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, head_ref: &str) -> Result<(), SourceError> {
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        self.write_upload(bytes, key, name)
+        self.write_upload(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
 
     fn update_ref(
@@ -371,8 +421,34 @@ impl<
         )
     }
 
+    /// One `AdvanceRefs` with `delete`, or `UpdateRef` with `delete` for a
+    /// head without a chain ref (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_delete_refs(head, head_expected, map, map_expected)
+    }
+
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.write_upload_limits()
+    }
+
+    fn inspection_max_objects(&self) -> Option<u64> {
+        self.write_info()
+            .and_then(|info| info.inspection_max_objects)
+            .map(u64::from)
+    }
+
+    /// A Connect server's listing may lag a write.
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Eventual
     }
 
     fn supports_atomic_advance(&self) -> bool {
@@ -387,6 +463,10 @@ impl<
         self.list_branches_with_page_limit(kit_core::ref_listing::MAX_PAGES)
     }
 
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        Self::list_refs(self, prefix)
+    }
+
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         match self.write_call("ReadRef", false, None, |identity| {
             self.executor.block_on(self.client.read_ref(name, identity))
@@ -397,28 +477,28 @@ impl<
         }
     }
 
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.write_call("DownloadPack", false, None, |identity| {
-            self.executor.block_on(self.client.download_pack(
-                &key.into_hash(),
-                Some(ref_name),
-                NODE_LIMIT,
-                identity,
-            ))
-        })
-        .map(|reply| reply.value)
+    /// A node is at most 1 MiB, held in memory. The caller
+    /// checks it against its key.
+    fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
+        let mut sink = kit_core::protocol::MemorySink::new(NODE_LIMIT);
+        self.download_into(key, Some(ref_hint), NODE_LIMIT, &mut sink)?;
+        Ok(sink.into_bytes()?)
     }
 
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.write_call("DownloadPack", false, None, |identity| {
-            self.executor.block_on(self.client.download_pack(
-                &key.into_hash(),
-                Some(ref_name),
-                kit_core::protocol::PACK_BODY_LIMIT,
-                identity,
-            ))
-        })
-        .map(|reply| reply.value)
+    /// Streams the pack into `sink` as it arrives (see
+    /// [`ClientSource::download_pack_unhinted`]).
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: &str,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
+        self.download_into(
+            key,
+            Some(ref_hint),
+            kit_core::protocol::PACK_BODY_LIMIT,
+            sink,
+        )
     }
 
     fn repository_address(&self) -> Option<(String, String)> {
@@ -533,8 +613,12 @@ mod tests {
         let key = PackKey::from_hash([4; 32]);
         assert!(!source.supports_push());
         for result in [
-            source.upload_pack_via_ref(&[0], &key, "refs/heads/main"),
-            source.upload_blob_via_ref(&[0], &key, "refs/heads/main"),
+            source.upload_pack(
+                &kit_core::protocol::SliceBody(&[0]),
+                &key,
+                "refs/heads/main",
+            ),
+            source.upload_blob(&[0], &key, "refs/heads/main"),
             source.update_ref(
                 "refs/heads/main",
                 kit_core::refs::RefWriteCondition::Missing,
@@ -641,6 +725,39 @@ mod tests {
         };
         assert_eq!(challenges.www_authenticate, ["Admission opaque"]);
         assert_eq!(challenges.admission_required, ["opaque-admission"]);
+    }
+
+    #[test]
+    fn an_edge_error_page_is_transient_and_a_client_error_page_is_a_refusal() {
+        use crate::FailureClass;
+        for (status, body, class) in [
+            (503, "<html>bad gateway</html>", FailureClass::Transient),
+            (500, "oops", FailureClass::Transient),
+            (429, "slow down", FailureClass::Transient),
+            (428, "<html>precondition</html>", FailureClass::Refusal),
+            (404, "<html>missing</html>", FailureClass::Refusal),
+            (400, "<html>bad request</html>", FailureClass::Refusal),
+        ] {
+            let mut response = failure_response(body, None);
+            *response.status_mut() = http::StatusCode::from_u16(status).unwrap();
+            response
+                .headers_mut()
+                .insert("content-type", "text/html".parse().unwrap());
+            let transport = FailureResponse(RefCell::new(Some(response)));
+            let dest =
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+            let client = Client::anonymous(&transport, dest);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            let error = source.list_branches().unwrap_err();
+            assert_eq!(error.class(), class, "{status}: {error:?}");
+            match (class, error) {
+                (FailureClass::Transient, SourceError::ServerError { status: seen }) => {
+                    assert_eq!(seen, status);
+                }
+                (FailureClass::Refusal, SourceError::InvalidResponse) => (),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 
     #[test]

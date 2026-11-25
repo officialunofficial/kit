@@ -19,9 +19,9 @@
 //! branch-and-collect boilerplate itself, for the two shapes common to
 //! more than one call site (by-reference, `Fn(&T[, bool]) -> U`/
 //! `Result<U, E>`, output in input order). Not every fan-out fits: a
-//! few sites need a different shape on purpose —
-//! `remote_dispatch::mod::prepare_delta_batch` consumes its input by
-//! value (`into_par_iter`, avoiding a clone `&[T]` would force), and
+//! few sites need a different shape on purpose — the push pack batches
+//! (`push::prepare_raw_batch` and `push::prepare_delta_batch`) fan out by
+//! entry count or by batch bytes, so they choose the path themselves, and
 //! `remote_dispatch::packmap::verify_new_object_signatures` chunks the
 //! parallel path deliberately (bounding wasted work past a hostile
 //! fetch's first bad signature — see that function's own doc). Forcing
@@ -73,10 +73,12 @@ where
 /// respect, modulo already-dispatched parallel work still running to
 /// completion — see `verify_new_object_signatures`'s doc for why that
 /// distinction matters enough to keep it bespoke there).
-pub fn try_map_seq_or_par<T, U, E>(
-    items: &[T],
+///
+/// The result may borrow from `items`.
+pub fn try_map_seq_or_par<'a, T, U, E>(
+    items: &'a [T],
     threshold: usize,
-    f: impl Fn(&T) -> Result<U, E> + Sync + Send,
+    f: impl Fn(&'a T) -> Result<U, E> + Sync + Send,
 ) -> Result<Vec<U>, E>
 where
     T: Sync,

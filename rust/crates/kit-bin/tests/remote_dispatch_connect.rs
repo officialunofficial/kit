@@ -180,6 +180,41 @@ impl TestService {
         }
         Ok(())
     }
+
+    /// `AdvanceRefs` with `delete`: both refs under `MATCH`, both checked
+    /// (the packmap's conflict reported first) before the head, then the
+    /// packmap, goes.
+    fn delete_refs(
+        &self,
+        msg: generated::AdvanceRefsRequest,
+    ) -> ServiceResult<generated::AdvanceRefsResponse> {
+        let expected = |expectation, id| match wire_to_condition(expectation, id)? {
+            RefWriteCondition::Match(expected) => Ok(expected),
+            _ => Err(ConnectError::invalid_argument("a delete needs MATCH")),
+        };
+        let head = msg.head_ref.unwrap_or_default();
+        let head_expected = expected(msg.head_expectation, msg.head_expected_id)?;
+        let map = msg.packmap_ref.unwrap_or_default();
+        let map_expected = expected(msg.packmap_expectation, msg.packmap_expected_id)?;
+        let read = |name: &str| self.inner.read_ref(name).map_err(to_connect_error);
+        let outcome = if read(&map)? != Some(map_expected) {
+            generated::AdvanceOutcome::PackmapConflict
+        } else if read(&head)? != Some(head_expected) {
+            generated::AdvanceOutcome::HeadConflict
+        } else {
+            self.inner
+                .delete_ref(&head, &head_expected)
+                .map_err(to_connect_error)?;
+            self.inner
+                .delete_ref(&map, &map_expected)
+                .map_err(to_connect_error)?;
+            generated::AdvanceOutcome::Committed
+        };
+        Ok(Response::new(generated::AdvanceRefsResponse {
+            outcome: Some(outcome.into()),
+            ..Default::default()
+        }))
+    }
 }
 
 #[allow(refining_impl_trait)]
@@ -216,6 +251,12 @@ impl generated::TransportService for TestService {
                 part_size: Some(8 << 20),
                 max_parts: Some(512),
                 max_list_refs_page_size: Some(1000),
+                supports_attestations: Some(
+                    self.inner
+                        .read_ref(kit_core::refs::ATTESTMAP_REF)
+                        .unwrap()
+                        .is_some(),
+                ),
                 atomic_advance: Some(true),
                 begin_upload_threshold_bytes: Some(0),
                 ..Default::default()
@@ -333,7 +374,7 @@ impl generated::TransportService for TestService {
         let bytes: Vec<u8> = parts.into_values().flatten().collect();
         let key = PackKey::new(kit_core::hash::hash(&bytes));
         self.inner
-            .upload_pack(&bytes, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&bytes), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::CompleteUploadResponse::default()))
     }
@@ -385,6 +426,22 @@ impl generated::TransportService for TestService {
         let msg = request.to_owned_message();
         let name = msg.name.unwrap_or_default();
         let condition = wire_to_condition(msg.expectation, msg.expected_id)?;
+        if msg.delete == Some(true) {
+            let RefWriteCondition::Match(expected) = condition else {
+                return Err(ConnectError::invalid_argument("a delete needs MATCH"));
+            };
+            self.inner
+                .delete_ref(&name, &expected)
+                .map_err(to_connect_error)?;
+            return Ok(Response::new(generated::UpdateRefResponse::default()));
+        }
+        if name == kit_core::refs::ATTESTMAP_REF {
+            assert_eq!(msg.ticket_ids.len(), 2);
+            for id in &msg.ticket_ids {
+                let key: Hash = id.as_slice().try_into().unwrap();
+                assert!(self.inner.pack_exists(&PackKey::new(key), None).unwrap());
+            }
+        }
         let new_id = to_hash(msg.new_id)?;
         self.inner
             .update_ref(&name, condition, &new_id)
@@ -409,6 +466,9 @@ impl generated::TransportService for TestService {
             );
         }
         let msg = request.to_owned_message();
+        if msg.delete == Some(true) {
+            return self.delete_refs(msg);
+        }
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
         let head_new = to_hash(msg.head_new_id)?;
@@ -472,7 +532,10 @@ impl generated::TransportService for TestService {
         self.capture(&ctx, "PackExists")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
+        let exists = self
+            .inner
+            .pack_exists(&key, None)
+            .map_err(to_connect_error)?;
         Ok(Response::new(generated::PackExistsResponse {
             exists: Some(exists),
             ..Default::default()
@@ -529,7 +592,7 @@ impl generated::TransportService for TestService {
         }
         let key = PackKey::new(to_hash(Some(pack_id))?);
         self.inner
-            .upload_pack(&buf, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&buf), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::UploadPackResponse::default()))
     }
@@ -542,7 +605,10 @@ impl generated::TransportService for TestService {
         self.capture(&ctx, "DownloadPack")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
+        let bytes = self
+            .inner
+            .download_blob(&key, None, u64::MAX)
+            .map_err(to_connect_error)?;
 
         #[allow(clippy::cast_possible_truncation)]
         let total_bytes = bytes.len() as u64;
@@ -871,7 +937,10 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     let dst = tempfile::tempdir().unwrap();
     assert!(run_in(dst.path(), &["init"]).status.success());
     let tx = remote_dispatch::open(&url).expect("open kit+http (pull)");
-    let n = libkit::transfer::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
+    let n = libkit::transfer::pull_all(dst.path(), tx.as_ref(), "default", None)
+        .expect("pull")
+        .fetch
+        .branches_fetched;
     assert_eq!(n, 1, "one remote branch must be fetched");
     drop(tx);
 
@@ -1393,14 +1462,14 @@ fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<kit_core::Hash, V
     let mut node = transport.read_ref("refs/kit/packmap/main").unwrap();
     while let Some(id) = node {
         let body = transport
-            .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+            .download_blob(&PackKey::from(id), Some("refs/heads/main"), u64::MAX)
             .unwrap();
         let decoded = kit_core::transfer::decode_packlist(&body).unwrap();
         for pack in decoded.packs {
             bytes.insert(
                 pack,
                 transport
-                    .download_pack_via_ref(&PackKey::from(pack), "refs/heads/main")
+                    .download_blob(&PackKey::from(pack), Some("refs/heads/main"), u64::MAX)
                     .unwrap(),
             );
         }
@@ -1415,6 +1484,7 @@ fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<kit_core::Hash, V
 fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() {
     use kit_core::{layout::RepoLayout, refs, store::ObjectStore, to_hex};
 
+    // Compare code-transfer bytes independently of optional server capabilities.
     let template = common::Repo::new();
     template.commit_file("file.txt", b"first\n", "first");
     let layout = RepoLayout::single(template.path());
@@ -1485,7 +1555,14 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         let checkout_root = tempfile::tempdir().unwrap();
         let cloned = run(
             checkout_root.path(),
-            &["clone", "-o", "origin", &endpoint, "checkout"],
+            &[
+                "clone",
+                "--no-attestations",
+                "-o",
+                "origin",
+                &endpoint,
+                "checkout",
+            ],
         );
         assert_eq!(cloned.status.code(), Some(0), "{scheme}: {cloned:?}");
         transcript.push(endpoint_transcript(&cloned, &endpoint));
@@ -1515,7 +1592,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         );
         transcript.push(endpoint_transcript(&appended, &endpoint));
 
-        let fetched = run(&checkout, &["fetch", "origin"]);
+        let fetched = run(&checkout, &["fetch", "--no-attestations", "origin"]);
         assert_eq!(fetched.status.code(), Some(0), "{scheme}: {fetched:?}");
         transcript.push(endpoint_transcript(&fetched, &endpoint));
         assert_eq!(
@@ -1530,7 +1607,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
             std::fs::read(checkout.join("file.txt")).unwrap(),
             b"first\n"
         );
-        let pulled = run(&checkout, &["pull", "origin"]);
+        let pulled = run(&checkout, &["pull", "--no-attestations", "origin"]);
         assert_eq!(pulled.status.code(), Some(0), "{scheme}: {pulled:?}");
         transcript.push(endpoint_transcript(&pulled, &endpoint));
         assert_eq!(
@@ -1560,11 +1637,12 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         assert!(rejected.stdout.is_empty());
         transcript.push(endpoint_transcript(&rejected, &endpoint));
         if let Some(proxy) = &proxy {
-            // The up-to-date and rejected pushes resolve from local tracking
-            // state. The other five commands each make several remote RPCs.
+            // Each of the seven commands makes its remote RPCs over one
+            // connection. The up-to-date and rejected pushes read the
+            // remote's head too.
             assert_eq!(
                 proxy.connections(),
-                5,
+                7,
                 "each CLI operation must reuse its TLS connection across RPCs"
             );
         }
@@ -1680,7 +1758,7 @@ fn cli_https_latency_comparison() {
             let mut depth = 0;
             while let Some(id) = node {
                 let bytes = backend
-                    .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+                    .download_blob(&PackKey::from(id), Some("refs/heads/main"), u64::MAX)
                     .unwrap();
                 node = kit_core::transfer::decode_packlist(&bytes).unwrap().prev;
                 depth += 1;
@@ -1792,7 +1870,7 @@ struct ResetBeforeAdvance<'a> {
 impl ResetBeforeAdvance<'_> {
     fn interleave(&self) {
         if !self.fired.swap(true, Ordering::SeqCst) {
-            libkit::transfer::push_branch_with_depth(
+            common::push_branch_with_depth(
                 self.competing,
                 self.competing_store,
                 "main",
@@ -1802,21 +1880,38 @@ impl ResetBeforeAdvance<'_> {
             )
             .unwrap();
             let key = self.competing.read_ref(PACKMAP).unwrap().unwrap();
-            let bytes = self.competing.download_pack(&PackKey::new(key)).unwrap();
+            let bytes = self
+                .competing
+                .download_blob(&PackKey::new(key), None, u64::MAX)
+                .unwrap();
             assert!(decode_packlist(&bytes).unwrap().prev.is_none());
         }
     }
 }
 
 impl Transport for ResetBeforeAdvance<'_> {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -1826,6 +1921,9 @@ impl Transport for ResetBeforeAdvance<'_> {
     ) -> TransportResult<()> {
         self.interleave();
         self.inner.update_ref(name, condition, tip)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
@@ -1926,7 +2024,7 @@ fn run_rebaseline_race(appending: bool) {
     local.commit_file("f.txt", b"base", "base");
     let base = head(&local);
     let store = ObjectStore::open(&RepoLayout::single(local.path())).unwrap();
-    libkit::transfer::push_branch_with_depth(
+    common::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -1937,7 +2035,7 @@ fn run_rebaseline_race(appending: bool) {
     .unwrap();
     local.commit_file("f.txt", b"remote", "remote");
     let remote = head(&local);
-    libkit::transfer::push_branch_with_depth(
+    common::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -1972,15 +2070,8 @@ fn run_rebaseline_race(appending: bool) {
             .count()
     };
     let before = advances(&calls);
-    libkit::transfer::push_branch_with_depth(
-        &racing,
-        &store,
-        "main",
-        target,
-        RefWriteCondition::Any,
-        64,
-    )
-    .unwrap();
+    common::push_branch_with_depth(&racing, &store, "main", target, RefWriteCondition::Any, 64)
+        .unwrap();
     assert!(racing.fired.load(Ordering::SeqCst));
     assert_eq!(
         advances(&calls) - before,
@@ -2023,4 +2114,346 @@ fn connect_head_only_force_replans_after_atomic_rebaseline() {
 #[test]
 fn connect_appending_force_replans_after_atomic_rebaseline() {
     run_rebaseline_race(true);
+}
+
+/// `push --tags` to a ticketed server sends each tag and its tag map in one
+/// advance; a clone takes the tags and the signed one verifies.
+#[test]
+fn cli_ticketed_push_tags_then_clone_verifies() {
+    let (src, _tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let kit = |dir: &std::path::Path, args: &[&str]| {
+        let out = Command::new(kit_bin())
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", xdg.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "kit {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    kit(src.path(), &["push", "origin"]);
+    kit(src.path(), &["tag", "v1"]);
+    std::fs::write(src.path().join("hello.txt"), b"hello again\n").unwrap();
+    kit(src.path(), &["add", "hello.txt"]);
+    kit(src.path(), &["commit", "-m", "second"]);
+    kit(src.path(), &["tag", "-s", "v2", "-m", "release 2"]);
+    calls.lock().unwrap().clear();
+
+    let out = kit(src.path(), &["push", "origin", "--tags"]);
+
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(" * [new tag]         v1 -> v1"), "{err}");
+    assert!(err.contains(" * [new tag]         v2 -> v2"), "{err}");
+    {
+        let calls = calls.lock().unwrap();
+        assert!(calls.iter().any(|call| call.procedure == "BeginUpload"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.procedure == "AdvanceRefs")
+                .count(),
+            2,
+            "one advance per tag: {calls:?}"
+        );
+    }
+    let layout = kit_core::layout::RepoLayout::single(src.path());
+    for t in ["v1", "v2"] {
+        assert_eq!(
+            backend.read_ref(&format!("refs/tags/{t}")).unwrap(),
+            kit_core::refs::read_tag(&layout, t).unwrap()
+        );
+        assert!(
+            backend
+                .read_ref(&format!("refs/kit/tagmap/{t}"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // The reader clones with no key of its own.
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("trusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let clone = dst.path().join("clone");
+    kit(
+        dst.path(),
+        &["clone", "-o", "origin", &url, clone.to_str().unwrap()],
+    );
+    let cloned = kit_core::layout::RepoLayout::single(&clone);
+    for t in ["v1", "v2"] {
+        assert_eq!(
+            kit_core::refs::read_tag(&cloned, t).unwrap(),
+            kit_core::refs::read_tag(&layout, t).unwrap()
+        );
+    }
+    kit(&clone, &["verify", "v2"]);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+/// `push --delete` over Connect deletes a branch and a tag, each with its
+/// chain ref in one `AdvanceRefs`, and drops the branch's tracking ref.
+#[test]
+#[allow(clippy::too_many_lines)] // one server, each delete case in turn
+fn cli_push_delete_removes_a_branch_and_a_tag_with_their_chain_refs() {
+    let (src, _tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let kit = |args: &[&str]| {
+        Command::new(kit_bin())
+            .args(args)
+            .current_dir(src.path())
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", xdg.path())
+            .output()
+            .unwrap()
+    };
+    let ok = |out: &std::process::Output, what: &str| {
+        assert!(
+            out.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ok(&kit(&["push", "origin"]), "push");
+    ok(&kit(&["branch", "topic"]), "branch");
+    ok(&kit(&["push", "origin", "topic"]), "push topic");
+    ok(&kit(&["tag", "v1"]), "tag");
+    ok(&kit(&["push", "origin", "v1"]), "push v1");
+    let layout = kit_core::layout::RepoLayout::single(src.path());
+    let tracking = || kit_core::refs::read_remote_ref(&layout, "origin", "topic").unwrap();
+    assert!(tracking().is_some());
+    for name in [
+        "refs/heads/topic",
+        "refs/kit/packmap/topic",
+        "refs/tags/v1",
+        "refs/kit/tagmap/v1",
+    ] {
+        assert!(backend.read_ref(name).unwrap().is_some(), "{name}");
+    }
+    calls.lock().unwrap().clear();
+
+    let out = kit(&["push", "--delete", "origin", "topic"]);
+    ok(&out, "delete topic");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(" - [deleted]         refs/heads/topic"));
+    let out = kit(&["push", "--format", "json", "--delete", "origin", "v1"]);
+    ok(&out, "delete v1");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["deleted"], "refs/tags/v1");
+
+    for name in [
+        "refs/heads/topic",
+        "refs/kit/packmap/topic",
+        "refs/tags/v1",
+        "refs/kit/tagmap/v1",
+    ] {
+        assert_eq!(backend.read_ref(name).unwrap(), None, "{name}");
+    }
+    assert!(backend.read_ref("refs/heads/main").unwrap().is_some());
+    assert_eq!(tracking(), None);
+    assert!(kit_core::refs::read_tag(&layout, "v1").unwrap().is_some());
+    {
+        let calls = calls.lock().unwrap();
+        let writes: Vec<_> = calls
+            .iter()
+            .map(|call| call.procedure)
+            .filter(|p| matches!(*p, "AdvanceRefs" | "UpdateRef"))
+            .collect();
+        assert_eq!(writes, ["AdvanceRefs", "AdvanceRefs"], "{calls:?}");
+    }
+
+    // A branch that moved since the last fetch is not deleted.
+    let main = backend.read_ref("refs/heads/main").unwrap().unwrap();
+    let main_map = backend.read_ref("refs/kit/packmap/main").unwrap();
+    let moved = [7u8; 32];
+    backend
+        .update_ref("refs/heads/main", RefWriteCondition::Match(main), &moved)
+        .unwrap();
+    let out = kit(&["push", "--delete", "origin", "main"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("refs/heads/main on the remote is not at the value"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(moved));
+    assert_eq!(backend.read_ref("refs/kit/packmap/main").unwrap(), main_map);
+    assert_eq!(
+        kit_core::refs::read_remote_ref(&layout, "origin", "main").unwrap(),
+        Some(main)
+    );
+
+    // A tag with no tag map goes alone, through `UpdateRef` with `delete`.
+    backend
+        .update_ref("refs/tags/v9", RefWriteCondition::Missing, &main)
+        .unwrap();
+    calls.lock().unwrap().clear();
+    ok(
+        &kit(&["push", "--delete", "origin", "refs/tags/v9"]),
+        "delete v9",
+    );
+    assert_eq!(backend.read_ref("refs/tags/v9").unwrap(), None);
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.procedure == "UpdateRef")
+    );
+
+    // A second delete of the same branch finds no tracking ref to lease on.
+    let out = kit(&["push", "--delete", "origin", "refs/heads/topic"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no tracking ref for 'topic'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+include!("../../kit-sync/tests/support/attestation_fetch.rs");
+
+#[test]
+fn connect_push_publishes_ticketed_attestations_when_code_is_up_to_date() {
+    check_attestation_push(true);
+}
+#[test]
+fn connect_push_without_capability_warns_once_and_keeps_code_success() {
+    check_attestation_push(false);
+}
+fn check_attestation_push(advertised: bool) {
+    let backend = Arc::new(MemoryTransport::new());
+    let (tip, _) = attestation_fetch::code(&*backend);
+    let baseline = kit_core::transfer::encode_packlist(None, &[]).unwrap();
+    let id = kit_core::hash::hash(&baseline);
+    backend
+        .upload_blob(&baseline, &PackKey::new(id), None)
+        .unwrap();
+    if advertised {
+        backend
+            .update_ref(
+                kit_core::refs::ATTESTMAP_REF,
+                RefWriteCondition::Missing,
+                &id,
+            )
+            .unwrap();
+    }
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let transport = signed_transport(&url);
+    let local = tempfile::tempdir().unwrap();
+    let descriptor = kit_sync::CloneRemote {
+        name: "origin".into(),
+        url,
+        kind: "http".into(),
+    };
+    kit_sync::clone(
+        local.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &descriptor,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    let bytes = attestation_fetch::envelope(tip);
+    let layout = RepoLayout::single(local.path());
+    kit_attest::store::save(&layout, &tip, &bytes).unwrap();
+    let mirror = "https://example.org/repo?key=example";
+    let unsafe_envelope = attestation_fetch::git_locator_envelope(tip, "git-bridge", mirror);
+    let (unsafe_id, _) = kit_attest::store::save(&layout, &tip, &unsafe_envelope).unwrap();
+    let mut options = kit_sync::PushOptions::default();
+    options.attestations = true;
+    options.remote_name = "origin";
+    options.target = kit_sync::PushTarget::Branch {
+        local: "main".into(),
+        remote: "main".into(),
+        lease: kit_sync::PushLease::FastForward,
+    };
+    let report = kit_sync::push(
+        local.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &options,
+    )
+    .unwrap();
+    assert_eq!(report.steps, 0);
+    assert_eq!(report.attestations_pushed, usize::from(advertised));
+    assert_eq!(
+        report.attestation_warnings.len(),
+        if advertised { 2 } else { 1 }
+    );
+    if advertised {
+        assert!(report.attestation_warnings.iter().any(|warning| {
+            warning.contains("skipped")
+                && warning.contains(&kit_core::hash::to_hex(&unsafe_id))
+                && !warning.contains(mirror)
+        }));
+    }
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.procedure == "BeginUpload")
+            .count(),
+        if advertised { 2 } else { 0 }
+    );
+    let second = tempfile::tempdir().unwrap();
+    let cloned = kit_sync::clone(
+        second.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &descriptor,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        cloned.pull.fetch.attestations_stored,
+        usize::from(advertised)
+    );
+    let _ = shutdown.send(());
+    handle.join().unwrap();
 }

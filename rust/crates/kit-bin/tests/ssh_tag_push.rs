@@ -1,0 +1,364 @@
+//! `kit push --tags` and `kit push <remote> <tag>` (SPEC-TRANSPORT §7.2).
+//!
+//! The ssh tests run the real `kit` binary against a real `kit serve`,
+//! through a `/bin/sh` stand-in for `ssh`, and clone the result back.
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
+#![cfg(unix)]
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use kit_core::hash::Hash;
+use kit_core::layout::RepoLayout;
+use kit_core::protocol::Transport;
+use kit_core::refs;
+use kit_transport_file::FileTransport;
+
+fn kit_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_kit")
+}
+
+fn ok(out: &Output, what: &str) {
+    assert!(
+        out.status.success(),
+        "{what}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// An `ssh` stand-in that runs `kit serve <path>`.
+fn write_ssh_wrapper(dir: &Path) -> PathBuf {
+    let wrapper = dir.join("fake_ssh.sh");
+    let script = r#"#!/bin/sh
+set -eu
+found=0
+path=""
+for a in "$@"; do
+  if [ "$found" = 2 ]; then
+    path="$a"
+    break
+  fi
+  if [ "$found" = 1 ] && [ "$a" = serve ]; then
+    found=2
+    continue
+  fi
+  if [ "$a" = kit ]; then
+    found=1
+  fi
+done
+if [ -z "$path" ]; then
+  echo "fake_ssh: could not locate 'kit serve <path>' in argv" >&2
+  exit 64
+fi
+printf 'session\n' >> "$KIT_SSH_SESSION_LOG"
+exec "$KIT_SSH_TARGET_BIN" serve "$path"
+"#;
+    fs::write(&wrapper, script).unwrap();
+    let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&wrapper, perms).unwrap();
+    wrapper
+}
+
+/// A source repository with one signed commit on `main`, and an empty
+/// served repository named as the remote `origin` over `kit+ssh://`.
+struct Fixture {
+    work: tempfile::TempDir,
+    xdg: tempfile::TempDir,
+    wrapper: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let work = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let wrapper = write_ssh_wrapper(work.path());
+        let fx = Self { work, xdg, wrapper };
+        let (source, remote) = (fx.source(), fx.remote());
+        for dir in [&source, &remote] {
+            fs::create_dir_all(dir).unwrap();
+            ok(&fx.kit(dir, &["init"]), "init");
+        }
+        ok(&fx.kit(&source, &["keygen"]), "keygen");
+        ok(
+            &fx.kit(&source, &["remote", "add", "origin", &fx.url()]),
+            "remote add",
+        );
+        fx.commit("one");
+        fx
+    }
+
+    /// Run `kit <args>` in `dir`, isolated from the developer's environment,
+    /// with `ssh` standing for `kit serve`.
+    fn kit(&self, dir: &Path, args: &[&str]) -> Output {
+        Command::new(kit_bin())
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_CONFIG_HOME", self.xdg.path())
+            .env("HOME", self.xdg.path())
+            .env("EDITOR", "true")
+            .env("VISUAL", "true")
+            .env("KIT_SSH_PROGRAM", &self.wrapper)
+            .env("KIT_SSH_TARGET_BIN", kit_bin())
+            .env("KIT_SSH_SESSION_LOG", self.work.path().join("sessions"))
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn kit")
+    }
+
+    fn source(&self) -> PathBuf {
+        self.work.path().join("source")
+    }
+
+    fn remote(&self) -> PathBuf {
+        self.work.path().join("remote")
+    }
+
+    fn clone_dir(&self) -> PathBuf {
+        self.work.path().join("clone")
+    }
+
+    fn url(&self) -> String {
+        format!("kit+ssh://e2e@localhost{}", self.remote().display())
+    }
+
+    fn tx(&self) -> FileTransport {
+        FileTransport::new(self.remote())
+    }
+
+    fn commit(&self, text: &str) {
+        let source = self.source();
+        fs::write(source.join("file.txt"), text).unwrap();
+        ok(&self.kit(&source, &["add", "."]), "add");
+        ok(&self.kit(&source, &["commit", "-m", text]), "commit");
+    }
+
+    fn local_tag(dir: &Path, t: &str) -> Option<Hash> {
+        refs::read_tag(&RepoLayout::single(dir), t).unwrap()
+    }
+
+    fn push(&self, args: &[&str]) -> Output {
+        let mut full = vec!["push"];
+        full.extend_from_slice(args);
+        self.kit(&self.source(), &full)
+    }
+}
+
+/// `push --tags` over ssh publishes a lightweight and a signed tag with
+/// their tag maps; a clone over ssh takes both, the signed tag verifies, and
+/// its object is the same bytes as the source's.
+#[test]
+fn tags_pushed_over_ssh_clone_and_verify() {
+    let fx = Fixture::new();
+    let source = fx.source();
+    ok(&fx.push(&["origin"]), "push main");
+    ok(&fx.kit(&source, &["tag", "v1"]), "tag v1");
+    fx.commit("two");
+    ok(
+        &fx.kit(&source, &["tag", "-s", "v2", "-m", "release 2"]),
+        "tag v2",
+    );
+
+    let out = fx.push(&["origin", "--tags"]);
+
+    ok(&out, "push --tags");
+    let err = stderr(&out);
+    assert!(err.contains(" * [new tag]         v1 -> v1"), "{err}");
+    assert!(err.contains(" * [new tag]         v2 -> v2"), "{err}");
+    let tx = fx.tx();
+    for t in ["v1", "v2"] {
+        assert_eq!(
+            tx.read_ref(&format!("refs/tags/{t}")).unwrap(),
+            Fixture::local_tag(&source, t)
+        );
+        assert!(
+            tx.read_ref(&format!("refs/kit/tagmap/{t}"))
+                .unwrap()
+                .is_some()
+        );
+    }
+    let again = fx.push(&["origin", "--tags"]);
+    ok(&again, "push --tags again");
+    assert!(stderr(&again).contains("Everything up-to-date"));
+
+    let clone = fx.clone_dir();
+    ok(
+        &fx.kit(
+            fx.work.path(),
+            &["clone", "-o", "origin", &fx.url(), clone.to_str().unwrap()],
+        ),
+        "clone",
+    );
+    let v2 = Fixture::local_tag(&clone, "v2").unwrap();
+    assert_eq!(Some(v2), Fixture::local_tag(&source, "v2"));
+    assert_eq!(
+        Fixture::local_tag(&clone, "v1"),
+        Fixture::local_tag(&source, "v1")
+    );
+    ok(&fx.kit(&clone, &["verify", "v2"]), "verify v2");
+    let bytes = |dir: &Path| {
+        kit_core::store::ObjectStore::open(&RepoLayout::single(dir))
+            .unwrap()
+            .read(&v2)
+            .unwrap()
+    };
+    assert_eq!(bytes(&clone), bytes(&source));
+}
+
+#[test]
+fn a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag() {
+    const TAGS: usize = 5_001;
+    let fx = Fixture::new();
+    ok(&fx.push(&["origin"]), "push main");
+    let layout = RepoLayout::single(fx.source());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let wire = format!("{}\n", kit_core::hash::to_hex(&tip));
+    fs::create_dir_all(layout.tags_dir()).unwrap();
+    for i in 0..TAGS {
+        fs::write(layout.tags_dir().join(format!("v{i:04}")), &wire).unwrap();
+    }
+    let sessions = fx.work.path().join("sessions");
+    fs::write(&sessions, "").unwrap();
+
+    let out = fx.push(&["origin", "--tags", "--format", "json"]);
+
+    ok(&out, "push --tags across the frame limit");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["tags_pushed"], TAGS);
+    assert_eq!(fs::read_to_string(sessions).unwrap().lines().count(), 2);
+    let tx = fx.tx();
+    let tags = tx.list_refs("refs/tags/").unwrap();
+    let maps = tx.list_refs("refs/kit/tagmap/").unwrap();
+    assert_eq!(tags.len(), TAGS);
+    assert!(tags.iter().all(|tag| tag.hash == Some(tip)));
+    assert_eq!(
+        tags.iter().map(|tag| &tag.name).collect::<Vec<_>>(),
+        maps.iter().map(|map| &map.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_failed_tag_push_reports_the_tag_that_landed() {
+    let fx = Fixture::new();
+    ok(&fx.push(&["origin"]), "push main");
+    let source = fx.source();
+    for tag in ["v1", "v2"] {
+        ok(&fx.kit(&source, &["tag", tag]), "tag");
+    }
+    let remote = fx.remote();
+    let file_url = format!("kit+file://{}", remote.display());
+    ok(
+        &fx.kit(&source, &["remote", "add", "file", &file_url]),
+        "remote add",
+    );
+    let tagmaps = remote.join("refs/kit/tagmap");
+    fs::create_dir_all(&tagmaps).unwrap();
+    // The listing skips this symlink. Publication fails when the second
+    // tag's map would point outside the remote.
+    std::os::unix::fs::symlink(fx.work.path(), tagmaps.join("v2")).unwrap();
+
+    let out = fx.push(&["file", "--tags", "--format", "json"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        fx.tx().read_ref("refs/tags/v1").unwrap(),
+        Fixture::local_tag(&source, "v1")
+    );
+    assert_eq!(fx.tx().read_ref("refs/tags/v2").unwrap(), None);
+    assert!(
+        stderr(&out).contains(" * [new tag]         v1 -> v1"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["tags_pushed"], 1);
+    assert!(json.get("tags_rejected").is_none());
+    assert!(json.get("admission_required").is_none());
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("resolves outside transport root")
+    );
+}
+
+/// A tag push over ssh reads a remote tag listing that is past one frame, in
+/// pages, and pushes the new tag.
+#[test]
+fn a_tag_push_reads_a_remote_tag_listing_past_one_frame() {
+    let fx = Fixture::new();
+    ok(&fx.push(&["origin"]), "push main");
+    // Tags of 200-byte names at the head, written as the ref files a file
+    // root holds: 4,000 of them take about 1 MiB to list.
+    let remote = fx.remote();
+    let wire = fs::read(remote.join("refs/heads/main")).unwrap();
+    let dir = remote.join("refs/tags");
+    fs::create_dir_all(&dir).unwrap();
+    for i in 0..4000 {
+        fs::write(dir.join(format!("{i:0200}")), &wire).unwrap();
+    }
+    ok(&fx.kit(&fx.source(), &["tag", "v1"]), "tag v1");
+
+    let out = fx.push(&["origin", "v1"]);
+
+    ok(&out, "push v1");
+    assert!(
+        stderr(&out).contains(" * [new tag]         v1 -> v1"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(fx.tx().read_ref("refs/tags/v1").unwrap().is_some());
+    assert!(fx.tx().read_ref("refs/kit/tagmap/v1").unwrap().is_some());
+}
+
+/// `kit push <remote> <tag>` pushes that tag alone, by its bare name or its
+/// `refs/tags/` name; a name that is both a branch and a tag is refused.
+#[test]
+fn a_named_tag_pushes_alone_and_an_ambiguous_name_is_refused() {
+    let fx = Fixture::new();
+    let source = fx.source();
+    ok(&fx.push(&["origin"]), "push main");
+    ok(&fx.kit(&source, &["tag", "v1"]), "tag v1");
+    ok(&fx.kit(&source, &["tag", "v2"]), "tag v2");
+
+    let out = fx.push(&["origin", "v1", "--format", "json"]);
+
+    ok(&out, "push origin v1");
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.contains(r#""ok":true"#), "{json}");
+    assert!(json.contains(r#""tags_pushed":1"#), "{json}");
+    assert!(json.contains(r#""tags_rejected":0"#), "{json}");
+    let tx = fx.tx();
+    assert!(tx.read_ref("refs/tags/v1").unwrap().is_some());
+    assert_eq!(tx.read_ref("refs/tags/v2").unwrap(), None);
+    ok(&fx.push(&["origin", "refs/tags/v2"]), "push refs/tags/v2");
+    assert!(tx.read_ref("refs/tags/v2").unwrap().is_some());
+
+    ok(&fx.kit(&source, &["branch", "v1"]), "branch v1");
+    let out = fx.push(&["origin", "v1"]);
+    assert_eq!(out.status.code(), Some(64), "{}", stderr(&out));
+    assert!(stderr(&out).contains("v1"), "{}", stderr(&out));
+
+    let out = fx.push(&["origin", "refs/tags/missing"]);
+    assert_eq!(out.status.code(), Some(65), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("tag 'missing' does not exist"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = fx.push(&["origin", "--tags", "--all"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("cannot be used with"),
+        "{}",
+        stderr(&out)
+    );
+}

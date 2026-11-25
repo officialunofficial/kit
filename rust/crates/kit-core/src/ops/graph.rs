@@ -9,13 +9,13 @@
 //! set: a caller that leaves out an incomplete ancestor set would let
 //! ancestors through.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
 use super::chunk_heads::{LenCache, for_each_checked_chunk};
 use crate::hash::{self, Hash};
 use crate::object::{ChunkedBlob, EntryMode, KitError, Object, ObjectType};
-use crate::store::{ObjectSource, ObjectStore, StoreError};
+use crate::store::{ClosureSource, ObjectSource, ObjectStore, StoreError};
 
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
 /// the history: a walk that ended at a commit it could not read would miss
@@ -366,6 +366,46 @@ where
     check_closure_present_with_cap(store, roots, MAX_REACHABLE, MAX_CHECKED_CHUNKS)
 }
 
+/// Check the full closure and report completed non-chunk objects.
+/// Uses the same bounded chunk memory as [`check_closure_present`].
+///
+/// # Errors
+/// The errors of [`check_closure_present`].
+pub fn check_closure_present_observed(
+    store: &ObjectStore,
+    tip: &Hash,
+    progress: &dyn Fn(usize),
+) -> Result<bool, StoreError> {
+    check_closure_present_observed_from(store, tip, progress)
+}
+
+/// The same closure walk over a read-only object view.
+///
+/// # Errors
+/// The errors of `check_closure_present_observed`.
+#[doc(hidden)]
+pub fn check_closure_present_observed_from(
+    store: &(impl ClosureSource + ?Sized),
+    tip: &Hash,
+    progress: &dyn Fn(usize),
+) -> Result<bool, StoreError> {
+    let hooks = Hooks {
+        progress: Some(progress),
+        ..Hooks::NONE
+    };
+    walk_closure(
+        store,
+        std::iter::once(tip),
+        ClosureMode::History,
+        MAX_REACHABLE,
+        Chunks::Check {
+            memory: MAX_CHECKED_CHUNKS,
+        },
+        &hooks,
+    )
+    .map(|(_, end)| matches!(end, End::Truncated))
+}
+
 /// The most checked chunk ids [`check_closure_present`] remembers, with their
 /// lengths, about 128 MiB: the chunks of about 128 GiB of typical content.
 pub const MAX_CHECKED_CHUNKS: usize = 2_097_152;
@@ -390,8 +430,143 @@ where
         Chunks::Check {
             memory: chunk_memory,
         },
+        &Hooks::NONE,
     )
-    .map(|(_out, truncated)| truncated)
+    .map(|(_out, end)| matches!(end, End::Truncated))
+}
+
+/// What [`check_closure_present_above`] knows of an object before it reads
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Known {
+    /// Nothing: the walk checks it.
+    Unknown,
+    /// Its whole closure is present: the walk neither checks nor walks it.
+    Present,
+    /// Its closure lacks an object: the walk ends there as at a missing one.
+    Missing,
+}
+
+/// How [`check_closure_present_above`] ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Every object down to the [`Known::Present`] ones is present. Holds the
+    /// objects the walk checked, chunks aside.
+    Complete(BTreeSet<Hash>),
+    /// `cap` cut the walk, so objects past it went unchecked. Holds how many
+    /// objects it checked.
+    TooLarge(usize),
+    /// `object` is missing, or [`Known::Missing`]. `path` runs from `object`
+    /// up to `root`, each object followed by the one that first named it, so
+    /// the closure of each object on it lacks `object`. `checked` counts the
+    /// objects the walk checked.
+    Missing {
+        object: Hash,
+        path: Vec<Hash>,
+        checked: usize,
+    },
+    /// `stop` returned true. Holds how many objects the walk checked.
+    Stopped(usize),
+}
+
+/// How often [`check_closure_present_above`] calls its `stop`, in objects.
+const STOP_POLL_OBJECTS: usize = 4096;
+
+/// [`check_closure_present`] from `root`, down to the objects `known` calls
+/// [`Known::Present`]: such an object is neither checked nor walked, so its
+/// own closure is taken as present. A missing object, or one `known` calls
+/// [`Known::Missing`], ends the walk with the path to it. `stop` is called
+/// every few thousand objects and ends the walk when it returns true.
+///
+/// A fetch uses it to check a tag's closure only down to the history that
+/// local refs already reach, and to remember where a closure was incomplete.
+///
+/// # Errors
+/// As [`check_closure_present`], except that a missing object is
+/// [`Presence::Missing`].
+pub fn check_closure_present_above(
+    store: &ObjectStore,
+    root: &Hash,
+    known: &dyn Fn(&Hash) -> Known,
+    cap: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Presence, StoreError> {
+    check_closure_present_above_from(store, root, known, cap, stop)
+}
+
+/// The same closure walk over a read-only object view.
+///
+/// # Errors
+/// The errors of `check_closure_present_above`.
+#[doc(hidden)]
+pub fn check_closure_present_above_from(
+    store: &(impl ClosureSource + ?Sized),
+    root: &Hash,
+    known: &dyn Fn(&Hash) -> Known,
+    cap: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Presence, StoreError> {
+    let hooks = Hooks {
+        known,
+        paths: true,
+        stop,
+        progress: None,
+    };
+    let (out, end) = walk_closure(
+        store,
+        std::iter::once(root),
+        ClosureMode::History,
+        cap,
+        Chunks::Check {
+            memory: MAX_CHECKED_CHUNKS,
+        },
+        &hooks,
+    )?;
+    let checked = out.len();
+    Ok(match end {
+        End::Complete => Presence::Complete(out),
+        End::Truncated => Presence::TooLarge(checked),
+        End::Missing { object, path } => Presence::Missing {
+            object,
+            path,
+            checked,
+        },
+        End::Stopped => Presence::Stopped(checked),
+    })
+}
+
+/// What a closure walk asks its caller.
+struct Hooks<'h> {
+    /// What the caller knows of an object before the walk reads it.
+    known: &'h dyn Fn(&Hash) -> Known,
+    /// Whether a missing object ends the walk with its path, rather than
+    /// with [`StoreError::ObjectNotFound`].
+    paths: bool,
+    /// Polled every [`STOP_POLL_OBJECTS`] objects.
+    stop: &'h dyn Fn() -> bool,
+    progress: Option<&'h dyn Fn(usize)>,
+}
+
+impl Hooks<'static> {
+    /// No knowledge, no paths and no stop.
+    const NONE: Self = Self {
+        known: &|_| Known::Unknown,
+        paths: false,
+        stop: &|| false,
+        progress: None,
+    };
+}
+
+/// How a closure walk ended.
+enum End {
+    Complete,
+    /// The cap cut it.
+    Truncated,
+    Missing {
+        object: Hash,
+        path: Vec<Hash>,
+    },
+    Stopped,
 }
 
 /// What a closure walk does with the chunks of a chunked blob.
@@ -413,37 +588,65 @@ fn reachable_with_mode<'a, I>(
 where
     I: IntoIterator<Item = &'a Hash>,
 {
-    walk_closure(store, roots, mode, cap, Chunks::Retain)
+    walk_closure(store, roots, mode, cap, Chunks::Retain, &Hooks::NONE)
+        .map(|(out, end)| (out, matches!(end, End::Truncated)))
 }
 
+/// The closure walk. An object that `hooks.known` calls present is skipped
+/// with its closure. With `hooks.paths`, the walk keeps the object that first
+/// named each object with children, so a missing object ends it with the path
+/// to it; without, a missing object is [`StoreError::ObjectNotFound`].
 fn walk_closure<'a, I>(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     roots: I,
     mode: ClosureMode,
     cap: usize,
     chunks: Chunks,
-) -> Result<(BTreeSet<Hash>, bool), StoreError>
+    hooks: &Hooks<'_>,
+) -> Result<(BTreeSet<Hash>, End), StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
 {
     let mut out: BTreeSet<Hash> = BTreeSet::new();
-    let mut queue: VecDeque<Hash> = VecDeque::new();
+    // Each object with the one that queued it.
+    let mut queue: VecDeque<(Hash, Option<Hash>)> = VecDeque::new();
     for root in roots {
-        queue.push_back(*root);
+        queue.push_back((*root, None));
     }
+    // The object that first named each object with children. A leaf ends a
+    // path, so it needs no entry: the queue carries its parent.
+    let mut via: HashMap<Hash, Hash> = HashMap::new();
+    let missing = |via: &HashMap<Hash, Hash>, object: Hash, parent: Option<Hash>| {
+        let mut path = vec![object];
+        let mut next = parent;
+        while let Some(h) = next {
+            path.push(h);
+            next = via.get(&h).copied();
+        }
+        End::Missing { object, path }
+    };
 
     let mut checked_chunks: BTreeMap<Hash, u64> = BTreeMap::new();
-    let mut truncated = false;
-    while let Some(h) = queue.pop_front() {
+    while let Some((h, parent)) = queue.pop_front() {
         if out.contains(&h) {
             continue;
+        }
+        if let Some(progress) = hooks.progress {
+            progress(out.len());
+        }
+        match (hooks.known)(&h) {
+            Known::Present => continue,
+            Known::Missing => return Ok((out, missing(&via, h, parent))),
+            Known::Unknown => {}
         }
         if out.len() >= cap {
             // A new object past the cap — the closure is incomplete. An
             // object already seen does not count, so a closure of exactly
             // `cap` objects is complete.
-            truncated = true;
-            break;
+            return Ok((out, End::Truncated));
+        }
+        if out.len() % STOP_POLL_OBJECTS == STOP_POLL_OBJECTS - 1 && (hooks.stop)() {
+            return Ok((out, End::Stopped));
         }
         out.insert(h);
         // Classify the node via the cheap 6-byte prologue check
@@ -451,7 +654,12 @@ where
         // (`read_object`) — INV-14. Missing objects bubble up here
         // exactly as `read_object` would: a reachable-set walk for a
         // push must refuse to build a known-broken pack.
-        let ty = store.object_type(&h)?;
+        let ty = match store.object_type(&h) {
+            Err(StoreError::ObjectNotFound(_)) if hooks.paths => {
+                return Ok((out, missing(&via, h, parent)));
+            }
+            ty => ty?,
+        };
         if matches!(ty, ObjectType::Blob | ObjectType::Delta) {
             // Leaves — nothing to walk, so there is nothing more to learn
             // about this node than its type. Skip the full read entirely:
@@ -461,25 +669,44 @@ where
             // the full verified read via `store.read`/`read_object`.
             continue;
         }
+        if hooks.paths
+            && let Some(parent) = parent
+        {
+            via.entry(h).or_insert(parent);
+        }
 
         // Every other kind needs its decoded body to find its children,
         // so this still pays for a full read+verify+decode.
         // [`children`] is the single source of truth for the edges;
         // History mode preserves the pre-existing walk exactly.
-        let obj = match (chunks, store.read_object(&h)?) {
+        let obj = match (chunks, store.read_object(&h)) {
+            (_, Err(StoreError::ObjectNotFound(_))) if hooks.paths => {
+                return Ok((out, missing(&via, h, parent)));
+            }
             // A chunk needs only its type and length, so it is checked here
             // against the manifest's span and never queued.
-            (Chunks::Check { memory }, Object::ChunkedBlob(manifest)) => {
-                check_manifest_chunks(store, &manifest, memory, &mut checked_chunks)?;
+            (Chunks::Check { memory }, Ok(Object::ChunkedBlob(manifest))) => {
+                match check_manifest_chunks(store, &manifest, memory, &mut checked_chunks) {
+                    Err(StoreError::ObjectNotFound(hex)) if hooks.paths => {
+                        let Ok(chunk) = hash::from_hex(&hex) else {
+                            return Err(StoreError::ObjectNotFound(hex));
+                        };
+                        return Ok((out, missing(&via, chunk, Some(h))));
+                    }
+                    checked => checked?,
+                }
                 continue;
             }
-            (_, obj) => obj,
+            (_, obj) => obj?,
         };
         let edges = children(&obj, mode);
         drop(obj);
-        queue.extend(edges);
+        queue.extend(edges.into_iter().map(|child| (child, Some(h))));
     }
-    Ok((out, truncated))
+    if let Some(progress) = hooks.progress {
+        progress(out.len());
+    }
+    Ok((out, End::Complete))
 }
 
 /// The content length of chunk `index` of a manifest, from its first 10
@@ -493,7 +720,7 @@ where
 /// [`StoreError::ObjectNotFound`] and the errors of
 /// [`ObjectStore::object_head`], and [`KitError::ChunkNotBlob`].
 pub(crate) fn chunk_blob_len(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     chunk: &Hash,
     index: u32,
 ) -> Result<u64, StoreError> {
@@ -525,7 +752,7 @@ impl LenCache for CheckedChunks<'_> {
 /// window of chunks run in parallel; the result and the error are those of
 /// reading them in manifest order.
 fn check_manifest_chunks(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     manifest: &ChunkedBlob,
     memory: usize,
     checked: &mut BTreeMap<Hash, u64>,
@@ -616,6 +843,113 @@ mod tests {
         };
         let bytes = serialize::serialize(&Object::Commit(c)).unwrap();
         s.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn observed_closure_reports_completed_objects_and_propagates_missing_objects() {
+        let (_dir, store) = store();
+        let tip = make_single_file_tree(&store, b"file", b"contents");
+        let progress = std::cell::Cell::new(0);
+        assert!(!check_closure_present_observed(&store, &tip, &|done| progress.set(done)).unwrap());
+        assert_eq!(progress.get(), 2);
+
+        let missing = hash::hash(b"missing tip");
+        assert!(matches!(
+            check_closure_present_observed(&store, &missing, &|_| {}),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+    }
+
+    /// The closure check stops at the objects `known` calls present: below
+    /// them it neither reads nor reports, and it returns what it checked. A
+    /// missing object above them ends it with the path to that object, an
+    /// object `known` calls missing does the same, and the cap still counts.
+    #[test]
+    fn check_closure_present_above_stops_at_known_objects() {
+        let (_d, s) = store();
+        let t1 = make_single_file_tree(&s, b"f", b"one");
+        let c1 = make_commit(&s, t1, &[], "c1");
+        let t2 = make_single_file_tree(&s, b"f", b"two");
+        let c2 = make_commit(&s, t2, &[c1], "c2--");
+        s.remove_object(&t1).unwrap();
+        assert!(matches!(
+            check_closure_present(&s, [&c2]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        let at_c1 = |h: &Hash| {
+            if *h == c1 {
+                Known::Present
+            } else {
+                Known::Unknown
+            }
+        };
+        let never = || false;
+        let Presence::Complete(checked) =
+            check_closure_present_above(&s, &c2, &at_c1, 10, &never).unwrap()
+        else {
+            panic!("complete")
+        };
+        assert_eq!(checked.len(), 3, "c2, its tree and its blob");
+        assert!(checked.contains(&c2) && !checked.contains(&c1));
+        assert_eq!(
+            check_closure_present_above(&s, &c2, &at_c1, 2, &never).unwrap(),
+            Presence::TooLarge(2)
+        );
+        let unknown = |_: &Hash| Known::Unknown;
+        assert!(matches!(
+            check_closure_present_above(&s, &c2, &unknown, 10, &never).unwrap(),
+            Presence::Missing { object, path, .. } if object == t1 && path == [t1, c1, c2]
+        ));
+        let c1_missing = |h: &Hash| {
+            if *h == c1 {
+                Known::Missing
+            } else {
+                Known::Unknown
+            }
+        };
+        assert!(matches!(
+            check_closure_present_above(&s, &c2, &c1_missing, 10, &never).unwrap(),
+            Presence::Missing { object, path, .. } if object == c1 && path == [c1, c2]
+        ));
+        s.remove_object(&t2).unwrap();
+        assert!(matches!(
+            check_closure_present_above(&s, &c2, &at_c1, 10, &never).unwrap(),
+            Presence::Missing { object, path, .. } if object == t2 && path == [t2, c2]
+        ));
+    }
+
+    /// The presence check ends when `stop` asks, after a few thousand objects.
+    #[test]
+    fn check_closure_present_above_polls_stop() {
+        let (_d, s) = store();
+        // The poll depends on object count, not history depth. Publish the
+        // blobs together so fixture setup needs one batch of file barriers.
+        let batch = s.batch();
+        let entries = (0..STOP_POLL_OBJECTS)
+            .map(|i| {
+                let bytes = serialize::serialize(&Object::Blob(Blob {
+                    data: i.to_le_bytes().to_vec(),
+                }))
+                .unwrap();
+                TreeEntry {
+                    name: format!("f{i:05}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: batch.write(&bytes).unwrap(),
+                }
+            })
+            .collect();
+        batch.commit().unwrap();
+        let tree = put_tree(&s, entries);
+        let tip = make_commit(&s, tree, &[], "root");
+        let unknown = |_: &Hash| Known::Unknown;
+        assert_eq!(
+            check_closure_present_above(&s, &tip, &unknown, usize::MAX, &|| true).unwrap(),
+            Presence::Stopped(STOP_POLL_OBJECTS - 1)
+        );
+        assert!(matches!(
+            check_closure_present_above(&s, &tip, &unknown, usize::MAX, &|| false).unwrap(),
+            Presence::Complete(_)
+        ));
     }
 
     // =================================================================

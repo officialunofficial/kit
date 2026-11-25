@@ -88,7 +88,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // Walk verified first-parent commits newest to oldest for display.
-    let chain = match collect_chain(&store, tip) {
+    let chain = match collect_chain(&store, tip, opts.limit) {
         Ok(c) => c,
         Err((m, c)) => return emit_err(&m, c),
     };
@@ -221,10 +221,17 @@ fn resolve_branch(
 }
 
 /// Walk the first-parent chain from `tip`, newest first.
-fn collect_chain(store: &ObjectStore, tip: Hash) -> Result<Vec<Hash>, (String, u8)> {
+fn collect_chain(
+    store: &ObjectStore,
+    tip: Hash,
+    limit: Option<usize>,
+) -> Result<Vec<Hash>, (String, u8)> {
     let mut chain = Vec::new();
     let mut cursor = Some(tip);
     while let Some(h) = cursor {
+        if limit.is_some_and(|n| chain.len() >= n) {
+            break;
+        }
         chain.push(h);
         let parent = match store.read_object(&h) {
             Ok(Object::Commit(c)) => c.parents.first().copied(),

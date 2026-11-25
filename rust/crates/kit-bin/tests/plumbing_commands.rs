@@ -799,3 +799,43 @@ fn ref_cat_unknown_ref_errors() {
         "unqualified name must be rejected: {bad:?}"
     );
 }
+
+#[test]
+fn batch_bytes_match_buffered_pretty_output_for_every_object() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    // Include binary content and a chunked blob, plus commit, tree and tag.
+    fs::write(root.join("binary"), [0, 255, 10, 0]).unwrap();
+    fs::write(root.join("chunked"), vec![7; 2 * 1024 * 1024]).unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(
+        run_in(root, x, &["commit", "-m", "more\n\nbody"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(root, x, &["tag", "-a", "v1", "-m", "tag body"])
+            .status
+            .success()
+    );
+    let names = ["HEAD:binary", "HEAD:chunked", "HEAD", "HEAD:sub", "v1"];
+    let mut expected = Vec::new();
+    for name in names {
+        let id = run_in(root, x, &["rev-parse", name]);
+        assert!(id.status.success(), "{id:?}");
+        let id = out_str(&id);
+        let ty = run_in(root, x, &["cat-file", "-t", name]);
+        let content = run_in(root, x, &["cat-file", "-p", name]);
+        assert!(content.status.success(), "{content:?}");
+        expected.extend_from_slice(
+            format!("{id} {} {}\n", out_str(&ty), content.stdout.len()).as_bytes(),
+        );
+        expected.extend_from_slice(&content.stdout);
+        expected.push(b'\n');
+    }
+    expected.extend_from_slice(b"missing-name missing\n missing\n");
+    let input = format!("{}\nmissing-name\n\n", names.join("\n"));
+    let output = run_in_stdin(root, x, &["cat-file", "--batch"], input.as_bytes());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, expected);
+}

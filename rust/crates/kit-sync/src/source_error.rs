@@ -1,6 +1,8 @@
 //! Backend-neutral failures returned by a remote source.
 
-use kit_core::protocol::{AdmissionRequired, TransportError};
+use kit_core::protocol::{
+    AdmissionRequired, TransportError, escape_terminal_text, sanitize_remote_error_text,
+};
 use std::time::Duration;
 
 /// Host scheduling classification. No class causes the library to retry.
@@ -38,6 +40,7 @@ pub struct RemoteFailure {
 /// The ordinary transport variants retain their existing display text. A raw
 /// channel string is a refusal because it may describe a deterministic failure.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SourceError {
     #[error("pack not found on remote")]
     PackNotFound,
@@ -49,11 +52,11 @@ pub enum SourceError {
     TlsConfiguration(String),
     #[error("admission helper failed: {0}")]
     AdmissionHelperFailed(String),
-    #[error("remote error: {0}")]
+    #[error("remote error: {}", sanitize_remote_error_text(.0))]
     RemoteError(String),
     #[error("ref CAS precondition failed")]
     RefConflict,
-    #[error("invalid ref name: {0}")]
+    #[error("invalid ref name: {}", escape_terminal_text(.0, false))]
     InvalidRef(String),
     #[error("connection to remote failed")]
     ConnectionFailed,
@@ -87,6 +90,10 @@ pub enum SourceError {
     EnvelopeExpired,
     #[error("remote error: push deadline expired")]
     Deadline,
+    /// The source cannot do this operation safely and refused it before it
+    /// wrote anything.
+    #[error("{0}")]
+    Unsupported(&'static str),
     /// Raw Connect evidence survives even for absence and authorization failures.
     #[error("{}", remote_display(.0))]
     Remote(Box<RemoteFailure>),
@@ -96,7 +103,10 @@ fn remote_display(remote: &RemoteFailure) -> String {
     match remote.code.as_str() {
         "not_found" => "pack not found on remote".to_owned(),
         "unauthenticated" | "permission_denied" => "access denied by remote".to_owned(),
-        _ => format!("remote error: {}", remote.message),
+        _ => format!(
+            "remote error: {}",
+            sanitize_remote_error_text(&remote.message)
+        ),
     }
 }
 
@@ -162,6 +172,7 @@ impl From<TransportError> for SourceError {
             }
             TransportError::MembershipNotVisible => Self::MembershipNotVisible,
             TransportError::RetryAfter { ms } => Self::RetryAfter { ms },
+            TransportError::Unsupported(what) => Self::Unsupported(what),
             // Future, unclassified transport errors remain terminal.
             other => Self::RemoteError(other.to_string()),
         }
@@ -184,5 +195,30 @@ mod tests {
             panic!("admission lost its structure")
         };
         assert_eq!(challenges.reason, Some("helper failed"));
+    }
+
+    #[test]
+    fn remote_text_is_escaped_and_cut() {
+        let error = SourceError::RemoteError("a\u{1b}[2Jb".into());
+        assert_eq!(error.to_string(), "remote error: a\\u{1b}[2Jb");
+        let error = SourceError::RemoteError("x".repeat(1000));
+        assert_eq!(
+            error.to_string(),
+            format!("remote error: {}", "x".repeat(256))
+        );
+        let error = SourceError::InvalidRef("refs/heads/a\u{7}b".into());
+        assert_eq!(error.to_string(), "invalid ref name: refs/heads/a\\u{7}b");
+        let error = SourceError::Remote(Box::new(RemoteFailure {
+            code: "internal".into(),
+            message: "\u{1b}".repeat(300),
+            details: Vec::new(),
+            status: 500,
+            headers: Vec::new(),
+        }));
+        // 256 bytes of text, each escaped to six characters.
+        assert_eq!(
+            error.to_string(),
+            format!("remote error: {}", "\\u{1b}".repeat(256))
+        );
     }
 }

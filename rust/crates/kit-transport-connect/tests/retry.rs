@@ -460,7 +460,10 @@ impl generated::TransportService for FlakyService {
         }
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
+        let exists = self
+            .inner
+            .pack_exists(&key, None)
+            .map_err(to_connect_error)?;
         Ok(Response::new(generated::PackExistsResponse {
             exists: Some(exists),
             ..Default::default()
@@ -522,7 +525,7 @@ impl generated::TransportService for FlakyService {
 
         let key = PackKey::new(to_hash(Some(pack_id))?);
         self.inner
-            .upload_pack(&buf, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&buf), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::UploadPackResponse::default()))
     }
@@ -538,7 +541,10 @@ impl generated::TransportService for FlakyService {
         }
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
+        let bytes = self
+            .inner
+            .download_blob(&key, None, u64::MAX)
+            .map_err(to_connect_error)?;
 
         #[allow(clippy::cast_possible_truncation)]
         let total_bytes = bytes.len() as u64;
@@ -1077,9 +1083,9 @@ fn signed_read_retries_use_fresh_valid_nonces() {
         match target {
             Rpc::ListRefs => assert!(client.list_refs("").unwrap().is_empty()),
             Rpc::ReadRef => assert_eq!(client.read_ref("refs/heads/main").unwrap(), None),
-            Rpc::PackExists => assert!(!client.pack_exists(&key).unwrap()),
+            Rpc::PackExists => assert!(!client.pack_exists(&key, None).unwrap()),
             Rpc::DownloadPack => assert!(matches!(
-                client.download_pack(&key),
+                client.download_blob(&key, None, u64::MAX),
                 Err(TransportError::PackNotFound)
             )),
             _ => unreachable!(),
@@ -1203,7 +1209,7 @@ fn pack_exists_retries_on_unavailable_then_succeeds() {
 
     let key = PackKey::from(blake3_hash(b"some pack bytes"));
     let exists = client
-        .pack_exists(&key)
+        .pack_exists(&key, None)
         .expect("pack_exists eventually succeeds after 2 retries");
     assert!(!exists);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -1219,9 +1225,9 @@ fn upload_pack_retries_on_unavailable_then_succeeds() {
     let data = b"pack bytes for the flaky upload_pack test";
     let key = PackKey::from(blake3_hash(data));
     client
-        .upload_pack(data, &key)
+        .upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
         .expect("upload_pack eventually succeeds after 2 retries");
-    assert!(client.pack_exists(&key).unwrap());
+    assert!(client.pack_exists(&key, None).unwrap());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     shutdown(shutdown_tx, handle);
@@ -1239,11 +1245,11 @@ fn download_pack_retries_on_unavailable_then_succeeds() {
     let data = b"pack bytes for the flaky download_pack test";
     let key = PackKey::from(blake3_hash(data));
     client
-        .upload_pack(data, &key)
+        .upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
         .expect("seed pack (untargeted RPC, not flaky)");
 
     let got = client
-        .download_pack(&key)
+        .download_blob(&key, None, u64::MAX)
         .expect("download_pack eventually succeeds after 2 retries");
     assert_eq!(got, data.to_vec());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
@@ -1268,7 +1274,7 @@ fn does_not_retry_a_non_retryable_error() {
     let key = PackKey::new([0xEE; 32]);
     assert!(
         !client
-            .pack_exists(&key)
+            .pack_exists(&key, None)
             .expect("not_found means the pack is absent")
     );
     assert_eq!(

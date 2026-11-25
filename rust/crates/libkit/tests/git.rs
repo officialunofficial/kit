@@ -412,7 +412,7 @@ fn a_claim_must_state_every_part_of_the_binding() {
         twin: &twin,
         sha256: &sha256,
         git_id: &git_id,
-        source: "example.com/up",
+        source: "https://example.com/up",
     };
     let predicate = format!(
         "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":{}}}",
@@ -467,7 +467,7 @@ fn a_claim_must_state_every_part_of_the_binding() {
     assert!(!claim_accepts(
         payload,
         &ClaimBinding {
-            source: "example.com/other",
+            source: "https://example.com/other",
             ..binding
         }
     ));
@@ -559,10 +559,104 @@ fn an_export_mints_one_attestation_for_each_head() {
     request.attest = true;
     export::export(&layout, &request, &mut signer, &Recorder::default()).unwrap();
     git(&mirror, &["rev-parse", "refs/kit/attestations"]);
+    let paths = libkit::attest::store::list(&layout, &head).unwrap();
+    let envelope = libkit::attest::store::load(&paths[0]).unwrap();
+    let payload = String::from_utf8(envelope.payload).unwrap();
+    assert!(payload.contains("\"mirror\":\"local\""), "{payload}");
     assert_eq!(
         libkit::attest::store::list(&layout, &head).unwrap().len(),
         1
     );
+}
+
+#[test]
+fn exported_attestations_publish_only_a_redacted_mirror() {
+    if !git_available() {
+        return;
+    }
+    for (dest, expected) in [
+        (
+            "https://user:token@example.com/repo.git",
+            "https://example.com/repo",
+        ),
+        (
+            "https://us%65r:tok%65n@example.com/repo.git?key=secret#private",
+            "https://example.com/repo",
+        ),
+        (
+            "ssh://user@example.com:22/repo.git?key=secret#private",
+            "ssh://example.com/repo",
+        ),
+        ("user@example.com:repo.git", "ssh://example.com/repo"),
+        (
+            "s3://access:secret@bucket/repo.git?key=secret#private",
+            "s3://bucket/repo",
+        ),
+        ("file:///private/mirror.git", "local"),
+        ("FILE://localhost/private/mirror.git", "local"),
+        ("gcrypt::/private/mirror.git", "local"),
+        ("hg::/private/mirror.git", "local"),
+        ("https://user:p?ss@host/r", "local"),
+        ("https://u:ab/cd@host/r", "local"),
+        ("https://u:secret%40host/r", "local"),
+        ("deploy:s3c#x@host:r", "local"),
+        ("https://tok#en@host/r", "local"),
+        ("https://user:1234?x@host/r", "local"),
+        ("tok#en@host:r", "local"),
+        ("https://user:1234?x/y@host/r", "local"),
+        ("https://tok#x/y@host/r", "local"),
+        ("user:1234?x/y@host:r", "local"),
+        ("deploy:s3c#x/y@host:r", "local"),
+        (
+            "user@example.com:repo.git?key=secret#private",
+            "ssh://example.com/repo",
+        ),
+    ] {
+        let (_dir, layout, head) = kit_repo();
+        let mirror_dir = tempfile::tempdir().unwrap();
+        let mirror = mirror_dir.path().join("mirror");
+        std::fs::create_dir(&mirror).unwrap();
+        git(&mirror, &["init", "--bare", "--quiet", "."]);
+        // Rewrite transport only in this staging repository. No network or
+        // process-wide configuration is needed to exercise credentialed URLs.
+        let staging = map::state_dir(&layout, "mirror").unwrap().join("repo.git");
+        std::fs::create_dir_all(&staging).unwrap();
+        git(&staging, &["init", "--bare", "--quiet", "."]);
+        git(
+            &staging,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", mirror.display()),
+                dest,
+            ],
+        );
+        let mut signer: Box<SignerFactory<'_>> =
+            Box::new(|| Ok(Box::new(RepoKeySigner::new(KeyPair::generate().unwrap()))));
+        let mut request = request(dest, "mirror");
+        request.attest = true;
+        export::export(&layout, &request, &mut signer, &Recorder::default()).unwrap();
+        let paths = libkit::attest::store::list(&layout, &head).unwrap();
+        assert_eq!(paths.len(), 1);
+        let envelope = libkit::attest::store::load(&paths[0]).unwrap();
+        let payload = String::from_utf8(envelope.payload).unwrap();
+        // Check the actual blob in the pushed ref as well as the local copy.
+        let entries = git(
+            &mirror,
+            &["ls-tree", "--name-only", "refs/kit/attestations"],
+        );
+        let published = git(
+            &mirror,
+            &["show", &format!("refs/kit/attestations:{entries}")],
+        );
+        assert_eq!(
+            published,
+            std::fs::read_to_string(&paths[0]).unwrap().trim()
+        );
+        assert!(
+            payload.contains(&format!("\"mirror\":\"{expected}\"")),
+            "{payload}"
+        );
+    }
 }
 
 #[test]
@@ -925,7 +1019,7 @@ fn an_attestation_of_a_local_import_names_no_path() {
 }
 
 #[test]
-fn a_claim_for_a_local_source_may_name_the_marker_or_the_path() {
+fn a_claim_for_a_local_source_must_name_only_the_marker() {
     use libkit::attest::statement::{Statement, Subject, encode, sha256_hex};
 
     let twin = [7u8; 32];
@@ -957,8 +1051,7 @@ fn a_claim_for_a_local_source_may_name_the_marker_or_the_path() {
         .unwrap()
     };
     assert!(claim_accepts(claim("local").as_bytes(), &binding));
-    // An attestation from an earlier import names the path itself.
-    assert!(claim_accepts(claim("/srv/up").as_bytes(), &binding));
+    assert!(!claim_accepts(claim("/srv/up").as_bytes(), &binding));
     assert!(!claim_accepts(claim("/srv/other").as_bytes(), &binding));
 
     let network = ClaimBinding {

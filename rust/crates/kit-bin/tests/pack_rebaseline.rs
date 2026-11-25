@@ -30,7 +30,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-use common::Repo;
+use common::{Repo, push_branch_with_depth};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -40,9 +40,7 @@ use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_file::FileTransport;
 use kit_transport_memory::MemoryTransport;
-use libkit::transfer::{
-    Error as TransferError, fetch_all, pull_all, push_all, push_branch_with_depth,
-};
+use libkit::transfer::{Error as TransferError, fetch_all, pull_all, push_all};
 
 /// The small threshold the in-process concurrency tests inject via
 /// `push_branch_with_depth` — reachable with a handful of pushes,
@@ -67,7 +65,9 @@ fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         cursor = node.prev;
         nodes.push(node);
@@ -253,14 +253,28 @@ fn condition_holds(condition: RefWriteCondition, current: Option<Hash>) -> bool 
 }
 
 impl Transport for AtomicTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -269,6 +283,9 @@ impl Transport for AtomicTransport {
         hash: &Hash,
     ) -> TransportResult<()> {
         self.inner.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)

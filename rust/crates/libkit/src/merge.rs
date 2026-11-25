@@ -26,12 +26,13 @@ use kit_core::ops::conflict_state::{
 };
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
 use kit_sync::worktree::{
-    ensure_restore_safe, read_or_seed_index_from_head, restore_worktree_and_index,
-    sync_index_to_tree,
+    ensure_restore_safe, ensure_restore_safe_from, read_or_seed_index_from_head,
+    restore_worktree_and_index, restore_worktree_and_index_from, sync_index_to_tree,
 };
 
 use crate::signing::{self, Author, Signing, WriteError, write_signed};
@@ -91,7 +92,10 @@ pub enum Error {
     #[error("read conflicts: {0}")]
     ReadConflicts(ConflictStateError),
     /// A conflicting file still holds markers.
-    #[error("unresolved conflict markers remain in '{0}'; resolve and `kit add` it")]
+    #[error(
+        "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+        escape_terminal_text(.0, false)
+    )]
     UnresolvedMarkers(String),
     /// The tree of the resolved index cannot be built.
     #[error("build tree from index: {0}")]
@@ -228,8 +232,17 @@ pub fn start(
 
     if base == Some(ours) && !request.no_ff {
         let theirs_tree = commit_tree(store, theirs)?;
-        ensure_restore_safe(layout, store, theirs_tree).map_err(Error::Worktree)?;
-        restore_worktree_and_index(layout, store, theirs_tree).map_err(Error::Worktree)?;
+        let ours_tree = commit_tree(store, ours)?;
+        ensure_restore_safe_from(
+            layout,
+            store,
+            theirs_tree,
+            &kit_core::ops::restore::RestoreOptions::default(),
+            Some(ours_tree),
+        )
+        .map_err(Error::Worktree)?;
+        restore_worktree_and_index_from(layout, store, theirs_tree, Some(ours_tree))
+            .map_err(Error::Worktree)?;
         head::advance(layout, &theirs, RefWriteCondition::Any).map_err(Error::AdvanceHead)?;
         return Ok(Outcome::FastForward {
             old: ours,
@@ -264,29 +277,47 @@ pub fn start(
     if result.has_conflicts() {
         // Never overwrite dirty tracked files or untracked collisions.
         ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
-        let records =
-            conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
-        conflict_state::write_merge_state(layout, &state, &records).map_err(Error::WriteState)?;
+        let records: Vec<ConflictRecord> =
+            result.conflicts.iter().map(ConflictRecord::from).collect();
+        // The merge is recorded before the material, and its conflict list
+        // after. A stop in between leaves a merge that `--abort` can undo,
+        // never markers with no merge behind them. It also leaves a merge
+        // that `--continue` and a commit refuse, because they need the list:
+        // the files may still hold our side only, and no marker to say so.
         // The result tree lets an abort treat the clean hunks of the merge,
-        // and not only the conflict paths, as material to discard.
+        // and not only the conflict paths, as material to discard. It goes
+        // before the state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
+            .map_err(Error::WriteState)?;
+        conflict_state::begin_merge_state(layout, &state).map_err(Error::WriteState)?;
+        conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
+        conflict_state::write_conflicts(layout.worktree_state_dir(), &records)
             .map_err(Error::WriteState)?;
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
-    ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+    ensure_restore_safe_from(
+        layout,
+        store,
+        result.tree_hash,
+        &kit_core::ops::restore::RestoreOptions::default(),
+        Some(ours_tree),
+    )
+    .map_err(Error::Worktree)?;
 
     if request.no_commit {
-        restore_worktree_and_index(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+        restore_worktree_and_index_from(layout, store, result.tree_hash, Some(ours_tree))
+            .map_err(Error::Worktree)?;
         // A tree cannot hold a deletion. Without a removal entry, a merge
         // that only deletes files would leave an empty index, and a continue
         // or an abort would seed it from the old tree of `HEAD`.
         conflict::stage_removals(layout, store, Some(ours_tree), result.tree_hash)?;
-        conflict_state::write_merge_state(layout, &state, &[]).map_err(Error::WriteState)?;
         // The result tree tells the staged merge, which an abort discards,
-        // from the work that the user staged on top of it.
+        // from the work that the user staged on top of it. It goes before the
+        // state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
             .map_err(Error::WriteState)?;
+        conflict_state::write_merge_state(layout, &state, &[]).map_err(Error::WriteState)?;
         return Ok(Outcome::Staged {
             tree: result.tree_hash,
         });
@@ -301,7 +332,8 @@ pub fn start(
         theirs,
         message.as_bytes(),
     )?;
-    restore_worktree_and_index(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+    restore_worktree_and_index_from(layout, store, result.tree_hash, Some(ours_tree))
+        .map_err(Error::Worktree)?;
     head::advance(layout, &commit, RefWriteCondition::Any).map_err(Error::AdvanceHead)?;
     Ok(Outcome::Merged(Merged {
         commit,
@@ -327,6 +359,7 @@ pub fn resume(
     signing: &dyn Signing,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
+    conflict_state::ensure_conflict_list(layout).map_err(Error::ReadConflicts)?;
     if let Some(path) = conflict::first_unresolved_marker(layout.worktree_root(), &records)? {
         return Err(Error::UnresolvedMarkers(path));
     }
@@ -360,13 +393,22 @@ pub fn resume(
 /// the merge. Clear the recorded state. Return the commit of `HEAD`.
 ///
 /// The function refuses, before it changes anything, when it would overwrite
-/// work that is not material of the merge.
+/// work that is not material of the merge. When `HEAD` already is the merge
+/// commit, a stop left the state behind, and the abort only clears it.
 ///
 /// # Errors
 /// [`Error::NoMergeInProgress`] when no merge is recorded. [`Error`] when the
 /// guards refuse or the store or the files fail.
 pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
     let (state, records) = read_state(layout)?;
+    // A stop after the merge commit and before the state was cleared leaves
+    // the state over a finished merge. `HEAD` already is that commit, and it
+    // is the only ref that holds it. Moving the branch back would orphan it,
+    // so the abort only clears the state.
+    if let Some(head) = committed_merge(layout, store, &state) {
+        conflict_state::clear_merge_state(layout).map_err(Error::ClearState)?;
+        return Ok(head);
+    }
     let target = state.orig_head;
     let target_tree = commit_tree(store, target)?;
     // Both a merge with conflicts and a staged merge record their result
@@ -384,6 +426,17 @@ pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
     head::advance(layout, &target, RefWriteCondition::Any).map_err(Error::RestoreHead)?;
     conflict_state::clear_merge_state(layout).map_err(Error::ClearState)?;
     Ok(target)
+}
+
+/// `HEAD`, when it is the commit of the recorded merge: its parents are the
+/// commit before the merge and the merged commit, in that order. A `HEAD` or a
+/// commit that cannot be read is not, so the abort can still repair it.
+fn committed_merge(layout: &RepoLayout, store: &ObjectStore, state: &MergeState) -> Option<Hash> {
+    let head = refs::resolve_head(layout).ok().flatten()?;
+    match store.read_object(&head) {
+        Ok(Object::Commit(c)) if c.parents == [state.orig_head, state.merge_head] => Some(head),
+        _ => None,
+    }
 }
 
 fn read_state(layout: &RepoLayout) -> Result<(MergeState, Vec<ConflictRecord>), Error> {

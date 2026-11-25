@@ -7,7 +7,7 @@
 //!
 //! Safety: the live set is computed **before** anything is deleted and
 //! the whole run is **fail-closed** — a missing/corrupt root, a malformed
-//! ref, or the reachability cap aborts with nothing removed (see
+//! ref, or the reachability cap aborts without removing any objects (see
 //! `kit_core::ops::gc`). Unreachable objects younger than the grace
 //! window (default 14 days) are kept as a belt-and-suspenders against
 //! objects written just before a reference that points at them. Use
@@ -18,9 +18,10 @@
 //! root-publishing paths take the same lock around their object-write +
 //! ref/attestation-publish window — `tag` (annotated/signed) and `attest` —
 //! so they are serialized against gc. `fetch` / `pull` write objects with no
-//! lock held, and take the lock only to publish a ref. They are protected
-//! instead by a prune guard, a shared lock on the `format` file: while any
-//! fetch holds it, gc's delete step keeps every object, at any grace period.
+//! lock held, and take the lock only to publish a ref; `push` takes it only
+//! to write a remote-tracking ref. They are protected instead by a prune
+//! guard, a shared lock on the `format` file: while any fetch or push holds
+//! it, gc's delete step keeps every object, at any grace period.
 //! The grace window remains the belt-and-suspenders net (like Git's default
 //! `gc.pruneExpire`, vs `prune --expire=now`): `--grace-secs 0` bypasses it
 //! and prints a warning, but with the publishers locked or guarded it is safe
@@ -30,15 +31,12 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use kit_core::ops::gc::{DEFAULT_GRACE_SECS, GcRootsError, run_gc};
 use kit_core::ops::recovery::{self, RetentionPolicy};
-use kit_core::ops::run_gc;
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_args;
 use crate::exit;
-
-/// Default object grace window: 14 days, matching Git's `gc.pruneExpire`.
-const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -59,6 +57,7 @@ struct GcOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // Lock acquisition, collection and result reporting stay together.
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_args::parse::<GcOpts>("kit gc", args) {
         Ok(o) => o,
@@ -86,11 +85,11 @@ pub fn run(args: &[String]) -> u8 {
     // deterministic (main first, then registry ids ascending, from
     // `all_state_layouts`) so concurrent multi-lock takers cannot
     // deadlock. The root publishers `tag` and `attest` take their tree's
-    // worktree.lock, and `fetch` takes it around its ref publish, so they
-    // serialize against gc. A fetch's unpublished objects are kept by its
-    // prune guard, not by this lock. The grace window protects only writers
-    // outside gc's lock set (SPEC-GC "Concurrent writers and the grace
-    // window").
+    // worktree.lock, and `fetch` and `push` take it around each
+    // remote-tracking ref write, so they serialize against gc. Their objects
+    // are kept by their prune guard, not by this lock. The grace window
+    // protects only writers outside gc's lock set (SPEC-GC "Concurrent
+    // writers and the grace window").
     // Registry lock FIRST (global lock order: worktrees.lock before
     // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
     // worktree set for the whole run, so a `worktree add` cannot
@@ -144,19 +143,63 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    let report = match run_gc(&store, &layout, now, opts.grace_secs, opts.dry_run) {
+    let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
+    let report = match run_gc(
+        &store,
+        &layout,
+        now,
+        opts.grace_secs,
+        opts.dry_run,
+        &mut |phase, done, bytes| progress.terminal().local_progress(phase, done, None, bytes),
+    ) {
         Ok(r) => r,
-        Err(e) => return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR),
+        Err(e) => {
+            drop(progress);
+            if !opts.dry_run && matches!(e, GcRootsError::Store(StoreError::ObjectNotFound(_))) {
+                super::fetch_repair::note_missing(&layout, &store, None);
+            }
+            return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR);
+        }
     };
 
+    drop(progress);
+    if !report.dry_run && !report.skipped_pack_errors.is_empty() {
+        super::fetch_repair::note_bad_pack(&layout);
+    }
     let mut stderr = std::io::stderr().lock();
-    for file in &report.skipped_state_files {
+    for error in &report.skipped_pack_errors {
+        let _ = writeln!(stderr, "warning: kept damaged local pack: {error}");
+    }
+    if let Some(error) = &report.pack_copy_error {
         let _ = writeln!(
             stderr,
-            "warning: {} names an object, or part of what it reaches, that is no longer in the \
-             store; gc did not keep it (finish or abort the operation to clear the file)",
-            file.display()
+            "warning: kept the local packs gc meant to rewrite or merge: {error}"
         );
+    }
+    if report.pack_retirement_cut_short {
+        let _ = writeln!(
+            stderr,
+            "warning: gc stopped retiring local packs because a fetch, push or add held the store lock; {} retired, the rest stay until the next gc",
+            report.packs_retired
+                + report.packs_rewritten
+                + report.packs_merged
+                + report.packs_retired_covered,
+        );
+    }
+    for file in &report.skipped_state_files {
+        if file.starts_with(layout.attestations_dir()) {
+            let _ = writeln!(
+                stderr,
+                "warning: {} has an unavailable attested subject or incomplete closure; gc skipped this attestation root; fetch the subject again or remove this local attestation directory",
+                file.display()
+            );
+        } else {
+            let _ = writeln!(
+                stderr,
+                "warning: {} names an object, or part of what it reaches, that is no longer in the store; gc did not keep it (finish or abort the operation to clear the file)",
+                file.display()
+            );
+        }
     }
     let (prune_verb, expire_verb) = if report.dry_run {
         ("would prune", "would expire")
@@ -182,6 +225,66 @@ pub fn run(args: &[String]) -> u8 {
         expired,
         if expired == 1 { "y" } else { "ies" },
     );
+    if report.packs_retired != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} wholly dead local pack(s)",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            report.packs_retired,
+        );
+    }
+    let copied = report.packs_rewritten + report.packs_merged + report.packs_retired_covered;
+    if copied != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} rewritten, {} merged and {} covered local pack(s), copying {} survivor bytes and dropping {} bytes",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            report.packs_rewritten,
+            report.packs_merged,
+            report.packs_retired_covered,
+            report.survivor_bytes_copied,
+            report.duplicate_bytes_reclaimed,
+        );
+    }
+    if !report.dry_run && report.retire_hold_ms != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: held the exclusive lock for at most {} ms in {} hold(s)",
+            report.retire_hold_ms, report.retire_batches,
+        );
+    }
+    if report.pack_leftovers_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} local pack leftover(s)",
+            report.pack_leftovers_pruned,
+        );
+    }
+    if report.loose_duplicates_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} loose duplicate(s)",
+            report.loose_duplicates_pruned,
+        );
+    }
+    if report.dry_run && report.packs_scanned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: packed payload: {} wholly dead bytes, {} mixed dead bytes, {} grace-eligible dead bytes, {} predicted survivor bytes",
+            report.wholly_dead_bytes,
+            report.mixed_dead_bytes,
+            report.eligible_dead_bytes,
+            report.survivor_bytes,
+        );
+    }
     exit::OK
 }
 

@@ -1,6 +1,7 @@
 //! `kit fetch [<remote>]` — like `pull` but does NOT move HEAD.
 //! Downloads every object reachable from each remote ref and updates
-//! the `refs/remotes/<remote>/<name>` tracking refs.
+//! the `refs/remotes/<remote>/<name>` tracking refs. It takes the remote's
+//! tags too, unless `--no-tags`; a tag publishes only once it is proved.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -48,11 +49,18 @@ struct FetchOpts {
     /// every remote branch was fetched and verified.
     #[arg(short = 'p', long)]
     prune: bool,
+    #[command(flatten)]
+    tags: super::fetched_tags::TagFlags,
+    #[command(flatten)]
+    attestations: super::fetched_tags::AttestationFlags,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","updated":[{"name":"...",
     /// "old":"<hex>|null","new":"<hex>"}]}`, plus `"pruned":["..."]` with
-    /// `--prune`. With `--all`, one JSON object is printed per remote
-    /// fetched.
+    /// `--prune`, and the tag fields `"tags":["..."]`,
+    /// `"tags_rejected":[{"name":"...","reason":"..."}]`, `"tag_warnings"`
+    /// (the same shape) and `"tag_listing_failed":"..."|null`. `"ok"` is
+    /// false when a tag was refused or the tag listing failed. With `--all`,
+    /// one JSON object is printed per remote fetched.
     #[arg(long, value_enum, default_value = "default")]
     format: FetchFormat,
     /// Suppress transfer progress output on stderr.
@@ -165,6 +173,9 @@ fn fetch_one(
                             &resolved.name,
                             require_signed,
                             opts.prune,
+                            opts.tags.fetch_tags(),
+                            &cfg.merged,
+                            opts.attestations.settings(&cfg.merged, endpoint),
                             progress.terminal(),
                         )
                     })
@@ -175,13 +186,23 @@ fn fetch_one(
                 outcome
             };
             match fetch_outcome {
-                Ok(_) => {
+                Ok(report) => {
                     let after = tracking_snapshot(layout, &resolved.name);
-                    report_fetch(endpoint, &resolved.name, &before, &after);
+                    report_fetch(endpoint, &resolved.name, &before, &after, &report);
+                    let code =
+                        super::fetched_tags::print_problems(&report, &mut std::io::stderr().lock());
                     if json {
-                        emit_fetch_json(&resolved.name, endpoint, &before, &after, opts.prune);
+                        emit_fetch_json(
+                            &resolved.name,
+                            endpoint,
+                            &before,
+                            &after,
+                            opts.prune,
+                            &report,
+                        );
                     }
-                    exit::OK
+                    super::maintenance::print(report.maintenance.as_ref(), quiet);
+                    code
                 }
                 Err(libkit::transfer::Error::Interrupted) => {
                     emit_err_json("fetch: interrupted", exit::TEMPFAIL, json)
@@ -207,6 +228,7 @@ fn emit_fetch_json(
     before: &HashMap<String, Hash>,
     after: &HashMap<String, Hash>,
     prune: bool,
+    report: &kit_sync::FetchReport,
 ) {
     let mut changed: Vec<(&String, Option<Hash>, Hash)> = after
         .iter()
@@ -225,7 +247,7 @@ fn emit_fetch_json(
         })
         .collect();
     let mut top = JsonObject::new();
-    top.field_bool("ok", true)
+    top.field_bool("ok", !report.tags_incomplete())
         .field_str("remote", remote)
         .field_str("endpoint", endpoint)
         .field_raw("updated", &format!("[{}]", entries.join(",")));
@@ -236,6 +258,8 @@ fn emit_fetch_json(
             .collect();
         top.field_raw("pruned", &format!("[{}]", names.join(",")));
     }
+    super::fetched_tags::json_fields(&mut top, report);
+    super::maintenance::json_field(&mut top, report.maintenance.as_ref());
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
 }
@@ -263,12 +287,13 @@ fn tracking_snapshot(layout: &RepoLayout, remote: &str) -> HashMap<String, Hash>
 }
 
 /// Print git's `From <url>` block with one summary line per moved
-/// tracking ref. Stays silent when nothing changed.
+/// tracking ref and one per new tag. Stays silent when nothing changed.
 fn report_fetch(
     endpoint: &str,
     remote: &str,
     before: &HashMap<String, Hash>,
     after: &HashMap<String, Hash>,
+    report: &kit_sync::FetchReport,
 ) {
     let mut changed: Vec<(&String, Option<Hash>, Hash)> = after
         .iter()
@@ -276,7 +301,7 @@ fn report_fetch(
         .map(|(name, new)| (name, before.get(name).copied(), *new))
         .collect();
     let pruned = pruned_names(before, after);
-    if changed.is_empty() && pruned.is_empty() {
+    if changed.is_empty() && pruned.is_empty() && report.tags_fetched.is_empty() {
         return;
     }
     changed.sort_by(|a, b| a.0.cmp(b.0));
@@ -296,6 +321,7 @@ fn report_fetch(
             format::ref_update_line(old.as_ref(), &new, name, &dst, false)
         );
     }
+    super::fetched_tags::print_new(report, &mut stderr);
 }
 
 /// The tracking refs that the fetch deleted: only a prune removes one.

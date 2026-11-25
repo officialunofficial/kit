@@ -5,9 +5,10 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 `kit-sync` is the filesystem layer behind the `kit` command line's `clone`,
 `fetch`, `pull`, and `push`. The read path walks a branch's packmap chain,
 downloads the packs it does not already have, and unpacks and records each one
-as it arrives, with no repository lock held and nothing staged on disk. It
-verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete, verifies the signature of every commit, remix
+as it arrives, with no repository lock held and one spool file in `.kit/tmp/`
+at a time. It verifies the signature of every commit, remix and tag it introduced, checks
+the tip's closure is complete down to the tracking tips an earlier signed
+fetch checked and the tips this fetch published, verifies the signature of every commit, remix
 and tag in the tip's history down to the tips earlier signed fetches
 verified, publishes the remote-tracking ref under the
 repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
@@ -15,6 +16,16 @@ with rollback on failure. A `PruneGuard` keeps gc from deleting the fetch's
 objects before a ref names them. The wait for the repository lock has no
 deadline, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
 interrupt.
+
+Fetch snapshots `refs/kit/attestmap` before listing branches and tags. After
+code publication it validates bounded attestation packs and saves envelopes
+for locally present subjects. It writes fetched provenance before each
+envelope and keeps its checkpoint separate from object packs. Failures appear
+in `FetchReport::attestation_warnings` and do not fail the code fetch.
+Set `SyncOptions::attestations` to false to skip this work. Set
+`refetch_attestations` to retry dropped or rejected envelopes. Supply the exact
+configured `remote_url` to isolate checkpoints across endpoints. Connect
+sources enable this only after discovering server support.
 
 The push path plans from what changed: it walks the commits the remote lacks,
 compares each tree with the trees of its parents, and plans deltas. A chunk of
@@ -67,6 +78,8 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).
+* `tags` (default `true`): after the branches, fetch the remote's tags (see
+  "Tags" below). `false` skips the tag phase, as `--no-tags` does.
 
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.
@@ -75,24 +88,35 @@ use the `with_*` setters.
 
 When the remote offers a repository cursor (SPEC-TRANSPORT §1.2), fetch reads
 it before it lists the branches. After a fetch that completes, it records the
-cursor, a digest of the remote-tracking refs and whether it verified
-signatures. The next fetch makes no other request when all of these hold: the
-fresh cursor equals the recorded one, the tracking refs still match the
-digest, the object of every tracked tip is in the store, a fetch that verifies
+cursor, a digest of the remote-tracking refs, whether it verified
+signatures, whether it fetched tags, and a digest of the local tags. It also
+records the effective attestation mode and the processed attestmap head. A fetch
+that refused a tag, could not list tags, or left attestation work incomplete
+records nothing. The next fetch
+makes no other request when all of these hold: the fresh cursor equals the
+recorded one, the tracking refs and the local tags still match their digests,
+it fetches tags exactly when the recorded one did, the object of every tracked
+tip and every local tag is in the store, a fetch that verifies
 signatures follows one that did and finds every tracked tip recorded as
 verified (see "Verified tips" below), and a named target branch has a tracking
-ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
-check of the tips, so an object lost below a tip heals on the next fetch that
-does work, not on this one.
+ref. The effective attestation mode must match, and an enabled attestation
+checkpoint must still hold the recorded head. Explicit refetch disables this
+shortcut. `FetchReport::remote_unchanged` reports the skip. It skips the closure
+check of the tips. An object lost below a tip stays missing through such a
+fetch. Run `kit closure verify <ref> --history`, then fetch the affected
+remote. When verification finds a missing object, it clears the shortcuts
+so the next fetch downloads that remote's pack chain again.
 
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an
 eight-byte little-endian byte-length prefix (empty when the source has no
-address). File contents are five LF-separated fields, without a final LF:
-`kit-fetch-cursor-v1`, the cursor in lowercase hex, the lowercase tracking
-digest, `1` or `0` for signature verification, and lowercase BLAKE3 of the
-preceding four fields including their three separators. Readers cap input at
-512 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
+address). File contents are nine LF-separated fields, without a final LF:
+`kit-fetch-cursor-v3`, the cursor in lowercase hex, the lowercase tracking
+digest, `1` or `0` for signature verification, `1` or `0` for the tag phase,
+the lowercase tag digest, `1` or `0` for requested and supported attestations,
+the attestmap head in lowercase hex or `-`, and lowercase BLAKE3 of the
+preceding eight fields including their seven separators. A record of another
+version is invalid. Readers cap input at 640 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
 delete these files.
 
 ### Verified tips
@@ -106,6 +130,13 @@ between the new tip and what was verified before, and a pull checks the tip it
 moves the branch to the same way. A tip published by a fetch with the opt-out,
 or by an older kit, is not recorded, so it is no stopping point. The walk
 visits at most the closure check's 10,000,000 objects.
+
+`verify_pull_tip(layout, store, tip, observer)` exposes this check for callers
+that merge or rebase after fetching. It writes nothing and uses the recorded
+verified tips as stopping points. Hold the worktree lock from selecting the tip
+through using it, and skip the call only for an explicit signature opt-out.
+All pull modes call it before changing operation state, files, the index or HEAD,
+even when the remote listing omitted a tracking branch left by an opt-out fetch.
 
 The disposable records live in **.kit/applied-packs/.verified/**, one per
 remote and branch. The filename is lowercase BLAKE3 over the remote name and
@@ -124,6 +155,45 @@ remote until `--prune` removes that ref. You can delete these files; they
 never pin objects for GC. A pruned tracking ref takes its record with it.
 Renaming or removing a remote leaves its records behind; they stay true and
 only stop a later walk sooner.
+
+### Tags
+
+After it publishes the branches, a fetch lists `refs/tags/` and publishes each
+remote tag it does not hold (SPEC-TRANSPORT §1.4). A tag publishes only whole
+and proved. Its closure must be in the store and its outermost tag object must
+carry its name. With `verify_signatures`, every commit, remix and tag in its
+history must also pass its signature check, down to the tips in "Verified
+tips". That check is the same range walk over the same record that the branch
+path runs, so a tag never trusts history that a branch would check.
+
+A tag whose closure is local publishes with no further request. Otherwise the
+fetch lists `refs/kit/tagmap/` once and applies the tag's chain. The walk stops
+at the nodes of the chains this fetch applied and at checkpoint heads, so a tag
+grafted on a branch chain downloads only its own nodes and packs. An object
+still missing after a strong re-read of both refs, when the try skipped a pack
+the applied-pack record lists or stopped at a node of the stop set, triggers
+one self-heal for the whole tag phase (`TAG_SELF_HEALS_PER_FETCH`). A pack the
+fetch refused for one tag refuses the later tags that share it, with no second
+download.
+
+`FetchReport` names the outcome: `tags_fetched`, `tags_rejected` (each a
+`TagRejection` with its `TagRejectReason`), `tag_warnings` for remote names that
+cannot be pushed, and `tag_listing_failed`. `FetchReport::tags_incomplete` is
+true for a refusal or a failed listing, and the CLI then exits 1. A refused tag
+never fails the branches. An existing local tag with another value is refused
+and never moved, and no fetch deletes a tag.
+
+`PushTarget::Tags` pushes every local tag (`TagSelection::All`) or named ones
+(`TagSelection::Named`), and `PushReport::tags` gives one `TagPushResult` per
+tag (SPEC-TRANSPORT §7.2). Each tag goes with its tag map, the tag map first.
+A create grafts on the packmap node of the nearest branch this remote holds,
+found by walking back at most `MAX_BASE_WALK_COMMITS` new commits per tag.
+Tags that share a base are planned and uploaded once, as one node, so a push
+sends each object at most once per base. A remote tag with another value is
+refused unless `force`, which conditions on the value it read and keeps that
+value in the new tag map. Before reading the remote, a push refuses a tag whose
+tag map name is not a valid ref, an annotated tag named for another tag, and an
+unsigned annotated tag. A refused tag does not stop the others.
 
 ### Incremental fetch checkpoints
 
@@ -162,10 +232,10 @@ reads and the concurrent re-baseline retry retain their existing behavior.
 
 New packs still pass digest and signature verification. Only after successful
 application and closure verification does fetch durably publish the tracking
-ref, then atomically write and fsync the checkpoint, under the same worktree
-lock. Tracking directories now sync per branch before checkpoint publication.
-A crash before the checkpoint write leaves the old record; the next fetch
-walks more nodes. Cache write failure does not fail an otherwise successful fetch.
+ref, then write the checkpoint with a temporary file and a rename and no device
+flush, under the same worktree lock. Tracking directories sync per branch before
+checkpoint publication. A crash before the checkpoint write, or one that loses
+the write, leaves the old record or none; the next fetch walks more nodes. Cache write failure does not fail an otherwise successful fetch.
 
 For a single branch, one listing page, one pack per node, and no retries,
 let `N` be the total chain length after the operation. Count each ListRefs,
@@ -181,8 +251,11 @@ For `k` appended nodes containing `p` missing packs, incremental fetch costs
 `2 + k + p`. A rewritten chain costs `2 + N + p`. Additional listing pages,
 branches, and recovery reads add their own calls. The report continues to count
 packs in the verified prefix as already applied; CLI output and exit codes stay
-the same. These formulas concern network calls; the local closure check still
-scales with reachable objects.
+the same. These formulas concern network calls. The local closure check reads
+the objects the new commits add, down to the tracking tips an earlier signed
+fetch checked, the tips this fetch published, and their history. The first
+branch of a clone or of a fetch with signature checking off, and a branch
+whose history shares nothing with those tips, read the whole closure.
 
 ### Pushing a repository
 
@@ -209,7 +282,9 @@ let report = push(&dir, &source, &options)?;
 
 A push reads the remote head before it plans. When that head differs from
 the push's lease, the push fails with `PushError::NonFastForwardPush` before
-it uploads anything. When the head already equals the tip, an earlier
+it uploads anything. A `PushLease::FastForward` push, or a push of every
+branch without `force`, to a remote that does not hold the branch writes
+`Missing` whatever the tracking ref says. When the head already equals the tip, an earlier
 attempt landed, and the push writes nothing.
 
 On sources whose advance is atomic or serialized (the file transport checks
@@ -233,6 +308,19 @@ that holds the old packs downloads only the new ones. The node holds
 everything the chain held, so every source and every head condition allows
 it. A chain that holds more than 4,096 packs with the new ones keeps
 appending. A force push on an atomic or serialized source appends.
+
+`PushTarget::Delete(DeleteTarget)` deletes one remote branch or tag with its
+chain ref (SPEC-TRANSPORT §7.3), through `RemoteSource::delete_refs`. A
+branch's lease is its tracking ref, which the delete removes; a tag's
+expected value is the one just read. A branch with no tracking ref, a remote
+ref at another value, or a short name the remote holds as both a branch and
+a tag is a `PushError::Delete`, and nothing is deleted. Once the head is
+gone the delete has happened, so a chain ref left by a crash still reports
+success, and the next push of that name appends to it. `PushReport::deleted`
+names the ref and the value removed, `None` when the head was already gone
+when the delete reached it.
+`delete_refs` refuses by default, so a read-only source needs nothing new;
+an S3 transport refuses every delete.
 
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries
@@ -315,8 +403,9 @@ The host must bound its retry ladder and waits.
 The CLI uses a configured `ClientSource` for `kit+https` and `kit+http` push,
 fetch, pull, and clone. Native extra-CA, bearer credentials, grants, helpers, and
 configuration remain host-owned. Other schemes retain `TransportSource`.
-`NativeHttp` streams upload frames and incrementally decodes downloads; generic
-HTTP transports retain an additive buffered fallback. The protocol client's
+`NativeHttp` streams upload frames and incrementally decodes downloads, and
+pack locations, into the fetch's spool; generic HTTP transports retain an
+additive buffered fallback. The protocol client's
 whole-push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer
@@ -369,9 +458,10 @@ other coding is refused, and an inflated body is bounded by the same response
 limit as a plain one), refuses cleartext `http` to any host but loopback unless
 `allow_insecure_http(true)`, never follows a redirect (a signed request must not be
 replayed to another origin), bounds every response while receiving it, and
-bounds metadata requests by 30 seconds and `UploadPack`, `UploadPart` and
-`DownloadPack` by 300 seconds, including receipt of the response body. These
-defaults replace the previous ten-minute bound. Use `with_metadata_timeout` and
+bounds metadata requests by 30 seconds, including receipt of the response body.
+`UploadPack`, `UploadPart` and `DownloadPack` have no total bound of their own:
+they fail once 60 seconds pass with no data moving either way, so a slow link
+that keeps moving finishes a pack of any size. Use `with_metadata_timeout` and
 `with_transfer_timeout` to tune them independently, or `with_timeout` to set both.
 Supplied `user-agent` and gzip/identity-compatible `accept-encoding` values are
 preserved. Negotiation naming another coding (including wildcards or a coding
@@ -406,7 +496,10 @@ A pull writes the per-worktree `PULL_HEAD` sidecar before moving the branch
 and HEAD, then removes it after restoring the files and index. A retry checks
 for local work before finishing a partial restore. It reports completion even
 when the branch tip stays the same. This covers a killed process, not power
-loss. See SPEC-WORKTREE for its layout and recovery rules.
+loss. A caller that commits from the index must refuse while the marker names
+HEAD and the index holds a pre-pull entry; SPEC-WORKTREE states the check, and
+`libkit::commit::unfinished_pull` makes it. See SPEC-WORKTREE for its layout and
+recovery rules.
 
 ## Features
 

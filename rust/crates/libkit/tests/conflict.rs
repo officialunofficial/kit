@@ -419,3 +419,61 @@ mod marker_scan {
         );
     }
 }
+
+#[test]
+fn abort_refuses_a_missing_unchanged_object_before_resetting_a_resolution() {
+    let p = pause(
+        &[("a.txt", "base\n"), ("b.txt", "keep\n")],
+        &[("a.txt", "ours\n"), ("b.txt", "keep\n")],
+        &[("a.txt", "theirs\n"), ("b.txt", "keep\n")],
+    );
+    let records = materialize(&p, &NoopObserver);
+    p.f.write("a.txt", "my resolution\n");
+    let idx = index::read_index(&p.f.layout).unwrap();
+    let h = idx
+        .entries
+        .iter()
+        .find(|e| e.path == "b.txt")
+        .unwrap()
+        .object_hash;
+    let hex = kit_core::hash::to_hex(&h);
+    std::fs::remove_file(p.f.layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let error = conflict::ensure_abort_safe(
+        &p.f.layout,
+        &p.f.store,
+        &records,
+        p.ours_tree,
+        Some(p.result.tree_hash),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("not found"), "{error}");
+    assert_eq!(p.f.read("a.txt"), "my resolution\n");
+}
+
+#[test]
+fn reset_refuses_a_case_alias_before_changing_conflict_material() {
+    let f = init();
+    std::fs::write(f.path("probe"), b"probe").unwrap();
+    if !f.path("PROBE").exists() {
+        return;
+    }
+    std::fs::remove_file(f.path("probe")).unwrap();
+    let old = f.commit(&[("aaa", "keep"), ("readme", "keep readme")], &[], "old", 1);
+    let target = f.commit(&[("README", "new"), ("aaa", "new")], &[old], "target", 2);
+    f.checkout("main", old);
+    let before = std::fs::read(f.layout.worktree_state_dir().join("index")).unwrap();
+    let result = conflict::reset_paths(
+        &f.layout,
+        &f.store,
+        &[],
+        f.commit_object(target).tree_hash,
+        Some(f.commit_object(old).tree_hash),
+    );
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(f.path("aaa")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(f.path("readme")).unwrap(), b"keep readme");
+    assert_eq!(
+        std::fs::read(f.layout.worktree_state_dir().join("index")).unwrap(),
+        before
+    );
+}

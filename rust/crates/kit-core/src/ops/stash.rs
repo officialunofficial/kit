@@ -21,7 +21,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::atomic;
+use crate::durable::Parents;
 use crate::hash::{Hash, ZERO};
 use crate::index::{self, Index};
 use crate::layout::RepoLayout;
@@ -80,6 +80,8 @@ pub enum StashError {
     MessageTooLong,
     #[error("ignored path '{0}' is in the way of HEAD; move or remove it first")]
     IgnoredPathInTheWay(String),
+    #[error("pathspec '{0}' did not match any files")]
+    PathspecNoMatch(String),
     #[error("stash commit object is not a Commit")]
     NotACommit,
     #[error(transparent)]
@@ -114,6 +116,17 @@ pub type StashResult<T> = Result<T, StashError>;
 ///    never removed; a HEAD path that would overwrite one is refused.
 /// 6. Truncate the index.
 pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashResult<()> {
+    save_paths(store, layout, message, &[])
+}
+
+/// Save only matching repository-relative paths; an empty list selects all.
+/// Paths name files or directory prefixes. Unmatched paths stay unchanged.
+pub fn save_paths(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    message: &str,
+    paths: &[String],
+) -> StashResult<()> {
     if message.len() > MAX_MESSAGE_LEN {
         return Err(StashError::MessageTooLong);
     }
@@ -121,78 +134,55 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
     // One durability batch over the worktree snapshot, the staged-index
     // snapshot, and both commits — committed before the manifest write
     // that references them.
-    let staged = index::read_index(layout)?;
+    let mut staged = read_stash_index(store, layout, paths)?;
     let batch = store.batch();
-    let tree_hash = worktree::build_tree_filtered(&batch, layout.worktree_root(), Some(&staged))?;
+    let mut tree_hash =
+        worktree::build_tree_filtered(&batch, layout.worktree_root(), Some(&staged))?;
     let head_hash = refs::resolve_head(layout)?;
 
-    let timestamp_u64 = unix_seconds_now();
-    let zero_pk = [0u8; 32];
+    let base = base_index(store, head_hash)?;
+    let selected = |path: &str| path_selected(paths, path);
+    let original_index = staged.clone();
+    batch.commit()?;
+    if !paths.is_empty() {
+        let snapshot = index::from_tree(store, tree_hash)?;
+        check_pathspecs(paths, &base, &snapshot, &staged)?;
+        let entries = base
+            .entries
+            .iter()
+            .filter(|e| !selected(&e.path))
+            .cloned()
+            .chain(snapshot.entries.into_iter().filter(|e| selected(&e.path)))
+            .collect();
+        tree_hash = worktree::build_tree_from_index(store, &Index::from_entries(entries))?;
+        staged = Index::from_entries(
+            base.entries
+                .iter()
+                .filter(|e| !selected(&e.path))
+                .cloned()
+                .chain(staged.entries.into_iter().filter(|e| selected(&e.path)))
+                .collect(),
+        );
+    }
+    let batch = store.batch();
 
-    // Capture the staged index as its own commit and record it as the
-    // stash commit's SECOND parent (git-style `[HEAD, I]`), so
-    // `stash pop/apply --index` can restore the staged state later. It is
-    // reachable from the stash commit, so `gc` retains it (graph closure
-    // follows every parent). Older single-parent entries simply carry no
-    // index snapshot, and `--index` is a no-op for them.
-    //
-    // The index commit's tree is a fixed two-entry WRAPPER:
-    //   `i` — a blob holding the SERIALIZED index. Unlike a tree, this
-    //         preserves staged DELETIONS (`Removed` entries); a tree can
-    //         only encode present paths.
-    //   `t` — the staged-content tree (`build_tree_from_index`). It keeps the
-    //         blobs of staged present files gc-reachable, since the serialized
-    //         index blob is opaque to the gc graph walk.
-    // The two reserved names can never collide with a tracked path, and this
-    // tree is never materialized into a worktree (only the `i` blob is read
-    // back on `--index`).
-    //
-    // The authoritative index was read before the worktree walk; pass the
-    // discovered layout's staging state rather than guessing a single-worktree
-    // .kit directory (linked worktrees have a pointer file there).
-    let staged_tree = worktree::build_tree_from_index_with(store, &batch, &staged, true)?;
-    let index_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
-        data: staged.serialize(),
-    }))?)?;
-    let wrapper = Object::Tree(Tree {
-        entries: vec![
-            TreeEntry {
-                name: b"i".to_vec(),
-                mode: EntryMode::Blob,
-                object_hash: index_blob,
-            },
-            TreeEntry {
-                name: b"t".to_vec(),
-                mode: EntryMode::Tree,
-                object_hash: staged_tree,
-            },
-        ],
-    });
-    let wrapper_hash = batch.write(&serialize::serialize(&wrapper)?)?;
-    let index_parents = head_hash.into_iter().collect::<Vec<_>>();
-    let index_commit = Object::Commit(Commit::new_unannotated(
-        wrapper_hash,
-        index_parents,
-        Identity::ed25519(zero_pk),
-        [0u8; 32],
-        b"index".to_vec(),
-        timestamp_u64,
-        [0u8; 64],
-    ));
-    let index_commit_hash = batch.write(&serialize::serialize(&index_commit)?)?;
+    let ts = unix_seconds_now();
+    let scoped = !paths.is_empty();
+
+    let index_hash = write_index_snapshot(store, &batch, &staged, head_hash, ts, scoped)?;
 
     // Worktree commit: parents are `[HEAD, index_commit]` (HEAD omitted
     // when there is none), so the index snapshot is always the last parent
     // when a HEAD exists.
     let mut parents = head_hash.into_iter().collect::<Vec<_>>();
-    parents.push(index_commit_hash);
+    parents.push(index_hash);
     let commit = Object::Commit(Commit::new_unannotated(
         tree_hash,
         parents,
-        Identity::ed25519(zero_pk),
+        Identity::ed25519([0u8; 32]),
         [0u8; 32],
         message.as_bytes().to_vec(),
-        timestamp_u64,
+        ts,
         [0u8; 64],
     ));
     let commit_bytes = serialize::serialize(&commit)?;
@@ -210,17 +200,12 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
         None => None,
     };
     let root = layout.worktree_root();
-    if head_tree.is_some() {
-        for e in &diff_trees(store, Some(tree_hash), head_tree)?.entries {
-            if e.kind == DiffKind::Added && path_blocked(root, &e.path) {
-                return Err(StashError::IgnoredPathInTheWay(e.path.clone()));
-            }
-        }
-    }
+    check_reset_paths(store, head_tree, tree_hash, root)?;
+    let patterns = selected_patterns(paths);
 
     // Prepend the new entry.
     let mut list = read_list(layout)?;
-    let ts_u32: u32 = timestamp_u64.try_into().unwrap_or(u32::MAX);
+    let ts_u32: u32 = ts.try_into().unwrap_or(u32::MAX);
     let new_entry = StashEntry {
         commit_hash: stash_hash,
         parent_hash: head_hash.unwrap_or(ZERO),
@@ -245,13 +230,169 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
             root,
             &RestoreOptions {
                 clean: false,
-                sparse_patterns: None,
+                sparse_patterns: patterns,
             },
         )?;
     }
 
     // Clear the index.
-    let _ = index::write_index(layout, &Index::new());
+    let remaining = if paths.is_empty() {
+        Index::new()
+    } else {
+        Index::from_entries(
+            original_index
+                .entries
+                .into_iter()
+                .filter(|e| !selected(&e.path))
+                .chain(base.entries.into_iter().filter(|e| selected(&e.path)))
+                .collect(),
+        )
+    };
+    index::write_index(layout, &remaining)?;
+    Ok(())
+}
+
+fn read_stash_index(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    paths: &[String],
+) -> StashResult<Index> {
+    if paths.is_empty() {
+        return Ok(index::read_index(layout)?);
+    }
+    index::read_or_seed_from_head(layout, store).map_err(|e| StashError::Io(io::Error::other(e)))
+}
+
+fn check_pathspecs(
+    paths: &[String],
+    base: &Index,
+    snapshot: &Index,
+    staged: &Index,
+) -> StashResult<()> {
+    for p in paths {
+        let one = std::slice::from_ref(p);
+        if !base
+            .entries
+            .iter()
+            .chain(&snapshot.entries)
+            .chain(&staged.entries)
+            .any(|e| path_selected(one, &e.path))
+        {
+            return Err(StashError::PathspecNoMatch(p.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn base_index(store: &ObjectStore, head_hash: Option<Hash>) -> StashResult<Index> {
+    Ok(match head_hash {
+        Some(h) => match store.read_object(&h)? {
+            Object::Commit(c) => index::from_tree(store, c.tree_hash)?,
+            _ => return Err(StashError::NotACommit),
+        },
+        None => Index::new(),
+    })
+}
+
+fn path_selected(paths: &[String], path: &str) -> bool {
+    paths.is_empty()
+        || paths.iter().any(|p| {
+            p.is_empty() || path == p || path.strip_prefix(p).is_some_and(|s| s.starts_with('/'))
+        })
+}
+
+fn selected_patterns(paths: &[String]) -> Option<Vec<restore::SparsePattern>> {
+    if paths.is_empty() || paths.iter().any(String::is_empty) {
+        return None;
+    }
+    Some(
+        paths
+            .iter()
+            .map(|p| restore::SparsePattern {
+                pattern: format!("/{p}"),
+                negated: false,
+                dir_only: false,
+            })
+            .collect(),
+    )
+}
+
+// The index wrapper keeps serialized deletions and staged content reachable.
+fn write_index_snapshot(
+    store: &ObjectStore,
+    batch: &crate::batch::WriteBatch<'_>,
+    staged: &Index,
+    head_hash: Option<Hash>,
+    timestamp_u64: u64,
+    scoped: bool,
+) -> StashResult<Hash> {
+    let staged_tree = worktree::build_tree_from_index_with(store, batch, staged, true)?;
+    let index_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
+        data: staged.serialize(),
+    }))?)?;
+    let scope_blob = batch.write(&serialize::serialize(&Object::Blob(Blob {
+        data: vec![u8::from(scoped)],
+    }))?)?;
+    let wrapper = Object::Tree(Tree {
+        entries: vec![
+            TreeEntry {
+                name: b"i".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: index_blob,
+            },
+            TreeEntry {
+                name: b"p".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: scope_blob,
+            },
+            TreeEntry {
+                name: b"t".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: staged_tree,
+            },
+        ],
+    });
+    let wrapper_hash = batch.write(&serialize::serialize(&wrapper)?)?;
+    let index_parents = head_hash.into_iter().collect::<Vec<_>>();
+    let index_commit = Object::Commit(Commit::new_unannotated(
+        wrapper_hash,
+        index_parents,
+        Identity::ed25519([0u8; 32]),
+        [0u8; 32],
+        b"index".to_vec(),
+        timestamp_u64,
+        [0u8; 64],
+    ));
+    Ok(batch.write(&serialize::serialize(&index_commit)?)?)
+}
+
+fn check_reset_paths(
+    store: &ObjectStore,
+    head_tree: Option<Hash>,
+    tree_hash: Hash,
+    root: &std::path::Path,
+) -> StashResult<()> {
+    if let Some(tree) = head_tree {
+        restore::check_nested_repositories(
+            store,
+            tree,
+            root,
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            None,
+        )?;
+    }
+
+    if head_tree.is_some() {
+        for e in &diff_trees(store, Some(tree_hash), head_tree)?.entries {
+            if e.kind == DiffKind::Added && path_blocked(root, &e.path) {
+                return Err(StashError::IgnoredPathInTheWay(e.path.clone()));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -415,6 +556,7 @@ pub fn pop(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
+    check_untracked_restore(store, layout, &entry)?;
     // Record the popped commit in the recovery log BEFORE removing the
     // manifest entry: restored worktree files are not crash-durable
     // (ops/restore writes them unflushed), and the manifest entry is
@@ -434,12 +576,7 @@ pub fn pop(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<
         },
     )
     .map_err(|e| StashError::Io(io::Error::other(format!("recovery log: {e}"))))?;
-    restore::restore_tree_to_worktree(
-        store,
-        &commit.tree_hash,
-        layout.worktree_root(),
-        &RestoreOptions::default(),
-    )?;
+    restore_changes(store, layout, &entry, commit.tree_hash)?;
     list.entries.remove(idx);
     write_list(layout, &list)?;
     Ok(())
@@ -503,12 +640,180 @@ pub fn apply(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResul
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
-    restore::restore_tree_to_worktree(
+    check_untracked_restore(store, layout, entry)?;
+    restore_changes(store, layout, entry, commit.tree_hash)?;
+    Ok(())
+}
+
+/// Restore options restricted to paths changed by this stash.
+pub fn entry_restore_options(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    idx: usize,
+) -> StashResult<RestoreOptions> {
+    let list = read_list(layout)?;
+    let entry = list
+        .entries
+        .get(idx)
+        .ok_or(StashError::IndexOutOfRange(idx))?;
+    if !entry_is_scoped(store, entry)? {
+        return Ok(RestoreOptions::default());
+    }
+    let tree = entry_tree_hash(store, layout, idx)?;
+    let mut paths: Vec<_> = stash_changes(store, entry, tree)?
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .collect();
+    let base = base_index(
         store,
-        &commit.tree_hash,
-        layout.worktree_root(),
-        &RestoreOptions::default(),
+        (entry.parent_hash != ZERO).then_some(entry.parent_hash),
     )?;
+    for e in entry_index(store, layout, idx)?.entries {
+        if !base.find_entry(&e.path).is_some_and(|i| {
+            let b = &base.entries[i];
+            b.status == e.status && b.object_hash == e.object_hash
+        }) {
+            paths.push(e.path);
+        }
+    }
+    Ok(RestoreOptions {
+        clean: false,
+        sparse_patterns: Some(
+            paths
+                .into_iter()
+                .map(|p| restore::SparsePattern {
+                    pattern: format!("/{p}"),
+                    negated: false,
+                    dir_only: false,
+                })
+                .collect(),
+        ),
+    })
+}
+
+fn entry_is_scoped(store: &ObjectStore, entry: &StashEntry) -> StashResult<bool> {
+    let Object::Commit(stash) = store.read_object(&entry.commit_hash)? else {
+        return Err(StashError::NotACommit);
+    };
+    let parent = stash.parents.last().ok_or(StashError::InvalidFormat)?;
+    let Object::Commit(index) = store.read_object(parent)? else {
+        return Err(StashError::NotACommit);
+    };
+    let Object::Tree(wrapper) = store.read_object(&index.tree_hash)? else {
+        return Err(StashError::InvalidFormat);
+    };
+    let [i, p, t] = wrapper.entries.as_slice() else {
+        return Err(StashError::InvalidFormat);
+    };
+    if i.name != b"i"
+        || i.mode != EntryMode::Blob
+        || p.name != b"p"
+        || p.mode != EntryMode::Blob
+        || t.name != b"t"
+        || t.mode != EntryMode::Tree
+    {
+        return Err(StashError::InvalidFormat);
+    }
+    let scope = wrapper
+        .entries
+        .iter()
+        .find(|e| e.name == b"p" && e.mode == EntryMode::Blob)
+        .ok_or(StashError::InvalidFormat)?;
+    let Object::Blob(scope) = store.read_object(&scope.object_hash)? else {
+        return Err(StashError::InvalidFormat);
+    };
+    decode_scope_marker(&scope.data)
+}
+
+fn decode_scope_marker(data: &[u8]) -> StashResult<bool> {
+    match data {
+        [0] => Ok(false),
+        [1] => Ok(true),
+        _ => Err(StashError::InvalidFormat),
+    }
+}
+
+/// Exercise the local scope decoder from the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_scope_marker(data: &[u8]) -> Option<bool> {
+    decode_scope_marker(data).ok()
+}
+
+fn stash_changes(store: &ObjectStore, entry: &StashEntry, tree: Hash) -> StashResult<DiffResult> {
+    let base = if entry.parent_hash == ZERO {
+        None
+    } else {
+        match store.read_object(&entry.parent_hash)? {
+            Object::Commit(c) => Some(c.tree_hash),
+            _ => return Err(StashError::NotACommit),
+        }
+    };
+    Ok(diff_trees(store, base, Some(tree))?)
+}
+
+fn restore_changes(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    entry: &StashEntry,
+    tree: Hash,
+) -> StashResult<()> {
+    let changes = stash_changes(store, entry, tree)?;
+    let opts = RestoreOptions {
+        clean: false,
+        sparse_patterns: Some(
+            changes
+                .entries
+                .iter()
+                .map(|e| restore::SparsePattern {
+                    pattern: format!("/{}", e.path),
+                    negated: false,
+                    dir_only: false,
+                })
+                .collect(),
+        ),
+    };
+    restore::restore_tree_to_worktree(store, &tree, layout.worktree_root(), &opts)?;
+    for e in changes.entries {
+        if e.kind == DiffKind::Removed {
+            remove_snapshot_path(layout.worktree_root(), &e.path)?;
+        }
+    }
+    Ok(())
+}
+
+// Untracked additions must never overwrite an existing file, even one with
+// identical bytes. Check every destination before restoring any path.
+fn check_untracked_restore(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    entry: &StashEntry,
+) -> StashResult<()> {
+    let base = if entry.parent_hash == ZERO {
+        None
+    } else {
+        match store.read_object(&entry.parent_hash)? {
+            Object::Commit(c) => Some(c.tree_hash),
+            _ => return Err(StashError::NotACommit),
+        }
+    };
+    let Object::Commit(c) = store.read_object(&entry.commit_hash)? else {
+        return Err(StashError::NotACommit);
+    };
+    let tracked = index::read_or_seed_from_head(layout, store)
+        .map_err(|e| StashError::Io(io::Error::other(e)))?;
+    for e in diff_trees(store, base, Some(c.tree_hash))?.entries {
+        if (e.kind == DiffKind::Added
+            || (e.kind == DiffKind::Removed && !tracked.has_tracked_file_at(&e.path)))
+            && path_blocked(layout.worktree_root(), &e.path)
+        {
+            return Err(StashError::Io(io::Error::other(format!(
+                "untracked path '{}' would be overwritten",
+                e.path
+            ))));
+        }
+    }
     Ok(())
 }
 
@@ -654,7 +959,7 @@ fn read_list(layout: &RepoLayout) -> StashResult<StashList> {
 fn write_list(layout: &RepoLayout, list: &StashList) -> StashResult<()> {
     let bytes = serialize_list(list)?;
     let path = stash_path(layout);
-    atomic::write_atomic(&path, &bytes, true)?;
+    crate::durable::write_pointer(&path, &bytes, Parents::Create)?;
     Ok(())
 }
 
@@ -1080,6 +1385,23 @@ mod tests {
             matches!(entry_index(&store, root, 0), Err(StashError::InvalidFormat)),
             "a corrupt unborn [index] wrapper must fail closed"
         );
+    }
+
+    #[test]
+    fn scope_marker_is_canonical_and_required() {
+        assert!(!decode_scope_marker(&[0]).unwrap());
+        assert!(decode_scope_marker(&[1]).unwrap());
+        for bytes in [&[][..], &[2], &[0, 0], &[1, 0]] {
+            assert!(decode_scope_marker(bytes).is_err());
+        }
+        let (tmp, store) = fresh_store();
+        let layout = RepoLayout::single(tmp.path());
+        build_stash_fixture(&store, &layout);
+        let entry = read_list(&layout).unwrap().entries.remove(0);
+        assert!(matches!(
+            entry_is_scoped(&store, &entry),
+            Err(StashError::InvalidFormat)
+        ));
     }
 
     #[test]

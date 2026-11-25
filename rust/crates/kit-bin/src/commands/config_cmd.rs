@@ -77,7 +77,7 @@ pub fn run(args: &[String]) -> u8 {
         if !opts.args.is_empty() {
             return super::usage_error("kit config --unset takes no positional arguments");
         }
-        return run_unset(&layout, &layered, raw_key, opts.local, opts.global);
+        return run_unset(&layout, raw_key, opts.local, opts.global);
     }
 
     match opts.args.len() {
@@ -131,7 +131,14 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
-    let normalized_value = if key == "user.identity" {
+    let normalized_value = if matches!(key, "fetch.attestations" | "gc.auto" | "push.attestations")
+    {
+        let value = value.to_ascii_lowercase();
+        if !matches!(value.as_str(), "true" | "false") {
+            return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
+        }
+        value
+    } else if key == "user.identity" {
         match config::expand_user_identity(value) {
             Ok(v) => v,
             Err(e) => return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR),
@@ -165,8 +172,17 @@ pub fn run(args: &[String]) -> u8 {
     }
     // Apply to the repo layer only and persist that — never the merged
     // config — so user-scoped values are not materialized into the repo
-    // file (see the scope note above).
-    let mut repo_cfg = layered.repo;
+    // file (see the scope note above). The layer is read again under the
+    // config lock, so a change made by another `kit` command at the same
+    // time is kept.
+    let _lock = match config::lock(&layout) {
+        Ok(lock) => lock,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let mut repo_cfg = match config::read_layered(&layout) {
+        Ok(l) => l.repo,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
     if let Err(code) = apply(&mut repo_cfg, key, &normalized_value) {
         return code;
     }
@@ -182,7 +198,6 @@ pub fn run(args: &[String]) -> u8 {
 /// like `rm -f`, not an error — only an unknown key name is rejected.
 fn run_unset(
     layout: &kit_core::layout::RepoLayout,
-    layered: &config::LayeredConfig,
     raw_key: &str,
     local: bool,
     global: bool,
@@ -223,7 +238,14 @@ fn run_unset(
             ),
         };
     }
-    let mut repo_cfg = layered.repo.clone();
+    let _lock = match config::lock(layout) {
+        Ok(lock) => lock,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let mut repo_cfg = match config::read_layered(layout) {
+        Ok(l) => l.repo,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
     match unset_repo_key(&mut repo_cfg, key) {
         Ok(_removed) => {}
         Err(code) => return code,
@@ -253,6 +275,9 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
     match key {
         "default_branch" => Ok(take_nonempty(&mut cfg.default_branch)),
         "durability.objects" => Ok(take_nonempty(&mut cfg.durability_objects)),
+        "fetch.attestations" => Ok(take_nonempty(&mut cfg.fetch_attestations)),
+        "gc.auto" => Ok(take_nonempty(&mut cfg.gc_auto)),
+        "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -313,6 +338,9 @@ fn write_user_scoped(key: &str, value: &str) -> u8 {
 fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
         "default_branch" => value.clone_into(&mut cfg.default_branch),
+        "fetch.attestations" => value.clone_into(&mut cfg.fetch_attestations),
+        "gc.auto" => value.clone_into(&mut cfg.gc_auto),
+        "push.attestations" => value.clone_into(&mut cfg.push_attestations),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -372,6 +400,9 @@ const CONFIG_KEYS: &[&str] = &[
     "attest.signer",
     "default_branch",
     "durability.objects",
+    "fetch.attestations",
+    "gc.auto",
+    "push.attestations",
     "grant.webauthn_rp",
     "http.sslcainfo",
     "key.backend",
@@ -406,7 +437,14 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
+        "gc.auto" => Some(Cow::Borrowed(if cfg.gc_auto_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
         "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
+        "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
+        "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

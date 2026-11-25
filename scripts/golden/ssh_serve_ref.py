@@ -14,7 +14,9 @@
 #
 # What the model decides, from the specs:
 #   * the handshake and the rejection of an empty, repeated or misplaced frame;
-#   * ListRefs with the path-component prefix rule, sorted by name;
+#   * ListRefs with the path-component prefix rule, sorted by name, in pages
+#     of at most `page_size` refs after the name in `page_token`, with the
+#     last name of a page as the token while more follow;
 #   * ReadRef, and UpdateRef with the three CAS expectations, the
 #     `details` field that holds the current value, and the refusal of a name
 #     that breaks the ref grammar;
@@ -102,6 +104,10 @@ SESSIONS = {
     4: {"refs": {"refs/heads/main": b"\x11" * 32}, "packs": {}, "writable": True, "cursor": False},
 }
 MAX_CURSOR = 64
+# SPEC-TRANSPORT 4.2: the most refs of one ListRefs page, and the longest
+# page token (a ref name, SPEC-REFS section 3).
+MAX_PAGE_REFS = 1000
+MAX_TOKEN = 512
 
 
 def read_frames(data):
@@ -218,10 +224,17 @@ class Model:
         if not self.handshake:
             return self.error(INVALID), 0
         if kind == "list_refs":
+            # A listing names a page size, or it is refused.
+            if f.get(2, 0) == 0 or len(f.get(3, b"")) > MAX_TOKEN:
+                return self.error(INVALID), 0
             prefix = f.get(1, b"").decode()
             if prefix and not (ref_name_valid(prefix.rstrip("/")) or prefix.rstrip("/") == ""):
                 return self.error(BAD_NAME), 0
-            return [("list", tuple(list_refs(self.refs, prefix)))], 0
+            token = f.get(3, b"").decode()
+            rest = [e for e in list_refs(self.refs, prefix) if e[0] > token]
+            page = rest[: min(f[2], MAX_PAGE_REFS)]
+            more = page[-1][0].encode() if len(rest) > len(page) else b""
+            return [("list", tuple(page), more)], 0
         if kind == "read_repo_cursor":
             if self.cursor is not False:
                 raise ValueError("the model knows no cursor for this session")
@@ -294,7 +307,7 @@ def normalize(frames):
             events.append(("error", code, details))
         elif kind == "list_refs_response":
             refs = tuple((pairs(r)[1].decode(), pairs(r)[2]) for r in f.get(1, []))
-            events.append(("list", refs))
+            events.append(("list", refs, f.get(2, [b""])[0]))
         elif kind == "read_repo_cursor_response":
             expect(set(f) <= {1}, "ReadRepoCursorResponse holds only field 1")
             cursor = f.get(1)

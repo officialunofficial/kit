@@ -19,8 +19,9 @@ use http::Uri;
 use kit_client::{Client, Destination};
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, CommitOutcome, PackKey,
-    RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult, UploadLimits,
+    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, CommitOutcome, PackBody, PackKey,
+    PackSink, RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult,
+    UploadLimits,
 };
 use kit_core::refs::Ref;
 use kit_core::repo_identity::{IdentityError, RemoteIdentity, RepositoryIdentity};
@@ -275,14 +276,13 @@ pub const TOKEN_ENV: &str = "KIT_API_TOKEN";
 #[allow(clippy::duration_suboptimal_units)]
 pub const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default timeout for pack-transfer RPCs — `UploadPack`, `DownloadPack`.
-/// Generous enough for a
-/// large pack transfer over a slow link, bounded enough that a hung peer
-/// can't wedge a caller indefinitely. Override via
-/// [`ConnectTransport::with_pack_transfer_timeout`] for deployments moving
-/// unusually large packs over unusually slow links.
-#[allow(clippy::duration_suboptimal_units)]
-pub const PACK_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default stall bound for pack-transfer RPCs — `UploadPack`, `UploadPart`,
+/// `DownloadPack`: a transfer fails once this long passes with no byte sent
+/// or received, and is retried on the same ladder as a lost connection. It
+/// bounds silence, not total time, so a slow link that keeps moving data
+/// finishes a pack of any size, while a hung peer still fails within a
+/// minute. Override via [`ConnectTransport::with_pack_transfer_timeout`].
+pub const PACK_TRANSFER_TIMEOUT: Duration = kit_sync::DEFAULT_TRANSFER_TIMEOUT;
 
 /// Per-`UploadPack`-chunk data cap. Mirrors
 /// `kit_rpc::helpers::CHUNK_DATA_MAX` (the SSH/enc wire's per-frame pack
@@ -306,7 +306,6 @@ pub struct ConnectTransport {
     pub(crate) signer_key: Option<String>,
     pub(crate) grant_source: Option<Arc<dyn GrantSource>>,
     pub(crate) unary_timeout: Duration,
-    pub(crate) pack_transfer_timeout: Duration,
     pub(crate) backoff: fn() -> BackoffIterator,
     pub(crate) sleep: fn(Duration),
     pub(crate) now: fn() -> i64,
@@ -333,7 +332,6 @@ impl std::fmt::Debug for ConnectTransport {
         f.debug_struct("ConnectTransport")
             .field("remote_identity", &self.remote_identity)
             .field("unary_timeout", &self.unary_timeout)
-            .field("pack_transfer_timeout", &self.pack_transfer_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -556,7 +554,6 @@ impl ConnectTransport {
             token,
             grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
-            pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
             sleep: thread::sleep,
             now: crate::envelope::now_ms,
@@ -655,14 +652,13 @@ impl ConnectTransport {
         self.http = self.http.with_metadata_timeout(timeout);
         self
     }
-    /// Override the per-call timeout applied to pack-transfer RPCs
-    /// (`UploadPack`, `DownloadPack`). Defaults to
-    /// [`PACK_TRANSFER_TIMEOUT`]. Independent of
+    /// Override the stall bound of pack-transfer RPCs (`UploadPack`,
+    /// `UploadPart`, `DownloadPack`): how long one may send and receive
+    /// nothing. Defaults to [`PACK_TRANSFER_TIMEOUT`]. Independent of
     /// [`Self::with_unary_timeout`] — changing one does not affect the
     /// other.
     #[must_use]
     pub fn with_pack_transfer_timeout(mut self, timeout: Duration) -> Self {
-        self.pack_transfer_timeout = timeout;
         self.http = self.http.with_transfer_timeout(timeout);
         self
     }
@@ -1024,32 +1020,121 @@ impl ConnectTransport {
         }
     }
 }
+/// A blob download into memory that remembers a length over its bound, so
+/// the refusal reaches the caller as `PayloadTooLarge`.
+struct BlobSink {
+    inner: kit_core::protocol::MemorySink,
+    refused: Option<u64>,
+}
+
+impl PackSink for BlobSink {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        // A new attempt, such as the fallback after a location, starts over.
+        self.refused = None;
+        let begun = self.inner.begin(declared);
+        if let Err(TransportError::PayloadTooLarge(_)) = begun {
+            self.refused = declared;
+        }
+        begun
+    }
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        let written = self.inner.write(bytes);
+        if let Err(TransportError::PayloadTooLarge(len)) = written {
+            self.refused = Some(len as u64);
+        }
+        written
+    }
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.inner.failed()
+    }
+}
+
 impl Transport for ConnectTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.with_client_source(|source| source.upload_pack_unhinted(bytes, key))
-            .map_err(super::host::upload_error)
+    fn supports_attestations(&self) -> bool {
+        matches!(self.server_info(), ServerInfoView::V2(info) if info.supports_attestations == Some(true))
     }
-    fn upload_pack_via_ref(&self, bytes: &[u8], key: &PackKey, name: &str) -> TransportResult<()> {
-        self.with_client_source(|source| source.upload_pack_via_ref(bytes, key, name))
-            .map_err(super::host::upload_error)
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> TransportResult<()> {
+        self.with_client_source(|source| source.write_attestmap(condition, tip, keys))
     }
-    fn upload_blob_via_ref(&self, bytes: &[u8], key: &PackKey, name: &str) -> TransportResult<()> {
-        self.upload_pack_via_ref(bytes, key, name)
+
+    /// Streams the pack from its body, one chunk at a time.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        head_ref: Option<&str>,
+    ) -> TransportResult<()> {
+        let uploaded = match head_ref {
+            Some(name) => self.with_client_source(|source| source.upload_pack(pack, key, name)),
+            None => self.with_client_source(|source| source.upload_pack_unhinted(pack, key)),
+        };
+        uploaded.map_err(super::host::upload_error)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.with_client_source(|source| source.download_pack_unhinted(key))
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: Option<&str>,
+    ) -> TransportResult<()> {
+        self.upload_pack(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<Vec<u8>> {
-        self.with_client_source(|source| source.download_pack_via_ref(key, name))
+    /// Streams the pack into `sink` as it arrives, holding one bounded
+    /// Connect frame.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        match ref_hint {
+            Some(name) => self.with_client_source(|source| source.download_pack(key, name, sink)),
+            None => self.with_client_source(|source| source.download_pack_unhinted(key, sink)),
+        }
     }
-    fn download_blob_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<Vec<u8>> {
-        self.download_pack_via_ref(key, name)
+    /// A hinted node download keeps the client's own node bound, which is
+    /// tighter than any `max` a caller passes. An unhinted one is bounded by
+    /// `max`. The bytes are in memory, so they are checked against the key
+    /// here.
+    fn download_blob(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> TransportResult<Vec<u8>> {
+        let bytes = match ref_hint {
+            Some(name) => self.with_client_source(|source| source.download_blob(key, name))?,
+            None => {
+                let mut sink = BlobSink {
+                    inner: kit_core::protocol::MemorySink::new(max),
+                    refused: None,
+                };
+                let downloaded =
+                    self.with_client_source(|source| source.download_pack_unhinted(key, &mut sink));
+                if let Some(len) = sink.refused {
+                    return Err(TransportError::PayloadTooLarge(
+                        kit_core::protocol::saturating_usize(len),
+                    ));
+                }
+                downloaded?;
+                sink.inner.into_bytes()?
+            }
+        };
+        if bytes.len() as u64 > max {
+            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        }
+        key.verify_bytes(&bytes)?;
+        Ok(bytes)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.with_client_source(|source| source.pack_exists(key))
-    }
-    fn pack_exists_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<bool> {
-        self.with_client_source(|source| source.pack_exists_via_ref(key, name))
+    fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool> {
+        match ref_hint {
+            Some(name) => self.with_client_source(|source| source.pack_exists_via_ref(key, name)),
+            None => self.with_client_source(|source| source.pack_exists(key)),
+        }
     }
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
         Some(RepositoryAddress::new(&self.repository_text, &self.origin))
@@ -1062,9 +1147,32 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         self.with_client_source(|source| source.update_ref(name, condition, tip))
     }
+    /// `UpdateRef` with `delete` under `MATCH` (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.with_client_source(|source| source.delete_ref(name, expected))
+    }
+    /// One `AdvanceRefs` with `delete`: both refs go, or neither does
+    /// (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> TransportResult<CoreAdvanceOutcome> {
+        self.with_client_source(|source| {
+            RemoteSource::delete_refs(source, head, head_expected, map, map_expected)
+        })
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.with_client_source(|source| source.read_ref(name))
     }
+    /// A Connect server's listing may lag a write (SPEC-TRANSPORT-CONNECT
+    /// §7.9).
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Eventual
+    }
+
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         self.list_refs_with_page_limit(prefix, kit_core::ref_listing::MAX_PAGES)
     }
@@ -1431,10 +1539,12 @@ mod tests {
     fn timeouts_default_to_the_named_constants() {
         let t = ConnectTransport::connect("kit+http://127.0.0.1:9/proj").unwrap();
         assert_eq!(t.unary_timeout, UNARY_TIMEOUT);
-        assert_eq!(t.pack_transfer_timeout, PACK_TRANSFER_TIMEOUT);
+        assert_eq!(PACK_TRANSFER_TIMEOUT, Duration::from_mins(1));
         assert!(
-            t.unary_timeout < t.pack_transfer_timeout,
-            "the unary class must default shorter than the pack-transfer class"
+            format!("{:?}", t.http)
+                .contains(&format!("transfer_timeout: {PACK_TRANSFER_TIMEOUT:?}")),
+            "{:?}",
+            t.http
         );
     }
 
@@ -1445,7 +1555,9 @@ mod tests {
             .with_unary_timeout(Duration::from_millis(5))
             .with_pack_transfer_timeout(Duration::from_secs(600));
         assert_eq!(t.unary_timeout, Duration::from_millis(5));
-        assert_eq!(t.pack_transfer_timeout, Duration::from_secs(600));
+        let http = format!("{:?}", t.http);
+        assert!(http.contains("metadata_timeout: 5ms"), "{http}");
+        assert!(http.contains("transfer_timeout: 600s"), "{http}");
     }
 
     // -- condition_to_wire() --------------------------------------------

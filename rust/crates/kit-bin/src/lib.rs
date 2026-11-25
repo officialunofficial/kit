@@ -16,11 +16,13 @@ mod admission_helper;
 pub mod clap_args;
 pub mod cli;
 pub mod commands;
+mod completion;
 pub mod config;
 pub mod editor;
 mod environment;
 pub mod exit;
 pub mod exit_map;
+pub mod fd_limit;
 pub mod format;
 pub mod grants;
 pub mod progress;
@@ -41,12 +43,18 @@ use std::io::Write;
 /// spawn the binary (full end-to-end) or drive this entry point
 /// directly (in-process, faster). We keep this function small and
 /// dispatch-only so the command modules remain easy to snapshot.
+///
+/// When the binary called [`signal::enable`], a command that polls the
+/// shutdown flag, or runs a multi-step operation, installs the SIGINT and
+/// SIGTERM handlers here ([`signal::defers_interrupt`]); every other command
+/// keeps the default action. A caller that did not call [`signal::enable`]
+/// gets no signal handler.
 #[must_use]
 #[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
 pub fn dispatch(argv: &[String]) -> u8 {
-    // Consume leading global flags (`-C <path>`, `-c <key>=<val>`, and the
-    // accepted-as-no-op pager flags) BEFORE resolving the subcommand, so
-    // they apply to every command and to repo discovery — like git.
+    // Consume leading global flags (`-C <path>` and `-c <key>=<val>`) BEFORE
+    // resolving the subcommand, so they apply to every command and to repo
+    // discovery, like git.
     let (cmd_idx, overrides) = match parse_global_flags(argv) {
         Ok(parsed) => parsed,
         Err(code) => return code,
@@ -59,8 +67,12 @@ pub fn dispatch(argv: &[String]) -> u8 {
     }
     let cmd = &argv[cmd_idx];
     let rest: Vec<String> = argv.iter().skip(cmd_idx + 1).cloned().collect();
+    if signal::defers_interrupt(cmd, &rest) {
+        signal::install();
+    }
 
     match cmd.as_str() {
+        "__complete" => completion::run(&rest),
         "-h" | "--help" | "help" => {
             let mut stdout = std::io::stdout().lock();
             let _ = stdout.write_all(cli::HELP_TEXT.as_bytes());

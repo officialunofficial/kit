@@ -7,7 +7,7 @@
 //! The module also keeps two helpers for the commands that sign objects:
 //! `load_commit_signer` and `resolve_author`.
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
@@ -17,7 +17,7 @@ use libkit::signer::{self, Signer};
 
 use crate::clap_args;
 use crate::config::Config;
-use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
+use crate::editor::{COMMIT_EDITMSG_TEMPLATE, check_usable, spawn_editor};
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -129,14 +129,20 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
                 Err(e) => return emit_err(&format!("read message file: {e}"), exit::NOINPUT),
             },
-            None => match pending.default_message() {
-                Some(m) => m,
-                None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-                    Ok(m) if !m.is_empty() => m,
-                    Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
-                    Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
-                },
-            },
+            None => {
+                if let Some(m) = pending.default_message() {
+                    m
+                } else {
+                    if let Err(e) = check_usable() {
+                        return emit_err(&format!("commit: {e}, or pass -m <msg>"), exit::USAGE);
+                    }
+                    match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                        Ok(m) if !m.is_empty() => m,
+                        Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+                        Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+                    }
+                }
+            }
         },
     };
 
@@ -200,7 +206,7 @@ pub fn run(args: &[String]) -> u8 {
         None => super::summary::HeadRef::Detached,
     };
     if !opts.quiet {
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = BufWriter::with_capacity(8 * 1024, std::io::stderr().lock());
         super::summary::print_commit_summary(
             &mut stderr,
             &store,
@@ -211,6 +217,7 @@ pub fn run(args: &[String]) -> u8 {
             created.base_tree,
             Some(created.tree),
         );
+        let _ = stderr.flush();
     }
     if json {
         let mut obj = JsonObject::new();
@@ -234,6 +241,10 @@ pub fn run(args: &[String]) -> u8 {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
+    // The commit is published and its locks are released. A repository that
+    // never fetches builds up packs, so the due step runs here, after the
+    // output, and cannot change the result.
+    super::maintenance::after_write(&layout, &store, &cfg, opts.quiet);
     exit::OK
 }
 

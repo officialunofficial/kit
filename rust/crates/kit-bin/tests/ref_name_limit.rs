@@ -1,7 +1,8 @@
 //! SPEC-REFS §3's 512-byte ref-name bound, end to end through the real
 //! binary. A new branch name must leave `refs/heads/<b>` and
 //! `refs/kit/packmap/<b>` within it (495 bytes), and a new tag
-//! `refs/tags/<t>` (502 bytes); longer ones are refused with a message
+//! `refs/tags/<t>` and `refs/kit/tagmap/<t>` (496 bytes); longer ones are
+//! refused with a message
 //! naming the limit. A branch over the bound that predates it keeps the
 //! repository usable: it is listed, `kit branch -m`/`-D` get rid of it,
 //! and a push of it names the limit.
@@ -74,7 +75,7 @@ fn plant_branch(root: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
-fn new_branch_over_495_or_tag_over_502_bytes_is_refused_naming_the_limit() {
+fn new_branch_over_495_or_tag_over_496_bytes_is_refused_naming_the_limit() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
     let branch = long_name(496, 'b');
@@ -89,16 +90,17 @@ fn new_branch_over_495_or_tag_over_502_bytes_is_refused_naming_the_limit() {
             args[0]
         );
     }
-    let tag = long_name(503, 't');
+    let tag = long_name(497, 't');
     let out = run_in(root, x, &["tag", &tag]);
     assert!(!out.status.success());
     assert!(
-        stderr(&out).contains("tag name too long (503 bytes; at most 502"),
+        stderr(&out).contains("tag name too long (497 bytes; at most 496")
+            && stderr(&out).contains("refs/kit/tagmap/<name>"),
         "{}",
         stderr(&out)
     );
     // At the bounds exactly, both are created.
-    let out = run_in(root, x, &["tag", &long_name(502, 't')]);
+    let out = run_in(root, x, &["tag", &long_name(496, 't')]);
     assert!(out.status.success(), "{}", stderr(&out));
     let out = run_in(root, x, &["branch", &long_name(495, 'b')]);
     assert!(out.status.success(), "{}", stderr(&out));

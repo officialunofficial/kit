@@ -16,6 +16,19 @@ variable is unset. An unset key pair does not fail construction. The first
 signed call returns `TransportError::AccessDenied`.
 
 Retry policy mirrors SPEC-TRANSPORT §7 via
-`kit_core::protocol::BackoffIterator`: `5xx` and HTTP `429` retry up to 5
+`kit_core::protocol::BackoffIterator`: `5xx`, HTTP `408` and `429` retry up to 5
 attempts; `412 Precondition Failed` never retries, so CAS writes can't
 silently turn into duplicate `PUT`s.
+
+Packs stream both ways (SPEC-TRANSPORT §6.7). An upload hashes the pack's
+body once for the `SigV4` payload hash, then sends it in one sized `PUT`,
+reading it again from offset 0 on every attempt. A download writes only a
+`200` answer's body to the sink, as it arrives. Neither holds the pack in
+memory.
+
+Pack uploads send `Expect: 100-continue`. They wait for `100 Continue`
+before sending bytes, or at most one second if the store omits it.
+An early 4xx refusal ends the upload without retry. HTTP 408 and 429,
+and S3 timeout, internal-error and slow-down codes, remain retryable.
+The error names the HTTP status and the S3 code from the response header
+or at most 4 KiB of its XML body. Other response details stay private.

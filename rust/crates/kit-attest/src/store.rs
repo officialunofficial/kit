@@ -15,20 +15,12 @@
 //! the filename a stable, content-addressed function of the envelope —
 //! re-writing identical bytes is a no-op (idempotent via stat).
 //!
-//! Durability mirrors `kit-core::store`:
-//! `tempfile::NamedTempFile::persist` (atomic rename) plus an
-//! Unix-only `fsync` of the containing commit directory afterwards so
-//! the dirent update survives a power loss.
+//! Durability is `kit_core::durable::write_pointer`: the bytes are flushed,
+//! the file is renamed into place, and the containing commit directory is
+//! flushed afterwards so the dirent update survives a power loss.
 
 use std::fs;
-#[cfg(unix)]
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use tempfile::NamedTempFile;
 
 use crate::Error;
 use crate::envelope as env_mod;
@@ -68,8 +60,7 @@ pub fn envelope_path(layout: &RepoLayout, commit: &Hash, att_id: &Hash) -> PathB
 ///
 /// # Panics
 /// Panics if `envelope_path` (an internal helper) returns a path with
-/// no parent or no file name. Both invariants are upheld by the path
-/// builder, so this only fires on programmer error.
+/// no parent. The path builder upholds that invariant.
 pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, PathBuf), Error> {
     if bytes.len() > MAX_ENVELOPE_SIZE {
         return Err(Error::EnvelopeTooLarge {
@@ -89,7 +80,8 @@ pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, P
     let parent = final_path.parent().expect("envelope_path has parent");
     fs::create_dir_all(parent).map_err(|e| Error::Io(format!("mkdir: {e}")))?;
 
-    write_atomic(&final_path, bytes)?;
+    kit_core::durable::write_pointer(&final_path, bytes, kit_core::durable::Parents::Existing)
+        .map_err(|e| Error::Io(format!("write: {e}")))?;
     Ok((att_id, final_path))
 }
 
@@ -189,49 +181,6 @@ fn parse_att_filename(name: &str) -> Option<Hash> {
         return None;
     }
     hash_mod::from_hex(stem).ok()
-}
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
-fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let parent = final_path.parent().expect("final_path has parent");
-    let file_name = final_path
-        .file_name()
-        .expect("final_path has file name")
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_prefix = format!(".{file_name}.tmp.{pid}.{seq}");
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_prefix, parent)
-        .map_err(|e| Error::Io(format!("tmpfile: {e}")))?;
-    tmp.as_file_mut()
-        .write_all(bytes)
-        .map_err(|e| Error::Io(format!("write tmp: {e}")))?;
-    tmp.as_file_mut()
-        .sync_all()
-        .map_err(|e| Error::Io(format!("fsync tmp: {e}")))?;
-    tmp.persist(final_path)
-        .map_err(|e| Error::Io(format!("persist: {}", e.error)))?;
-    sync_parent_dir(parent)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> Result<(), Error> {
-    match File::open(parent) {
-        Ok(dir) => dir
-            .sync_all()
-            .map_err(|e| Error::Io(format!("fsync dir: {e}"))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Error::Io(format!("open dir: {e}"))),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Mirrors the unix signature.
-fn sync_parent_dir(_parent: &Path) -> Result<(), Error> {
-    Ok(())
 }
 
 #[cfg(test)]

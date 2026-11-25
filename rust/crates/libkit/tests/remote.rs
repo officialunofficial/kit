@@ -30,6 +30,18 @@ fn repo() -> (tempfile::TempDir, RepoLayout) {
     (dir, layout)
 }
 
+/// A remote put in the config without `remote::add`, as a hand-edited config
+/// can hold two names where one is a path prefix of the other.
+fn insert_overlapping(cfg: &mut Config, name: &str, url: &str) {
+    cfg.remotes.insert(
+        name.to_owned(),
+        RemoteEntry {
+            url: url.to_owned(),
+            remote_type: "file".to_owned(),
+        },
+    );
+}
+
 /// The repo layer of the config, as the command reads it.
 fn read(layout: &RepoLayout, home: &Path) -> Config {
     let env = libkit::Environment {
@@ -227,8 +239,8 @@ fn remove_default_clears_the_flat_remote() {
 fn remove_keeps_the_refs_of_a_nested_remote_and_says_the_bridge_state_stays() {
     let (_dir, layout) = repo();
     let mut cfg = Config::default();
-    remote::add(&layout, &mut cfg, Some("a"), "kit+file:///a").unwrap();
-    remote::add(&layout, &mut cfg, Some("a/b"), "kit+file:///ab").unwrap();
+    insert_overlapping(&mut cfg, "a", "kit+file:///a");
+    insert_overlapping(&mut cfg, "a/b", "kit+file:///ab");
     touch(&layout.remotes_dir().join("a/main"));
     touch(&layout.remotes_dir().join("a/b/main"));
     touch(&layout.git_state_dir().join("a/map"));
@@ -328,8 +340,8 @@ fn rename_between_a_prefix_and_its_extension_moves_the_state() {
 fn rename_keeps_a_nested_remote_in_place() {
     let (_dir, layout) = repo();
     let mut cfg = Config::default();
-    remote::add(&layout, &mut cfg, Some("a"), "kit+file:///a").unwrap();
-    remote::add(&layout, &mut cfg, Some("a/b"), "kit+file:///ab").unwrap();
+    insert_overlapping(&mut cfg, "a", "kit+file:///a");
+    insert_overlapping(&mut cfg, "a/b", "kit+file:///ab");
     touch(&layout.remotes_dir().join("a/main"));
     touch(&layout.remotes_dir().join("a/b/main"));
     remote::rename(&layout, &mut cfg, "a", "c", &NoopObserver).unwrap();
@@ -342,22 +354,63 @@ fn rename_keeps_a_nested_remote_in_place() {
 fn rename_into_an_occupied_sibling_fails_closed() {
     let (_dir, layout) = repo();
     let mut cfg = Config::default();
-    remote::add(&layout, &mut cfg, Some("a/b"), "kit+file:///ab").unwrap();
-    remote::add(&layout, &mut cfg, Some("a/x"), "kit+file:///ax").unwrap();
+    insert_overlapping(&mut cfg, "a/b", "kit+file:///ab");
+    insert_overlapping(&mut cfg, "a/x", "kit+file:///ax");
     touch(&layout.remotes_dir().join("a/b/main"));
     touch(&layout.remotes_dir().join("a/x/main"));
     let recorder = Recorder::default();
-    remote::rename(&layout, &mut cfg, "a/b", "a", &recorder).unwrap();
-
-    // The config changed. The tracking refs did not move, and the event says so.
+    remote::rename(&layout, &mut cfg, "a/b", "a", &recorder).unwrap_err();
     assert!(layout.remotes_dir().join("a/b/main").exists());
     assert!(layout.remotes_dir().join("a/x/main").exists());
-    let events = recorder.events.borrow();
+    assert!(recorder.events.borrow().is_empty());
+}
+
+#[test]
+fn add_and_rename_refuse_a_name_that_overlaps_another_remote() {
+    let (_dir, layout) = repo();
+    let mut cfg = Config::default();
+    remote::add(&layout, &mut cfg, Some("team"), "kit+file:///t").unwrap();
+    remote::add(&layout, &mut cfg, Some("teammate"), "kit+file:///m").unwrap();
+    remote::add(&layout, &mut cfg, Some("other/x"), "kit+file:///o").unwrap();
+    let before = cfg.clone();
+
+    // `team` is a path prefix of `team/upstream`.
+    let err = remote::add(&layout, &mut cfg, Some("team/upstream"), "kit+file:///u").unwrap_err();
     assert!(
-        matches!(
-            events.as_slice(),
-            [Event::TrackingRefsNotMoved { old, new, .. }] if old == "a/b" && new == "a"
-        ),
-        "{events:?}"
+        matches!(err, Error::OverlappingName { ref name, ref other } if name == "team/upstream" && other == "team"),
+        "{err:?}"
     );
+    // `other/x` has the new name as a path prefix.
+    let err = remote::add(&layout, &mut cfg, Some("other"), "kit+file:///o2").unwrap_err();
+    assert!(
+        matches!(err, Error::OverlappingName { ref other, .. } if other == "other/x"),
+        "{err:?}"
+    );
+    let err = remote::rename(&layout, &mut cfg, "teammate", "team/b", &NoopObserver).unwrap_err();
+    assert!(matches!(err, Error::OverlappingName { .. }), "{err:?}");
+    assert_eq!(cfg, before);
+
+    // A shared string prefix is not a path prefix. A remote replaces itself,
+    // and a rename ignores the remote it renames.
+    remote::add(&layout, &mut cfg, Some("team"), "kit+file:///t2").unwrap();
+    remote::add(&layout, &mut cfg, Some("other/x"), "kit+file:///o3").unwrap();
+    remote::rename(&layout, &mut cfg, "team", "team/main", &NoopObserver).unwrap();
+}
+
+#[test]
+fn changing_a_remote_url_invalidates_attestation_caches_but_keeps_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = kit_core::layout::RepoLayout::single(dir.path());
+    std::fs::create_dir_all(layout.common_dir()).unwrap();
+    let mut config = libkit::config::Config::default();
+    libkit::remote::add(&layout, &mut config, Some("origin"), "kit+file:///a").unwrap();
+    let cache = layout.applied_packs_dir().join(".cursors");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("cached.attest-push"), b"cache").unwrap();
+    let provenance = kit_sync::attestation_records::fetched_path(&layout, &[1; 32]);
+    std::fs::create_dir_all(provenance.parent().unwrap()).unwrap();
+    std::fs::write(&provenance, b"").unwrap();
+    libkit::remote::set_url(&layout, &mut config, "origin", "kit+file:///b").unwrap();
+    assert!(!cache.exists());
+    assert!(provenance.exists());
 }

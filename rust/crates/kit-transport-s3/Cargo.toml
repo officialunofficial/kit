@@ -21,8 +21,17 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-kit-core = { version = "=0.8.1", path = "../kit-core" }
+kit-core = { version = "=0.10.0", path = "../kit-core" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "blocking"] }
+# A pack `PUT` runs on the async client, on a runtime of its own, so a
+# stalled upload can be ended (the blocking client bounds a request with a
+# body only in total).
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "sync", "time"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+http-body = "1.1.0"
+http = "1.5.0"
+hyper = { version = "1.12.0", default-features = false, features = ["client", "http1"] }
+bytes = "1.12.2"
 sha2 = "0.11.1"
 hmac = "0.13.0"
 md-5 = "0.11.0"
@@ -33,26 +42,11 @@ default = []
 # Wire-level sparse-checkout fetch. Mirrors the
 # kit-core feature; both must be enabled together. Off by default.
 sparse-checkout = ["kit-core/sparse-checkout"]
-# Test-only: shrinks `S3_SINGLE_PUT_MAX` and the internal
-# multipart part size to small values (single-digit MiB) so the
-# multipart-upload integration test can drive the real
-# CreateMultipartUpload -> UploadPart -> CompleteMultipartUpload flow
-# against a mockito server without allocating or transferring
-# multi-GiB buffers. MUST NOT be enabled in a production build — the
-# shrunk `S3_SINGLE_PUT_MAX` is not a valid S3 API limit. Excluded
-# from the docs.rs feature set below for that reason.
-test-small-multipart-caps = []
 
 [dev-dependencies]
+kit-test-util = { path = "../kit-test-util" }
 mockito = "1.7.2"
 serde_json = "1.0.154"
-
-# Multipart-upload round-trip test, gated behind `test-small-multipart-caps`
-# (see that feature's doc comment above) so a plain `cargo test` doesn't
-# need to move real multi-GiB buffers to exercise the multipart path.
-[[test]]
-name = "transport_multipart"
-required-features = ["test-small-multipart-caps"]
 
 # cargo-machete matches the crate name `md-5` to the identifier `md_5`.
 # The library of that crate is named `md5`, and src/lib.rs has `use md5::...`.
@@ -60,7 +54,6 @@ required-features = ["test-small-multipart-caps"]
 ignored = ["md-5"]
 
 [package.metadata.docs.rs]
-# Build docs with the real (non-test) feature set so docs.rs renders the
-# feature-gated API without advertising the test-only shrunk caps.
-features = ["sparse-checkout"]
+# Build docs with every feature so docs.rs renders the feature-gated API.
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

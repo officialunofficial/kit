@@ -1,8 +1,8 @@
 //! A peer-declared pack size must not drive an allocation.
 //!
-//! `Transport::upload_pack_streaming` receives `total_bytes` from the peer.
-//! A hostile peer can declare the largest allowed size and send a few bytes.
-//! The default implementation must grow its buffer as chunks arrive. It
+//! A transport hands a `PackSink` the length the peer declares. A hostile
+//! peer can declare the largest allowed size and send a few bytes. A sink
+//! that keeps the body in memory must grow its buffer as bytes arrive. It
 //! must not reserve the declared size up front.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 #![allow(unsafe_code)] // the counting allocator below wraps `System`
@@ -10,8 +10,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use kit_core::protocol::{PACK_BODY_LIMIT, PackChunk};
-use kit_core::{Hash, PackKey, Ref, RefWriteCondition, Transport, TransportError, TransportResult};
+use kit_core::TransportError;
+use kit_core::protocol::{MemorySink, PACK_BODY_LIMIT, PackSink};
 
 /// Records the largest single allocation request.
 struct CountingAlloc;
@@ -49,55 +49,18 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
-struct SinkTransport;
-
-impl Transport for SinkTransport {
-    fn upload_pack(&self, _bytes: &[u8], _key: &PackKey) -> TransportResult<()> {
-        Ok(())
-    }
-
-    fn download_pack(&self, _key: &PackKey) -> TransportResult<Vec<u8>> {
-        Err(TransportError::PackNotFound)
-    }
-
-    fn pack_exists(&self, _key: &PackKey) -> TransportResult<bool> {
-        Ok(false)
-    }
-
-    fn update_ref(
-        &self,
-        _name: &str,
-        _condition: RefWriteCondition,
-        _hash: &Hash,
-    ) -> TransportResult<()> {
-        Ok(())
-    }
-
-    fn read_ref(&self, _name: &str) -> TransportResult<Option<Hash>> {
-        Ok(None)
-    }
-
-    fn list_refs(&self, _prefix: &str) -> TransportResult<Vec<Ref>> {
-        Ok(Vec::new())
-    }
-}
-
 #[test]
 fn hostile_declared_size_does_not_allocate() {
-    let key = PackKey::new([0x55; 32]);
-    let mut chunks = core::iter::once(Ok(PackChunk {
-        offset: 0,
-        data: vec![1, 2, 3],
-        last: true,
-    }));
-
     let before = LARGEST.load(Ordering::Relaxed);
-    let err = SinkTransport
-        .upload_pack_streaming(&key, PACK_BODY_LIMIT, &mut chunks)
+    let mut sink = MemorySink::new(PACK_BODY_LIMIT);
+    sink.begin(Some(PACK_BODY_LIMIT)).unwrap();
+    sink.write(&[1, 2, 3]).unwrap();
+    let err = sink
+        .into_bytes()
         .expect_err("a declared size that does not match the data must fail");
     let after = LARGEST.load(Ordering::Relaxed);
 
-    assert!(matches!(err, TransportError::ProtocolError));
+    assert!(matches!(err, TransportError::InvalidResponse));
     assert!(
         before < 1 << 20 && after < 1 << 20,
         "allocated {after} bytes"

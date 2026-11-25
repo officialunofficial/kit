@@ -9,7 +9,7 @@ use std::path::Path;
 
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use kit_core::ops::pull_state::PullState;
 use kit_core::pack::{self, PackWriter};
 use kit_core::protocol::{PackKey, Transport};
@@ -17,8 +17,8 @@ use kit_core::refs::{self, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
 use kit_core::transfer;
 use kit_sync::{
-    CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError, SyncEvent,
-    SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
+    CloneError, CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError,
+    SyncEvent, SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
 
@@ -52,6 +52,14 @@ impl Remote {
     /// a re-baselining push resets a packmap.
     fn publish_reset(&self, files: &[(&str, &[u8])]) -> Hash {
         let (objects, tip) = self.build(None, files, true);
+        self.publish_objects(&objects, tip, true);
+        tip
+    }
+
+    /// Move `main` to a new commit on `parent`, even when that is not a
+    /// fast-forward of the branch.
+    fn publish_on(&self, parent: Hash, files: &[(&str, &[u8])]) -> Hash {
+        let (objects, tip) = self.build(Some(parent), files, true);
         self.publish_objects(&objects, tip, true);
         tip
     }
@@ -136,7 +144,11 @@ impl Remote {
     fn publish_pack(&self, pack: &[u8], tip: Hash, reset: bool) {
         let pack_key = pack::pack_key(pack);
         self.tx
-            .upload_pack(pack, &PackKey::from_hash(pack_key))
+            .upload_pack(
+                &kit_core::protocol::SliceBody(pack),
+                &PackKey::from_hash(pack_key),
+                None,
+            )
             .unwrap();
         let prev = if reset {
             None
@@ -146,7 +158,7 @@ impl Remote {
         let node = transfer::encode_packlist(prev, &[pack_key]).unwrap();
         let node_key = hash::hash(&node);
         self.tx
-            .upload_blob(&node, &PackKey::from_hash(node_key))
+            .upload_blob(&node, &PackKey::from_hash(node_key), None)
             .unwrap();
         let condition = if reset {
             RefWriteCondition::Any
@@ -263,22 +275,26 @@ impl RemoteSource for StaleListing<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         Ok(self.listing.clone())
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &PackKey,
         ref_name: &str,
     ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -299,6 +315,285 @@ fn clone_into(remote: &Remote, dir: &Path) -> kit_sync::CloneReport {
         &NoopObserver,
     )
     .unwrap()
+}
+
+// These fixtures need to unlink individual objects to model a damaged store.
+fn clone_loose_into(remote: &Remote, dir: &Path) {
+    let layout = init_clone_dir(dir, &default_remote("kit+memory://x")).unwrap();
+    kit_core::fault::keep_loose(&layout);
+    clone_into(remote, dir);
+}
+
+/// Deterministic bytes that the chunker cuts into several chunks.
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[3]
+        })
+        .collect()
+}
+
+/// The content length of a whole-file blob that serializes to the largest
+/// object a fetch packs.
+const PACKED_BLOB_BYTES: usize = kit_core::chunker::MAX_SIZE;
+
+#[test]
+fn maintenance_stamps_a_clone_and_skips_an_up_to_date_fetch() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let report = clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    assert!(stamp.is_file(), "{report:?}");
+    std::fs::remove_file(&stamp).unwrap();
+
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(!stamp.exists());
+}
+
+#[test]
+fn maintenance_can_be_disabled_for_a_fetch_that_applies_a_pack() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    std::fs::remove_file(&stamp).unwrap();
+    remote.publish(Some(first), &[("a", b"second")], true);
+
+    let report = fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_auto_maintenance(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_ne!(report.packs_downloaded, 0);
+    assert!(report.maintenance.is_none());
+    assert!(!stamp.exists());
+}
+
+#[test]
+fn clone_packs_every_object_up_to_the_size_limit_and_leaves_larger_ones_loose() {
+    let remote = Remote::new();
+    let chunked = noise(3 << 20, 7);
+    let at_limit = vec![1; PACKED_BLOB_BYTES];
+    let over_limit = vec![2; PACKED_BLOB_BYTES + 1];
+    let tip = remote.publish_paths(
+        None,
+        &[
+            ("at_limit", EntryMode::Blob, &at_limit),
+            ("chunked", EntryMode::Blob, &chunked),
+            ("over_limit", EntryMode::Blob, &over_limit),
+            ("small", EntryMode::Blob, b"short"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, &dir.path().join("clone"));
+    let layout = RepoLayout::single(dir.path().join("clone"));
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+    assert_eq!(
+        std::fs::read_dir(layout.objects_dir().join("pack"))
+            .unwrap()
+            .count(),
+        2
+    );
+    let Object::Commit(commit) = store.read_object(&tip).unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(tree) = store.read_object(&commit.tree_hash).unwrap() else {
+        panic!("expected a tree");
+    };
+    let mut chunks = 0;
+    for entry in tree.entries {
+        let loose = loose_object_path(&layout, &entry.object_hash).is_file();
+        assert_eq!(loose, entry.name == b"over_limit", "{:?}", entry.name);
+        if let Object::ChunkedBlob(manifest) = store.read_object(&entry.object_hash).unwrap() {
+            for (chunk, _) in manifest.entries() {
+                assert!(!loose_object_path(&layout, &chunk).is_file());
+                chunks += 1;
+            }
+        }
+    }
+    assert!(chunks > 2, "the file must be cut into several chunks");
+}
+
+#[test]
+fn a_store_without_local_packs_writes_every_object_loose() {
+    let remote = Remote::new();
+    let chunked = noise(3 << 20, 9);
+    let tip = remote.publish_paths(
+        None,
+        &[
+            ("chunked", EntryMode::Blob, &chunked),
+            ("small", EntryMode::Blob, b"short"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_loose_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n");
+    assert!(!layout.objects_dir().join("pack").exists());
+    for id in store.iter_object_hashes().unwrap() {
+        assert!(loose_object_path(&layout, &id).is_file());
+    }
+    assert!(store.contains(&tip));
+    assert_eq!(std::fs::read(target.join("chunked")).unwrap(), chunked);
+}
+
+#[test]
+fn an_up_to_date_fetch_activates_a_loose_store() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    // A store an earlier kit made: loose, and with nothing new to fetch.
+    std::fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+
+    signed_fetch(&target, &remote).unwrap();
+
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+}
+
+#[test]
+fn fetch_packs_every_blob_of_a_large_tree_even_when_blobs_precede_the_tree() {
+    let remote = Remote::new();
+    let entries: Vec<_> = (0u32..2_000)
+        .map(|n| (format!("file-{n:06}"), n.to_le_bytes()))
+        .collect();
+    let files: Vec<_> = entries
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let (objects, tip) = remote.build(None, &files, true);
+    let last_blob = objects[1_999].id().unwrap();
+    remote.publish_objects(&objects, tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("fetch");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    signed_fetch(&target, &remote).unwrap();
+
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(store.read_object(&last_blob).unwrap(), objects[1_999]);
+    assert!(!loose_object_path(&layout, &last_blob).is_file());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+#[test]
+fn a_packed_chunk_can_read_restore_and_mark() {
+    let remote = Remote::new();
+    let data = b"short last chunk";
+    let (mut objects, _) = remote.build(None, &[("chunked", data)], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(mut tree) = objects.pop().unwrap() else {
+        panic!("expected a tree");
+    };
+    let chunk = objects.pop().unwrap();
+    let chunk_id = chunk.id().unwrap();
+    let len = data.len() as u64;
+    let manifest =
+        Object::ChunkedBlob(ChunkedBlob::new(len, 16 * 1024, [(chunk_id, len)]).unwrap());
+    tree.entries[0].object_hash = manifest.id().unwrap();
+    let tree = Object::Tree(tree);
+    commit.tree_hash = tree.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+    remote.publish_objects(&[chunk.clone(), manifest, tree, commit], tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(!loose_object_path(&layout, &chunk_id).is_file());
+    assert_eq!(store.read_object(&chunk_id).unwrap(), chunk);
+    assert_eq!(std::fs::read(target.join("chunked")).unwrap(), data);
+    let _lock = kit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        kit_core::repo_lock::WORKTREE_LOCK,
+    )
+    .unwrap();
+    let mut marked = 0;
+    kit_core::ops::gc::run_gc(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        true,
+        &mut |phase, count, _| {
+            if phase == "gc_mark" {
+                marked = count;
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        marked, 4,
+        "gc must mark the commit, tree, manifest and packed chunk"
+    );
+}
+
+#[test]
+fn a_busy_activation_keeps_the_marker_and_repairs_a_loose_copy() {
+    use kit_core::store::ObjectStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\0").unwrap();
+    let guard = store.prune_guard().unwrap();
+
+    let blob = Object::Blob(Blob {
+        data: b"fresh".to_vec(),
+    });
+    let bytes = kit_core::serialize::serialize(&blob).unwrap();
+    let id = store.write(&bytes).unwrap();
+    let mut corrupt = bytes.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    std::fs::write(loose_object_path(&layout, &id), corrupt).unwrap();
+
+    let remote = Remote::new();
+    remote.publish(None, &[("file", b"fresh")], true);
+    signed_fetch(&target, &remote).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n\0");
+    assert!(!layout.objects_dir().join("pack").exists());
+    assert_eq!(store.read(&id).unwrap(), bytes);
+    drop(guard);
+}
+
+fn loose_object_path(layout: &RepoLayout, id: &Hash) -> std::path::PathBuf {
+    let path = hash::object_path(id);
+    layout
+        .objects_dir()
+        .join(std::str::from_utf8(&path.dir).unwrap())
+        .join(std::str::from_utf8(&path.file).unwrap())
 }
 
 #[test]
@@ -560,6 +855,39 @@ fn pull_resumes_the_restore_after_head_was_written() {
     );
 }
 
+/// A clone interrupted after it made its branch and moved HEAD, before the
+/// restore began, undoes both. It reports the interrupt, and the same clone
+/// then resumes in that directory.
+#[test]
+fn a_clone_interrupted_after_head_was_written_resumes() {
+    let remote = Remote::new();
+    let tip = remote.publish(None, &[("a.txt", b"hello\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let layout = RepoLayout::single(&target);
+
+    let result = clone(
+        &target,
+        &remote.source(),
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip,
+        },
+    );
+
+    assert!(
+        matches!(result, Err(CloneError::Sync(SyncError::Interrupted))),
+        "{result:?}"
+    );
+    assert_eq!(refs::resolve_head(&layout).unwrap(), None);
+    assert!(!layout.pull_head_file().exists());
+    let report = clone_into(&remote, &target);
+    assert!(matches!(report.pull.outcome, PullOutcome::FastForwarded { new, .. } if new == tip));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"hello\n");
+}
+
 #[test]
 fn pull_resumes_a_partial_restore_before_landing_a_newer_tip() {
     let remote = Remote::new();
@@ -791,26 +1119,30 @@ impl RemoteSource for FailingPack<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &PackKey,
         ref_name: &str,
     ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
         self.downloads.set(self.downloads.get() + 1);
         if self.downloads.get() == self.fail_at {
             return Err(kit_sync::SourceError::ConnectionFailed);
         }
-        self.inner.download_pack_via_ref(key, ref_name)
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -867,6 +1199,87 @@ fn a_failed_download_keeps_the_applied_packs_recorded() {
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(fourth)
     );
+}
+
+#[test]
+fn pull_when_the_branch_is_ahead_changes_nothing_and_is_up_to_date() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // The remote branch goes back to `first`: the local branch is ahead of it.
+    remote.repoint(first);
+
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.outcome,
+        PullOutcome::UpToDate {
+            branch: "main".to_owned()
+        }
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(second));
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+}
+
+#[test]
+fn pull_refuses_a_branch_that_has_diverged_from_the_remote() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let local = remote.publish(Some(first), &[("a.txt", b"local\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // Another commit on `first`, so neither tip contains the other.
+    let other = remote.publish_on(first, &[("a.txt", b"other\n")]);
+    assert_ne!(local, other);
+
+    let err = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, SyncError::NonFastForwardPull { ref branch } if branch == "main"),
+        "{err:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(local));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"local\n");
 }
 
 #[test]
@@ -987,17 +1400,17 @@ fn assert_refused(target: &Path, remote: &Remote, forged: Hash, tracking: Hash, 
     assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(held));
 }
 
-/// A refused pack leaves its objects in the store. A remote that then points
-/// the branch at the refused commit with a chain that no longer carries it
-/// is refused again: the tip is checked, not only the packs this run applied.
+/// The tip is checked even when the store held its unsigned objects before
+/// the fetch and the advertised chain does not carry them.
 #[test]
-fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
+fn an_unsigned_commit_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     clone_into(&remote, &target);
-    let forged = remote.publish(Some(first), &[("a.txt", b"forged\n")], false);
+    let (objects, forged) = remote.build(Some(first), &[("a.txt", b"forged\n")], false);
+    remote.publish_objects(&objects, forged, false);
     let error = signed_fetch(&target, &remote).unwrap_err();
     assert!(
         matches!(error, SyncError::UnsignedOrInvalidObject { .. }),
@@ -1005,10 +1418,12 @@ fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at
     );
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
-    assert!(
-        store.contains(&forged),
-        "the refused objects stay in the store"
-    );
+    assert!(!store.contains(&forged), "a refused pack stays private");
+    for object in objects {
+        store
+            .write(&kit_core::serialize::serialize(&object).unwrap())
+            .unwrap();
+    }
 
     remote.repoint(forged);
     assert_refused(&target, &remote, forged, first, first);
@@ -1342,6 +1757,182 @@ fn progress_arrives_as_events_not_output() {
             .iter()
             .any(|e| matches!(e, SyncEvent::ObjectsUnpacked { count } if *count >= 3)),
         "{events:?}"
+    );
+}
+
+/// The file of object `id` in the store of `target`.
+fn object_file(target: &Path, id: &Hash) -> std::path::PathBuf {
+    let hex = hash::to_hex(id);
+    RepoLayout::single(target)
+        .objects_dir()
+        .join(&hex[..2])
+        .join(&hex[2..])
+}
+
+/// A fetch checks the closure of a new tip down to the tracking tips of the
+/// remote it fetches, and no further. Another remote's tracking tip is no
+/// such point, so its fetch reads the closure below it.
+#[test]
+fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_loose_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    // Drop an object below the tracking tip from the store.
+    let bee = Object::Blob(Blob {
+        data: b"bee\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    std::fs::remove_file(object_file(&target, &bee)).unwrap();
+
+    let other = Remote::new();
+    other.publish(Some(first), &[("a.txt", b"other\n")], true);
+    let error = fetch(
+        &target,
+        &other.source(),
+        "other",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, SyncError::RemoteMissingObject(hex) if *hex == hash::to_hex(&bee)),
+        "{error:?}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "other", "main").unwrap(),
+        None
+    );
+
+    let tip = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let observer = Recorder::default();
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert_eq!(report.packs_downloaded, 1);
+    assert!(
+        !observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. }))
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+/// A tracking ref that a fetch with the opt-out moved is no anchor: the record
+/// of verified tips still names the old tip, so the next fetch that verifies
+/// reads the closure below the ref again.
+#[test]
+fn a_tracking_tip_the_verified_record_does_not_name_is_no_anchor() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_loose_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    let bee = Object::Blob(Blob {
+        data: b"bee\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    std::fs::remove_file(object_file(&target, &bee)).unwrap();
+
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let observer = Recorder::default();
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. })),
+        "the check read below the moved ref and repaired the store"
+    );
+    assert!(object_file(&target, &bee).exists());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(third)
+    );
+}
+
+/// After a forced update the old tip is no anchor: gc may prune its history,
+/// and a later tip over that history is refused while the history is gone.
+#[test]
+fn history_gc_pruned_after_a_forced_update_is_checked_again() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    kit_core::fault::keep_loose(&layout);
+    let fetch_default = || {
+        fetch(
+            &target,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+    fetch_default().unwrap();
+    let rewritten = remote.publish_reset(&[("c.txt", b"see\n")]);
+    fetch_default().unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(rewritten)
+    );
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(
+        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {})
+            .unwrap()
+            .pruned
+            > 0
+    );
+    assert!(!store.contains(&first));
+
+    // The remote moves `main` over `first`, which no pack of its chain holds
+    // any more.
+    remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let error = fetch_default().unwrap_err();
+    assert!(
+        matches!(&error, SyncError::RemoteMissingObject(hex) if *hex == hash::to_hex(&first)),
+        "{error:?}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(rewritten)
     );
 }
 
@@ -1791,13 +2382,17 @@ fn remote_with_zstd_pack() -> Remote {
     let pack_key = pack::pack_key(ZSTD_PACK);
     remote
         .tx
-        .upload_pack(ZSTD_PACK, &PackKey::from_hash(pack_key))
+        .upload_pack(
+            &kit_core::protocol::SliceBody(ZSTD_PACK),
+            &PackKey::from_hash(pack_key),
+            None,
+        )
         .unwrap();
     let node = transfer::encode_packlist(None, &[pack_key]).unwrap();
     let node_key = hash::hash(&node);
     remote
         .tx
-        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .upload_blob(&node, &PackKey::from_hash(node_key), None)
         .unwrap();
     remote
         .tx
@@ -1889,7 +2484,8 @@ fn an_unchanged_fetch_from_an_unnamed_source_walks_each_pack_list() {
         [
             "ListRefs".to_owned(),
             "ReadRef refs/kit/packmap/main".to_owned(),
-            node(head)
+            node(head),
+            "ListRefs refs/tags/".to_owned(),
         ]
     );
 
@@ -1912,12 +2508,13 @@ fn an_unchanged_fetch_from_an_unnamed_source_walks_each_pack_list() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert_eq!(calls[..2], ["ListRefs", "ReadRef refs/kit/packmap/main"]);
     assert!(
-        calls[2..].iter().all(|c| c.starts_with("Node ")),
+        calls[2..4].iter().all(|c| c.starts_with("Node ")),
         "{calls:?}"
     );
+    assert_eq!(calls[4], "ListRefs refs/tags/");
 }
 
 #[test]
@@ -1938,7 +2535,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 6); // listing, packmap, two nodes, two packs
+    assert_eq!(calls.len(), 7); // listing, packmap, two nodes, two packs, tag listing
     let report = pull(
         &target,
         &counted,
@@ -1949,7 +2546,11 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
     assert_eq!(report.fetch.objects_unpacked, 0);
     assert_eq!(report.fetch.packs_already_applied, 2);
@@ -1965,7 +2566,11 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
 
     let third = remote.publish(Some(second), &[("a", b"3")], true);
@@ -1979,7 +2584,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[2], format!("Node {}", hash::to_hex(&new_head)));
     assert!(calls[3].starts_with("Pack "));
     assert_eq!(report.fetch.packs_downloaded, 1);
@@ -1996,7 +2601,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 6); // unrelated two-node chain, walked to root
+    assert_eq!(counted.take().len(), 7); // unrelated two-node chain walked to root, tag listing
     assert_eq!(report.packs_downloaded, 2);
     assert_eq!(
         refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
@@ -2037,7 +2642,7 @@ fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
             &NoopObserver,
         )
         .unwrap();
-        assert_eq!(counted.take().len(), 4);
+        assert_eq!(counted.take().len(), 5);
     }
     for address in [
         ("repository", "https://other.invalid"),
@@ -2052,7 +2657,7 @@ fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
             &NoopObserver,
         )
         .unwrap();
-        assert_eq!(counted.take().len(), 4);
+        assert_eq!(counted.take().len(), 5);
     }
 }
 
@@ -2189,7 +2794,9 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
         "the fetch heals once"
     );
     assert_eq!(report.packs_downloaded, 2);
-    assert_eq!(counted.take().len(), 8); // suffix attempt, then one full walk
+    // The suffix attempt, one full walk, the tag listing. The delta pack that
+    // failed on its missing base is kept, so the retry does not get it again.
+    assert_eq!(counted.take().len(), 8);
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(second)
@@ -2205,7 +2812,11 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
 }
 
@@ -2264,7 +2875,7 @@ fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 4); // missed suffix plus the not-yet-recorded new pack
+    assert_eq!(counted.take().len(), 5); // missed suffix, the not-yet-recorded new pack, tag listing
     assert_eq!(report.packs_downloaded, 1);
     fetch(
         &target,
@@ -2274,7 +2885,7 @@ fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3);
 }
 
 #[test]
@@ -2335,7 +2946,7 @@ fn concurrent_pulls_publish_consistent_checkpoints_under_the_lock() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3); // branch listing, packmap read, tag listing
 }
 
 #[test]
@@ -2382,7 +2993,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(stale_counted.take().len(), 2); // no-op conditions hold despite the different recorded tip
+    assert_eq!(stale_counted.take().len(), 3); // no-op conditions hold despite the different recorded tip
 
     remote
         .tx
@@ -2417,7 +3028,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 3); // one listing, two packmap reads
+    assert_eq!(counted.take().len(), 4); // one listing, two packmap reads, tag listing
     assert_eq!(report.branches_fetched, 2);
     assert_eq!(report.objects_unpacked, 0);
 }
@@ -2454,7 +3065,7 @@ fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
         &observer,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3); // branch listing, packmap read, tag listing
     assert!(
         !observer
             .events
@@ -2522,6 +3133,215 @@ fn pending_restore() -> (Remote, tempfile::TempDir, RepoLayout, Hash, Hash) {
     );
     assert!(matches!(result, Err(SyncError::Interrupted)));
     (remote, dir, layout, first, second)
+}
+
+/// The clean sweep keeps an ignore file by its name only in a directory the
+/// target keeps, so a pull refuses one the target's deletion of its
+/// directory would sweep.
+#[test]
+fn a_pull_refuses_an_untracked_ignore_file_in_a_directory_it_deletes() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(
+        None,
+        &[
+            ("a.txt", EntryMode::Blob, b"one\n"),
+            ("old/f", EntryMode::Blob, b"f\n"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("a.txt", EntryMode::Blob, b"two\n")]);
+    std::fs::write(dir.path().join("old/.gitignore"), b"*.tmp\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("restore would remove untracked path 'old/.gitignore'"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("old/.gitignore")).unwrap(),
+        b"*.tmp\n"
+    );
+}
+
+/// A pull that turns a tracked directory into a file refuses when the
+/// directory holds a nested repository, at any depth, before it changes
+/// anything: the restore would remove the directory with the repository.
+/// The refusal names the repository's `.kit` or `.git` entry, or the
+/// untracked directory that holds it.
+#[test]
+fn a_pull_refuses_to_write_a_file_over_a_nested_repository() {
+    for (repo, named) in [
+        ("vendor/.git/HEAD", "vendor/.git"),
+        ("vendor/lib/.kit/config", "vendor/lib/.kit"),
+        ("vendor/lib/wt/.git", "vendor/lib/wt"),
+    ] {
+        let remote = Remote::new();
+        let first = remote.publish_paths(
+            None,
+            &[
+                ("a.txt", EntryMode::Blob, b"one\n"),
+                ("vendor/lib/y", EntryMode::Blob, b"y\n"),
+                ("vendor/x", EntryMode::Blob, b"x\n"),
+            ],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("a.txt", EntryMode::Blob, b"two\n"),
+                ("vendor", EntryMode::Blob, b"now a file\n"),
+            ],
+        );
+        let path = dir.path().join(repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"mine\n").unwrap();
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        let Err(SyncError::RestoreSafety(message)) = result else {
+            panic!("{repo}: expected a refusal, got {result:?}");
+        };
+        assert_eq!(
+            message,
+            format!("restore would overwrite untracked path '{named}'; move or remove it first")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine\n", "{repo}");
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+        assert_eq!(std::fs::read(dir.path().join("vendor/x")).unwrap(), b"x\n");
+    }
+}
+
+/// Recovery reads the index as it is: one emptied after the interruption is
+/// staged work, not the target that HEAD would seed it with.
+#[test]
+fn recovery_refuses_an_emptied_index() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    let mut index = kit_core::index::read_index(&layout).unwrap();
+    index.retain_entries(|_| false);
+    kit_core::index::write_index(&layout, &index).unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("pull recovery would overwrite staged changes; "),
+        "{message}"
+    );
+    assert!(layout.pull_head_file().exists());
+}
+
+/// A pull interrupted after HEAD moved from `before` to `target`, with the
+/// worktree and index still at `before`.
+fn pending_paths(
+    before: &[(&str, EntryMode, &[u8])],
+    target: &[(&str, EntryMode, &[u8])],
+) -> (Remote, tempfile::TempDir, RepoLayout) {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, before);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let second = remote.publish_paths(Some(first), target);
+    let layout = RepoLayout::single(dir.path());
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)));
+    (remote, dir, layout)
+}
+
+/// Recovery refuses, as a pull does, to write a file over a directory that
+/// holds a nested repository.
+#[test]
+fn recovery_refuses_to_write_a_file_over_a_nested_repository() {
+    let (remote, dir, layout) = pending_paths(
+        &[
+            ("a.txt", EntryMode::Blob, b"one\n"),
+            ("vendor/x", EntryMode::Blob, b"x\n"),
+        ],
+        &[
+            ("a.txt", EntryMode::Blob, b"two\n"),
+            ("vendor", EntryMode::Blob, b"now a file\n"),
+        ],
+    );
+    let head = dir.path().join("vendor/.git/HEAD");
+    std::fs::create_dir_all(head.parent().unwrap()).unwrap();
+    std::fs::write(&head, b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("pull recovery would remove untracked path 'vendor/.git'; "),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(&head).unwrap(), b"mine\n");
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+    assert!(layout.pull_head_file().exists());
+}
+
+/// A file where the target or the tree from before the pull has a directory
+/// is local work, and recovery refuses to remove it.
+#[test]
+fn recovery_refuses_a_file_where_a_tree_has_a_directory() {
+    let a: (&str, EntryMode, &[u8]) = ("a.txt", EntryMode::Blob, b"a\n");
+    let y: (&str, EntryMode, &[u8]) = ("x/y", EntryMode::Blob, b"y\n");
+    for (before, target) in [(vec![a], vec![a, y]), (vec![a, y], vec![a])] {
+        let (remote, dir, layout) = pending_paths(&before, &target);
+        let x = dir.path().join("x");
+        if x.is_dir() {
+            std::fs::remove_dir_all(&x).unwrap();
+        }
+        std::fs::write(&x, b"mine\n").unwrap();
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        let Err(SyncError::RestoreSafety(message)) = result else {
+            panic!("expected a refusal, got {result:?}");
+        };
+        assert!(
+            message.starts_with("pull recovery would overwrite local changes at 'x'; "),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&x).unwrap(), b"mine\n");
+        assert!(layout.pull_head_file().exists());
+    }
 }
 
 #[test]
@@ -2928,29 +3748,34 @@ struct CountingCursor<'a> {
 }
 
 impl RemoteSource for CountingCursor<'_> {
+    fn supports_attestations(&self) -> bool {
+        self.inner.supports_attestations()
+    }
+
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
         self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
-        &self,
-        key: &PackKey,
-        name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+    fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
-        self.inner.download_blob_via_ref(key, name)
+        self.inner.download_blob(key, name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
-        self.inner.download_pack_via_ref(key, name)
+        self.inner.download_pack(key, name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> {
         self.inner.repo_cursor()
@@ -3034,16 +3859,17 @@ fn a_recreated_remote_never_matches_an_old_cursor() {
 
 /// An unchanged cursor checks that the object of each tracked tip is in the
 /// store, not the closure below it. An object below a tip that the store
-/// lost stays missing through such a fetch. The next fetch that does its
-/// full work, because the cursor changed or no record matches, checks the
-/// closure and fetches the chain again.
+/// lost stays missing through such a fetch, and through one that does its
+/// full work: its closure check stops at the tracking tip. Once no tracking
+/// ref names that tip, a fetch checks the whole closure and fetches the chain
+/// again.
 #[test]
 fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     let remote = Remote::new();
     remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
     let blob = Object::Blob(Blob {
@@ -3062,7 +3888,18 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
-    assert!(store.contains(&blob), "a full fetch heals the closure");
+    assert!(
+        !store.contains(&blob),
+        "the check stops at the tracking tip"
+    );
+
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(
+        store.contains(&blob),
+        "a fetch with no anchor heals the closure"
+    );
 }
 
 // ---- A pull writes only what the new tip changed ------------------------
@@ -3347,6 +4184,106 @@ fn the_restore_safety_messages_are_unchanged() {
     );
 }
 
+/// Each of the eight restore-safety refusals of a pull keeps its exact text. A
+/// downstream tells local work from other restore failures by these texts, so
+/// a reword would silently change what it reports.
+#[test]
+fn the_eight_restore_safety_refusals_keep_their_exact_text() {
+    fn refusal(result: Result<kit_sync::PullReport, SyncError>) -> String {
+        match result {
+            Err(SyncError::RestoreSafety(message)) => message,
+            other => panic!("expected a restore safety refusal, got {other:?}"),
+        }
+    }
+    let run = |dir: &Path, remote: &Remote| {
+        pull(
+            dir,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+    let unstage = |layout: &RepoLayout, path: &str| {
+        let mut index = kit_core::index::read_index(layout).unwrap();
+        index.retain_entries(|entry| entry.path != path);
+        kit_core::index::write_index(layout, &index).unwrap();
+    };
+    // A clone of `a.txt` and `c.txt` whose remote then moved `a.txt` on.
+    let behind = || {
+        let remote = Remote::new();
+        let first = remote.publish(None, &[("a.txt", b"one\n"), ("c.txt", b"same\n")], true);
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        remote.publish(
+            Some(first),
+            &[("a.txt", b"two\n"), ("c.txt", b"same\n")],
+            true,
+        );
+        (remote, dir)
+    };
+
+    let (remote, dir) = behind();
+    unstage(&RepoLayout::single(dir.path()), "a.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite staged changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("a.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite local changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish(Some(first), &[("a.txt", b"one\n"), ("b.txt", b"b\n")], true);
+    std::fs::write(dir.path().join("b.txt"), b"mine\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite untracked path 'b.txt'; move or remove it first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would remove untracked path 'notes.txt'; move or remove it first"
+    );
+
+    let (remote, dir, layout, _, _) = pending_restore();
+    unstage(&layout, "c.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite local changes at 'c.txt'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would remove untracked path 'notes.txt'; move or remove it, then pull again"
+    );
+
+    let (_, dir, layout, _, _) = pending_restore();
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &Remote::new())),
+        "unfinished pull cannot recover without a remote branch; restore the remote branch, then pull again"
+    );
+}
+
 /// A tracked file of many chunks that another process keeps appending to while
 /// the pull's safety check hashes it. The check must report the file as a local
 /// change, so the pull refuses with the usual message, and not fail with an
@@ -3406,7 +4343,13 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
                     .open(target.join("big.bin"))
                     .unwrap();
                 std::thread::sleep(std::time::Duration::from_micros(200 * (round % 8)));
-                while !stop.load(Ordering::Relaxed) {
+                // Keep a slow or panicking pull from growing the fixture
+                // without a bound. Even the near-threshold case needs only
+                // a few appended bytes to cross the size check.
+                for _ in 0..4096 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     file.write_all(b"x").unwrap();
                     file.flush().unwrap();
                 }
@@ -3433,6 +4376,10 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
                 refused += 1;
             }
             other => panic!("expected the usual refusal or success, got {other:?}"),
+        }
+        // Exercise every append delay before ending a successful run.
+        if refused > 0 && round % 8 == 7 {
+            break;
         }
     }
     assert!(refused > 0, "no round was refused");
@@ -3575,4 +4522,195 @@ fn a_stale_record_is_cleared_on_disk_before_the_retry_runs() {
         std::fs::read_to_string(&record).map_or(true, |text| text.trim().is_empty()),
         "the stale entries are still on disk"
     );
+}
+
+#[test]
+fn a_pull_keeps_untracked_nested_repository_files() {
+    for marker in [".git", ".kit", ".GiT"] {
+        for nested in ["vendor", "outer/vendor"] {
+            let remote = Remote::new();
+            let first = remote.publish_paths(None, &[("a.txt", EntryMode::Blob, b"one\n")]);
+            let dir = tempfile::tempdir().unwrap();
+            clone_into(&remote, dir.path());
+            remote.publish_paths(Some(first), &[("a.txt", EntryMode::Blob, b"two\n")]);
+            let repo = dir.path().join(nested);
+            std::fs::create_dir_all(&repo).unwrap();
+            // A metadata file, as used by a linked worktree, is a marker too.
+            std::fs::write(repo.join(marker), b"gitdir: elsewhere\n").unwrap();
+            std::fs::write(repo.join("README"), b"mine\n").unwrap();
+            pull(
+                dir.path(),
+                &remote.source(),
+                "default",
+                &SyncOptions::default(),
+                &NoopObserver,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(repo.join("README")).unwrap(), b"mine\n");
+            assert_eq!(
+                std::fs::read(repo.join(marker)).unwrap(),
+                b"gitdir: elsewhere\n"
+            );
+            assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
+        }
+    }
+}
+
+#[test]
+fn a_pull_still_refuses_files_beside_a_listed_repository_marker() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, &[("vendor/a", EntryMode::Blob, b"one\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("vendor/a", EntryMode::Blob, b"two\n")]);
+    std::fs::write(dir.path().join("vendor/.git"), b"gitdir: elsewhere\n").unwrap();
+    std::fs::write(dir.path().join("vendor/README"), b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("vendor/README")).unwrap(),
+        b"mine\n"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("vendor/a")).unwrap(),
+        b"one\n"
+    );
+}
+
+#[test]
+fn a_pull_refuses_a_repository_directory_that_aliases_a_target_directory() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, &[("a.txt", EntryMode::Blob, b"one\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("vendor/a", EntryMode::Blob, b"two\n")]);
+    std::fs::create_dir(dir.path().join("Vendor")).unwrap();
+    std::fs::write(dir.path().join("Vendor/.git"), b"gitdir: elsewhere\n").unwrap();
+    std::fs::write(dir.path().join("Vendor/README"), b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    // Also conservative on a case-sensitive filesystem: a spelling that may
+    // alias a target directory never grants an exemption from the safety gate.
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("Vendor/README")).unwrap(),
+        b"mine\n"
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+}
+
+#[test]
+fn interrupted_pull_with_a_missing_unchanged_blob_refuses_recovery() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"keep"), ("b", b"old")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_loose_into(&remote, dir.path());
+    let layout = RepoLayout::single(dir.path());
+    let blob = Object::Blob(Blob {
+        data: b"keep".to_vec(),
+    })
+    .id()
+    .unwrap();
+    let hex = hash::to_hex(&blob);
+    std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let second = remote.publish(Some(first), &[("a", b"keep"), ("b", b"new")], true);
+    // Fetch first, then remove the blob again: fetch may heal skipped packs.
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..]));
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)), "{result:?}");
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(second));
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert!(layout.pull_head_file().exists());
+    assert_eq!(std::fs::read(dir.path().join("b")).unwrap(), b"old");
+}
+
+#[test]
+fn a_pull_checks_target_collisions_inside_ignored_directories() {
+    for nested in [false, true] {
+        let remote = Remote::new();
+        let first = remote.publish_paths(None, &[("a", EntryMode::Blob, b"base")]);
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "cache/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        if nested {
+            std::fs::create_dir_all(dir.path().join("cache/new/.git")).unwrap();
+        } else {
+            std::fs::write(dir.path().join("cache/new"), "mine").unwrap();
+        }
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("a", EntryMode::Blob, b"base"),
+                ("cache/new", EntryMode::Blob, b"new"),
+            ],
+        );
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        assert!(
+            matches!(result, Err(SyncError::RestoreSafety(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            refs::resolve_head(&RepoLayout::single(dir.path())).unwrap(),
+            Some(first)
+        );
+        if nested {
+            assert!(dir.path().join("cache/new/.git").is_dir());
+        } else {
+            assert_eq!(
+                std::fs::read(dir.path().join("cache/new")).unwrap(),
+                b"mine"
+            );
+        }
+    }
 }

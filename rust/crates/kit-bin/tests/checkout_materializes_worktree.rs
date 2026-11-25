@@ -455,3 +455,49 @@ fn checkout_with_recorded_stat_cache_still_sees_edits() {
         "{stderr}"
     );
 }
+
+/// A forced checkout recovers from a HEAD commit the store lost: it does not
+/// need HEAD's tree to find the tracked paths the target drops.
+#[test]
+fn forced_checkout_recovers_from_a_lost_head_commit() {
+    let td = tempfile::tempdir().unwrap();
+    assert!(run_in(td.path(), &["init"]).status.success());
+    assert!(run_in(td.path(), &["keygen"]).status.success());
+    fs::write(td.path().join("a.txt"), b"alpha\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "main"])
+            .status
+            .success()
+    );
+    assert!(
+        run_in(td.path(), &["checkout", "-b", "feature"])
+            .status
+            .success()
+    );
+    fs::write(td.path().join("b.txt"), b"bravo\n").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "feature"])
+            .status
+            .success()
+    );
+
+    let lost = fs::read_to_string(td.path().join(".kit/refs/heads/feature")).unwrap();
+    let lost = lost.trim();
+    fs::remove_file(
+        td.path()
+            .join(".kit/objects")
+            .join(&lost[..2])
+            .join(&lost[2..]),
+    )
+    .unwrap();
+
+    let out = run_in(td.path(), &["checkout", "-f", "main"]);
+    assert!(out.status.success(), "forced checkout failed: {out:?}");
+    assert_eq!(fs::read(td.path().join("a.txt")).unwrap(), b"alpha\n");
+    assert!(
+        !td.path().join("b.txt").exists(),
+        "the dropped path is removed"
+    );
+}

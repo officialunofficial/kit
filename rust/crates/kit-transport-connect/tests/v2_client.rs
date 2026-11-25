@@ -769,11 +769,15 @@ fn begin_upload_ticket_and_advance_commit_set() {
     let client = served.signed_client();
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let stale = PackKey::new(hash(b"stale packmap node"));
     client
-        .upload_blob_via_ref(b"stale packmap node", &stale, "refs/heads/main")
+        .upload_blob(b"stale packmap node", &stale, Some("refs/heads/main"))
         .unwrap();
     let state = served.state.lock().unwrap();
     let begin = state
@@ -875,7 +879,11 @@ fn ticket_is_retained_after_typed_conflict() {
     let client = served.signed_client();
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     for expected in [AdvanceOutcome::PackmapConflict, AdvanceOutcome::Committed] {
         assert_eq!(
@@ -913,7 +921,11 @@ fn already_present_cap_and_upload_side_ticket_failure() {
     });
     served
         .signed_client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("UploadPack"), 0);
 
@@ -924,7 +936,11 @@ fn already_present_cap_and_upload_side_ticket_failure() {
     assert!(
         served
             .signed_client()
-            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(DATA),
+                &key,
+                Some("refs/heads/main")
+            )
             .unwrap_err()
             .to_string()
             .contains("too many open upload tickets")
@@ -937,7 +953,11 @@ fn already_present_cap_and_upload_side_ticket_failure() {
     });
     served
         .signed_client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("BeginUpload"), 2);
     assert_eq!(served.calls("UploadPack"), 2);
@@ -949,7 +969,11 @@ fn ticketed_advance_rejects_bad_local_commit_sets_and_classifies_server_errors()
     let client = served.signed_client();
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let advance = |refs: (&str, &str), keys: &[PackKey]| {
         client.advance_refs_committing(
@@ -1017,13 +1041,21 @@ fn multipart_receipts_resume_after_part_two() {
     let first = served.signed_client().with_receipt_store(receipts.clone());
     assert!(
         first
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main")
+            )
             .is_err()
     );
     drop(first);
     let second = served.signed_client().with_receipt_store(receipts);
     second
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let state = served.state.lock().unwrap();
     let indices: Vec<_> = state.requests.iter().filter_map(|r| r.part_index).collect();
@@ -1047,7 +1079,11 @@ fn upload_part_ticket_failure_restarts_with_one_new_ticket() {
     let key = PackKey::new(hash(&bytes));
     served
         .signed_client()
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("BeginUpload"), 2);
     let indices: Vec<_> = served
@@ -1068,7 +1104,11 @@ fn exact_part_boundary_uses_upload_pack_and_excess_respects_max_parts() {
     let served = Served::new(State::default());
     served
         .signed_client()
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("UploadPack"), 1);
     assert_eq!(served.calls("UploadPart"), 0);
@@ -1083,7 +1123,11 @@ fn exact_part_boundary_uses_upload_pack_and_excess_respects_max_parts() {
     let key = PackKey::new(hash(&excess));
     let error = served
         .signed_client()
-        .upload_pack_via_ref(&excess, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&excess),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("maximum number of upload parts"));
     assert_eq!(served.calls("UploadPack"), 0);
@@ -1127,12 +1171,20 @@ fn disk_receipt_invalid_argument_resends_all_but_fresh_receipt_fails() {
         .with_upload_observer(|event| !matches!(event, UploadEvent::PartSent { index: 0, .. }));
     assert!(
         first
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main")
+            )
             .is_err()
     );
     let restarted = served.signed_client().with_receipt_store(store);
     restarted
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let indices: Vec<_> = served
         .state
@@ -1150,7 +1202,11 @@ fn disk_receipt_invalid_argument_resends_all_but_fresh_receipt_fails() {
     });
     let err = served
         .signed_client()
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap_err();
     assert!(matches!(err, TransportError::ProtocolError));
 }
@@ -1162,7 +1218,11 @@ fn upload_path_follows_discovery() {
     assert!(
         served
             .client()
-            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(DATA),
+                &key,
+                Some("refs/heads/main")
+            )
             .unwrap_err()
             .to_string()
             .contains("transport_auth = envelope")
@@ -1177,7 +1237,11 @@ fn upload_path_follows_discovery() {
     });
     served
         .client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("BeginUpload"), 0);
     assert_eq!(served.calls("UploadPack"), 1);
@@ -1188,7 +1252,11 @@ fn upload_path_follows_discovery() {
     });
     served
         .client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(served.calls("BeginUpload"), 0);
 
@@ -1198,7 +1266,11 @@ fn upload_path_follows_discovery() {
     });
     served
         .client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(
         served.calls("BeginUpload"),
@@ -1214,7 +1286,11 @@ fn upload_path_follows_discovery() {
     assert!(
         served
             .signed_client()
-            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(DATA),
+                &key,
+                Some("refs/heads/main")
+            )
             .unwrap_err()
             .to_string()
             .contains("server does not implement BeginUpload")
@@ -1231,7 +1307,11 @@ fn upload_path_follows_discovery() {
     assert!(
         served
             .signed_client()
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main")
+            )
             .unwrap_err()
             .to_string()
             .contains("server storage cannot accept packs over part_size")
@@ -1249,7 +1329,11 @@ fn client_part_commitment_matches_auth_v2_golden() {
     let key = PackKey::new(hash(&bytes));
     served
         .signed_client()
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/golden/auth-v2/part.json")).unwrap();
@@ -1320,7 +1404,11 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
     let bytes = b"lag pack";
     let key = PackKey::new(hash(bytes));
     client
-        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let outcome = client
         .advance_refs_committing(
@@ -1359,7 +1447,11 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
         .with_clock_for_test(lag_now)
         .with_retry_hooks_for_test(short_backoff, lag_sleep);
     client
-        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let error = client
         .advance_refs_committing(
@@ -1388,7 +1480,11 @@ fn membership_lag_polls_same_nonce_and_honors_sixty_second_limit() {
         .with_retry_hooks_for_test(short_backoff, lag_sleep)
         .with_pending_observer(|_| false);
     client
-        .upload_pack_via_ref(bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert!(
         client
@@ -1434,10 +1530,18 @@ fn advance_deadline_uses_earliest_ticket_expiry() {
     let first = PackKey::new(hash(b"first"));
     let second = PackKey::new(hash(b"second"));
     client
-        .upload_pack_via_ref(b"first", &first, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(b"first"),
+            &first,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     client
-        .upload_pack_via_ref(b"second", &second, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(b"second"),
+            &second,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let error = client
         .advance_refs_committing(
@@ -1480,7 +1584,11 @@ fn non_owner_grant_survives_begin_parts_pending_poll_and_resign() {
     let bytes = vec![4; (8 << 20) + 1];
     let key = PackKey::new(hash(&bytes));
     client
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     client
         .advance_refs_committing(
@@ -1784,24 +1892,24 @@ fn ref_hints_survive_retry_and_invalid_hints_are_refused() {
     let key = PackKey::new(hash(DATA));
     assert_eq!(
         client
-            .download_pack_via_ref(&key, "refs/heads/main")
+            .download_blob(&key, Some("refs/heads/main"), u64::MAX)
             .unwrap(),
         DATA
     );
     assert_eq!(
         client
-            .download_blob_via_ref(&key, "refs/heads/main")
+            .download_blob(&key, Some("refs/heads/main"), u64::MAX)
             .unwrap(),
         DATA
     );
-    assert!(client.pack_exists_via_ref(&key, "refs/heads/main").unwrap());
-    assert_eq!(client.download_pack(&key).unwrap(), DATA);
-    assert_eq!(client.download_blob(&key).unwrap(), DATA);
-    assert!(client.pack_exists(&key).unwrap());
+    assert!(client.pack_exists(&key, Some("refs/heads/main")).unwrap());
+    assert_eq!(client.download_blob(&key, None, u64::MAX).unwrap(), DATA);
+    assert_eq!(client.download_blob(&key, None, u64::MAX).unwrap(), DATA);
+    assert!(client.pack_exists(&key, None).unwrap());
     for hint in ["../bad", "refs/heads/bad\nheader"] {
-        assert!(client.download_pack_via_ref(&key, hint).is_err());
-        assert!(client.download_blob_via_ref(&key, hint).is_err());
-        assert!(client.pack_exists_via_ref(&key, hint).is_err());
+        assert!(client.download_blob(&key, Some(hint), u64::MAX).is_err());
+        assert!(client.download_blob(&key, Some(hint), u64::MAX).is_err());
+        assert!(client.pack_exists(&key, Some(hint)).is_err());
     }
     let state = served.state.lock().unwrap();
     assert_eq!(state.requests.len(), 7);
@@ -1825,9 +1933,9 @@ fn not_found_means_absent_ref_and_pack_but_listing_still_errors() {
     let client = served.client();
     let key = PackKey::new(hash(DATA));
     assert_eq!(client.read_ref("refs/heads/main").unwrap(), None);
-    assert!(!client.pack_exists(&key).unwrap());
+    assert!(!client.pack_exists(&key, None).unwrap());
     assert!(matches!(
-        client.download_pack(&key),
+        client.download_blob(&key, None, u64::MAX),
         Err(TransportError::PackNotFound)
     ));
     assert!(matches!(
@@ -1871,7 +1979,11 @@ fn begin_upload_admission_retries_once_with_headers() {
         )))));
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(helper_calls.load(Ordering::SeqCst), 1);
     let state = served.state.lock().unwrap();
@@ -1908,7 +2020,11 @@ fn ticketed_advance_challenge_never_runs_admission_helper() {
         )))));
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let error = client
         .advance_refs_committing(
@@ -1935,7 +2051,11 @@ fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
     });
     let error = served
         .signed_client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap_err();
     assert!(
         matches!(error, TransportError::RemoteError(message) if message == "upload ticket rejected: ticket refused")
@@ -1947,7 +2067,11 @@ fn begin_rejection_and_v2_small_unimplemented_are_terminal() {
     });
     let error = served
         .signed_client()
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap_err();
     assert!(
         matches!(error, TransportError::RemoteError(message) if message.contains("server does not implement BeginUpload"))
@@ -1968,7 +2092,11 @@ fn expired_ticket_rejects_before_first_advance_poll() {
     let client = served.signed_client().with_clock_for_test(lag_now);
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     LAG_CLOCK.store(1_700_000_000_001, Ordering::SeqCst);
     let outcome = client
@@ -2010,7 +2138,11 @@ fn lag_bound_clears_after_pending_reply() {
         .with_retry_hooks_for_test(short_backoff, lag_sleep);
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let outcome = client
         .advance_refs_committing(
@@ -2040,7 +2172,11 @@ fn eight_distinct_ticket_ids_fail_before_advance() {
         let bytes = [i];
         let key = PackKey::new(hash(&bytes));
         client
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main"),
+            )
             .unwrap();
         keys.push(key);
     }
@@ -2059,6 +2195,71 @@ fn eight_distinct_ticket_ids_fail_before_advance() {
     assert_eq!(served.calls("AdvanceRefs"), 0);
 }
 
+/// A grant source that records the refs of each write it is asked about.
+#[derive(Default)]
+struct RecordingGrant(Mutex<Vec<Vec<(String, kit_transport_connect::GrantCondition)>>>);
+impl GrantSource for RecordingGrant {
+    fn select(&self, request: &GrantRequest<'_>) -> Option<String> {
+        if let kit_transport_connect::GrantOperation::Write { refs } = request.operation {
+            self.0.lock().unwrap().push(
+                refs.iter()
+                    .map(|r| (r.name.to_owned(), r.condition))
+                    .collect(),
+            );
+        }
+        Some("grant-value".into())
+    }
+}
+
+/// A delete asks for a grant for a delete of each ref it sends, and sends
+/// both refs in one `AdvanceRefs` with `delete`, under `MATCH`.
+#[test]
+fn a_delete_asks_for_a_delete_grant_on_each_ref() {
+    use kit_transport_connect::GrantCondition::Delete;
+    let served = Served::new(State::default());
+    let uri = format!(
+        "http://127.0.0.1:{}/0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
+        served.port,
+    )
+    .parse()
+    .unwrap();
+    let grants = Arc::new(RecordingGrant::default());
+    let client = ConnectTransport::connect_for_test_with_signer(uri, Some(Arc::new(DigestSigner)))
+        .with_grant_source(grants.clone());
+    let (head, map) = ("refs/tags/v1", "refs/kit/tagmap/v1");
+    let outcome = client
+        .delete_refs(head, &hash(b"tag"), map, Some(&hash(b"map")))
+        .unwrap();
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    client.delete_ref(head, &hash(b"tag")).unwrap();
+    assert_eq!(
+        *grants.0.lock().unwrap(),
+        [
+            vec![(head.to_owned(), Delete), (map.to_owned(), Delete)],
+            vec![(head.to_owned(), Delete)],
+        ]
+    );
+    let state = served.state.lock().unwrap();
+    let advance = state
+        .requests
+        .iter()
+        .find_map(|r| r.advance.clone())
+        .unwrap();
+    assert_eq!(advance.delete, Some(true));
+    assert_eq!(advance.head_expected_id.as_deref(), Some(&hash(b"tag")[..]));
+    assert_eq!(
+        advance.packmap_expected_id.as_deref(),
+        Some(&hash(b"map")[..])
+    );
+    assert!(
+        state
+            .requests
+            .iter()
+            .filter(|r| matches!(r.rpc, "AdvanceRefs" | "UpdateRef"))
+            .all(|r| r.grant.as_deref() == Some("grant-value"))
+    );
+}
+
 #[test]
 fn ticketed_upload_pack_carries_no_write_grant() {
     let served = Served::new(State::default());
@@ -2072,7 +2273,11 @@ fn ticketed_upload_pack_carries_no_write_grant() {
         .with_grant_source(Arc::new(TestGrant));
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let state = served.state.lock().unwrap();
     assert_eq!(
@@ -2128,7 +2333,11 @@ fn begin_upload_keeps_nonce_inside_ladder_until_actual_lapse() {
         served
             .signed_client()
             .with_clock_for_test(renew_now)
-            .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(DATA),
+                &key,
+                Some("refs/heads/main"),
+            )
             .unwrap();
         let got = nonces(&served, "BeginUpload");
         assert_eq!(got.len(), 2);
@@ -2151,7 +2360,7 @@ fn upload_pack_renews_at_attempt_start_inside_margin() {
     served
         .signed_client()
         .with_clock_for_test(renew_now)
-        .upload_pack(DATA, &key)
+        .upload_pack(&kit_core::protocol::SliceBody(DATA), &key, None)
         .unwrap();
     let got = nonces(&served, "UploadPack");
     assert_eq!(got.len(), 2);
@@ -2209,7 +2418,11 @@ fn upload_part_and_complete_renew_at_attempt_start_inside_margin() {
         served
             .signed_client()
             .with_clock_for_test(renew_now)
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main"),
+            )
             .unwrap();
         let got = nonces(&served, rpc);
         assert!(got.len() >= 2, "{rpc}: {got:?}");
@@ -2225,7 +2438,10 @@ fn retries_stream_only_bounded_chunks_from_borrowed_pack() {
         upload_unavailable_once: true,
         ..Default::default()
     });
-    served.signed_client().upload_pack(&bytes, &key).unwrap();
+    served
+        .signed_client()
+        .upload_pack(&kit_core::protocol::SliceBody(&bytes), &key, None)
+        .unwrap();
     let state = served.state.lock().unwrap();
     let attempts: Vec<_> = state
         .requests
@@ -2246,7 +2462,11 @@ fn retries_stream_only_bounded_chunks_from_borrowed_pack() {
     });
     served
         .signed_client()
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let state = served.state.lock().unwrap();
     let first_part: Vec<_> = state
@@ -2275,11 +2495,19 @@ fn changed_ticket_id_discards_saved_parts_and_resends_all() {
     let client = served.signed_client().with_receipt_store(store.clone());
     assert!(
         client
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main")
+            )
             .is_err()
     );
     client
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let indices: Vec<_> = served
         .state
@@ -2333,12 +2561,20 @@ fn expired_ticket_receipts_do_not_resume() {
     let client = served.signed_client().with_clock_for_test(renew_now);
     assert!(
         client
-            .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &key,
+                Some("refs/heads/main")
+            )
             .is_err()
     );
     RENEW_CLOCK.store(start + 5_001, Ordering::SeqCst);
     client
-        .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     let indices: Vec<_> = served
         .state
@@ -2365,7 +2601,11 @@ fn begin_402_precedes_open_ticket_cap_message() {
         )))));
     let key = PackKey::new(hash(DATA));
     client
-        .upload_pack_via_ref(DATA, &key, "refs/heads/main")
+        .upload_pack(
+            &kit_core::protocol::SliceBody(DATA),
+            &key,
+            Some("refs/heads/main"),
+        )
         .unwrap();
     assert_eq!(helper_calls.load(Ordering::SeqCst), 1);
     assert_eq!(served.calls("BeginUpload"), 2);

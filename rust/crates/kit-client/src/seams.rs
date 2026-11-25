@@ -407,6 +407,9 @@ pub enum FailureKind {
     Coding,
     WireLimit,
     InflatedLimit,
+    /// A transfer moved no data for the channel's stall bound. The channel
+    /// reports it as a transient failure.
+    Stalled,
 }
 
 /// Borrowed, bounded evidence captured before a failure is simplified. Treat

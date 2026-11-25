@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use kit_core::hash::{self, Hash};
+use kit_core::index;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::refs;
@@ -30,6 +31,19 @@ fn ok(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Seed an entry that an earlier version of add could stage.
+fn stage_historical_temporary(dir: &Path, path: &str, from: &str) {
+    let layout = RepoLayout::single(dir);
+    let mut staged = index::read_index(&layout).unwrap();
+    let mut entry = staged.entries[staged.find_entry(from).unwrap()].clone();
+    let target = dir.join(path);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(dir.join(from), target).unwrap();
+    path.clone_into(&mut entry.path);
+    staged.upsert_entry(entry);
+    index::write_index(&layout, &staged).unwrap();
+}
+
 fn tree(dir: &Path, tip: Hash) -> Hash {
     let store = ObjectStore::open(&RepoLayout::single(dir)).unwrap();
     let Object::Commit(commit) = store.read_object(&tip).unwrap() else {
@@ -48,7 +62,7 @@ fn marker_bytes(target: Hash, before_tree: Hash) -> Vec<u8> {
 }
 
 struct Pending {
-    _upstream: tempfile::TempDir,
+    upstream: tempfile::TempDir,
     _bare: tempfile::TempDir,
     local: tempfile::TempDir,
     target: Hash,
@@ -56,6 +70,10 @@ struct Pending {
 
 impl Pending {
     fn new() -> Self {
+        Self::with_dropped_path(None)
+    }
+
+    fn with_dropped_path(dropped: Option<&str>) -> Self {
         let upstream = tempfile::tempdir().unwrap();
         let bare = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
@@ -63,12 +81,13 @@ impl Pending {
         ok(upstream.path(), &["keygen"]);
         fs::write(upstream.path().join("a.txt"), b"one\n").unwrap();
         fs::write(upstream.path().join("b.txt"), b"same\n").unwrap();
-        fs::write(
-            upstream.path().join(".kit-restore-tmp.1.2"),
-            b"tracked value\n",
-        )
-        .unwrap();
+        if let Some(path) = dropped {
+            let path = upstream.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"tracked\n").unwrap();
+        }
         ok(upstream.path(), &["add", "."]);
+        stage_historical_temporary(upstream.path(), ".kit-restore-tmp.1.2", "b.txt");
         ok(upstream.path(), &["commit", "-m", "base"]);
         let url = format!("kit+file://{}", bare.path().display());
         ok(upstream.path(), &["remote", "add", &url]);
@@ -81,6 +100,9 @@ impl Pending {
         let before = tree(local.path(), refs::resolve_head(&layout).unwrap().unwrap());
         fs::write(upstream.path().join("a.txt"), b"two\n").unwrap();
         ok(upstream.path(), &["add", "a.txt"]);
+        if let Some(path) = dropped {
+            ok(upstream.path(), &["rm", path]);
+        }
         ok(upstream.path(), &["commit", "-m", "update"]);
         ok(upstream.path(), &["push"]);
         ok(local.path(), &["fetch"]);
@@ -90,7 +112,7 @@ impl Pending {
         fs::write(layout.pull_head_file(), marker_bytes(target, before)).unwrap();
         refs::write_ref(&layout, "main", &target).unwrap();
         Self {
-            _upstream: upstream,
+            upstream,
             _bare: bare,
             local,
             target,
@@ -146,13 +168,83 @@ fn recovery_checks_the_index_even_when_the_worktree_is_safe() {
 fn recovery_refuses_soft_reset_work_with_a_stale_marker() {
     let pending = Pending::new();
     let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let marker = fs::read(layout.pull_head_file()).unwrap();
     ok(dir, &["reset", "--hard", "-f", "HEAD"]);
+    // The reset ends the pull. The marker is put back to stand for a pull
+    // that began again and left a stale record behind.
+    fs::write(layout.pull_head_file(), marker).unwrap();
     fs::write(dir.join("w.txt"), b"new work\n").unwrap();
     ok(dir, &["add", "w.txt"]);
     ok(dir, &["commit", "-m", "local"]);
     ok(dir, &["reset", "--soft", "HEAD~1"]);
     pending.refuses_without_changes();
     assert_eq!(fs::read(dir.join("w.txt")).unwrap(), b"new work\n");
+}
+
+#[test]
+fn a_reset_that_moves_the_index_ends_an_unfinished_pull() {
+    for args in [
+        ["reset", "--hard", "-f"].as_slice(),
+        ["reset", "--mixed"].as_slice(),
+        ["reset"].as_slice(),
+    ] {
+        let pending = Pending::new();
+        let dir = pending.local.path();
+        let layout = RepoLayout::single(dir);
+        assert!(layout.pull_head_file().exists());
+        ok(dir, args);
+        assert!(!layout.pull_head_file().exists(), "{args:?}");
+        // The pre-pull version of a pulled file can be committed on purpose.
+        fs::write(dir.join("a.txt"), b"one\n").unwrap();
+        ok(dir, &["add", "a.txt"]);
+        ok(dir, &["commit", "-m", "deliberate undo"]);
+    }
+}
+
+#[test]
+fn a_soft_reset_keeps_the_unfinished_pull_record() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    ok(dir, &["reset", "--soft"]);
+    assert!(layout.pull_head_file().exists());
+}
+
+#[test]
+fn a_commit_is_refused_while_a_pull_has_not_finished_restoring() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let status = run(dir, &["status"]);
+    let warning = String::from_utf8(status.stderr).unwrap();
+    assert!(warning.contains("interrupted pull"), "{warning}");
+    for args in [
+        ["commit", "-m", "would revert the pull"].as_slice(),
+        ["commit", "-a", "-m", "would revert the pull"].as_slice(),
+        ["commit", "--amend", "-m", "would revert the pull"].as_slice(),
+    ] {
+        let out = run(dir, args);
+        assert!(!out.status.success(), "{args:?}");
+        let message = String::from_utf8(out.stderr).unwrap();
+        assert!(message.contains("kit pull"), "{message}");
+        assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    }
+    // Staging more files does not hide the unfinished pull.
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    let out = run(dir, &["commit", "-m", "would revert the pull"]);
+    assert!(!out.status.success());
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    // A hard reset restores HEAD, so the way out needs no remote.
+    ok(dir, &["reset", "--hard", "-f"]);
+    ok(dir, &["pull"]);
+    let status = run(dir, &["status"]);
+    let quiet = String::from_utf8(status.stderr).unwrap();
+    assert!(!quiet.contains("interrupted pull"), "{quiet}");
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    ok(dir, &["commit", "-m", "work"]);
 }
 
 #[test]
@@ -274,13 +366,76 @@ fn recovery_refuses_symlinks_with_temporary_names() {
     assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"same\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn recovery_preserves_a_symlink_that_replaced_a_tracked_directory() {
+    let name = ".kit-restore-tmp.17.18";
+    let pending = Pending::with_dropped_path(Some(".kit-restore-tmp.17.18/kept.txt"));
+    let dir = pending.local.path().join(name);
+    fs::remove_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink("b.txt", &dir).unwrap();
+    pending.refuses_without_changes();
+    assert_eq!(fs::read_link(dir).unwrap(), Path::new("b.txt"));
+}
+
 #[test]
 fn recovery_protects_tracked_files_with_temporary_names() {
     let pending = Pending::new();
-    let path = pending.local.path().join(".kit-restore-tmp.1.2");
+    let dir = pending.local.path();
+    let name = ".kit-restore-tmp.1.2";
+    let layout = RepoLayout::single(dir);
+    assert!(
+        index::read_index(&layout)
+            .unwrap()
+            .has_tracked_file_at(name)
+    );
+    let path = dir.join(name);
     fs::write(&path, b"local edit\n").unwrap();
     pending.refuses_without_changes();
     assert_eq!(fs::read(path).unwrap(), b"local edit\n");
+}
+
+#[test]
+fn a_historical_restore_temp_path_can_be_staged_again() {
+    let pending = Pending::new();
+    let dir = pending.upstream.path();
+    let path = ".kit-restore-tmp.1.2";
+    ok(dir, &["rm", "--cached", path]);
+    let status = run(dir, &["status", "--porcelain"]);
+    assert!(status.status.success());
+    assert_eq!(status.stdout, format!("D  {path}\n?? {path}\n").as_bytes());
+    ok(dir, &["add", path]);
+    assert!(run(dir, &["status", "--porcelain"]).stdout.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tracked_directory_alias_cannot_pick_up_a_restore_temp_file() {
+    for symlink in [false, true] {
+        let local = tempfile::tempdir().unwrap();
+        let dir = local.path();
+        ok(dir, &["init"]);
+        ok(dir, &["keygen"]);
+        fs::write(dir.join("file.txt"), b"historical\n").unwrap();
+        ok(dir, &["add", "file.txt"]);
+        let tracked = "Dir/.kit-restore-tmp.1.2";
+        stage_historical_temporary(dir, tracked, "file.txt");
+        ok(dir, &["commit", "-m", "base"]);
+        if symlink {
+            fs::rename(dir.join("Dir"), dir.join("other")).unwrap();
+            std::os::unix::fs::symlink("other", dir.join("Dir")).unwrap();
+        } else {
+            if !dir.join("dir").exists() {
+                continue;
+            }
+            fs::rename(dir.join("Dir"), dir.join("dir")).unwrap();
+        }
+        fs::write(dir.join(tracked), b"left by a stopped restore\n").unwrap();
+
+        assert!(!run(dir, &["add", tracked]).status.success());
+        ok(dir, &["add", "-u"]);
+        assert_eq!(run(dir, &["ls-files"]).stdout, b"file.txt\n");
+    }
 }
 
 #[test]

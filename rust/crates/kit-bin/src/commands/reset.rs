@@ -3,12 +3,15 @@
 //!
 //! Two modes, mirroring `git reset`'s safe subset:
 //!
-//! - **`--soft`** — move HEAD / the current branch only. The index and
-//!   the worktree are left exactly as they are, so the difference between
-//!   the old tip and the new target shows up as staged changes.
+//! - **`--soft`** — move HEAD / the current branch only. The index, the
+//!   worktree and any operation in progress are left exactly as they are,
+//!   so the difference between the old tip and the new target shows up as
+//!   staged changes.
 //! - **`--mixed`** (the default) — move HEAD *and* rewrite `.kit/index`
 //!   to mirror the target commit's tree. The worktree is untouched, so
-//!   changes relative to the target appear as un-staged worktree edits.
+//!   changes relative to the target appear as un-staged worktree edits. A
+//!   merge, cherry-pick or revert in progress, and the record of a pull
+//!   that stopped before its restore, are cleared.
 //!
 //! `<commit>` defaults to `HEAD` (a no-op move that still re-syncs the
 //! index under `--mixed`) and is resolved through the shared revspec
@@ -17,9 +20,10 @@
 //!
 //! - **`--hard`** — move HEAD, reset the index to the target tree, AND
 //!   reset the worktree to it (discarding tracked-file changes). Like
-//!   git, untracked files are left in place. This is the one destructive
-//!   variant, so it runs the same dirty/untracked guard as `checkout`:
-//!   it **refuses** to discard locally-modified or staged content
+//!   git, untracked files are left in place, and a merge, cherry-pick or
+//!   revert in progress, and an unfinished pull, are cleared. This is the
+//!   one destructive variant, so it runs the same dirty/untracked guard as
+//!   `checkout`: it **refuses** to discard locally-modified or staged content
 //!   unless `-f`/`--force` is given. That guard is a kit safety
 //!   divergence — git's `reset --hard` discards silently.
 
@@ -30,6 +34,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
+use kit_core::ops::conflict_state;
 use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
@@ -145,7 +150,7 @@ pub fn run(args: &[String]) -> u8 {
     // them ourselves; the hashes let the guard below detect local edits to
     // ignored-but-tracked files that the shared guard cannot see.
     let hard_removed: Vec<(String, EntryStatus, Hash)> = if opts.hard {
-        match super::dropped_tracked_paths(&layout, &store, tree_hash) {
+        match super::dropped_tracked_paths(&layout, &store, tree_hash, None) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         }
@@ -185,40 +190,40 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
+    if opts.hard
+        && let Err(e) = kit_core::ops::restore::check_nested_repositories(
+            &store,
+            tree_hash,
+            &cwd,
+            &restore_opts,
+            None,
+        )
+    {
+        return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
+    }
+
     // If reset moves the branch off its current tip, that old tip may
-    // become unreachable — record it BEFORE the move (under the worktree
-    // lock) so it stays recoverable, and abort if the log can't be
+    // become unreachable — record it right before the move (under the
+    // worktree lock) so it stays recoverable, and abort if the log can't be
     // written. Fail closed: an unreadable/corrupt current ref
-    // (`resolve_head` Err) aborts rather than letting `move_head` clobber
-    // it unlogged. `Ok(None)` is an unborn branch (nothing to supersede);
-    // a no-op move (old == target) records nothing.
-    match refs::resolve_head(&layout) {
+    // (`resolve_head` Err) aborts before anything is written rather than
+    // letting `move_head` clobber it unlogged. `Ok(None)` is an unborn
+    // branch (nothing to supersede); a no-op move (old == target) records
+    // nothing.
+    let superseded = match refs::resolve_head(&layout) {
         Ok(Some(old_head)) if old_head != target => {
-            let branch = super::head_branch_name(&layout);
-            if let Err((msg, code)) = super::record_superseded(&layout, "reset", &branch, old_head)
-            {
-                return emit_err(&msg, code);
-            }
+            Some((super::head_branch_name(&layout), old_head))
         }
-        Ok(_) => {}
+        Ok(_) => None,
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
-    }
-
-    // Move HEAD / the current branch FIRST. As in `checkout`, advancing
-    // the ref before the index keeps the failure modes benign: a later
-    // index-write failure leaves HEAD on the target with a stale index,
-    // which `kit status` surfaces and a re-run repairs.
-    if let Err((msg, code)) = move_head(&layout, &target) {
-        return emit_err(&msg, code);
-    }
-
-    if reset_index && let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
-        return emit_err(&e, exit::CANTCREAT);
-    }
+    };
 
     // --hard: materialize the target tree into the worktree (overwriting
     // tracked files, keeping untracked ones), then delete the tracked
-    // files the target dropped.
+    // files the target dropped. The files go first and HEAD and the index
+    // after, as git does: a reset stopped or failed partway leaves HEAD and
+    // the index where they were, so the same reset run again with `-f`
+    // finishes it, and the files it wrote show as local changes.
     if opts.hard {
         if let Err(e) = restore_tree_to_worktree_with(
             &store,
@@ -238,6 +243,37 @@ pub fn run(args: &[String]) -> u8 {
                 );
             }
         }
+    }
+
+    // Signals are held across the log, HEAD and index writes, so a stopped
+    // reset never leaves HEAD moved over the old index.
+    let published = crate::signal::defer(|| {
+        if let Some((branch, old_head)) = &superseded {
+            super::record_superseded(&layout, "reset", branch, *old_head)?;
+        }
+        move_head(&layout, &target)?;
+        if reset_index {
+            super::sync_index_to_tree(&layout, &store, tree_hash)
+                .map_err(|e| (e, exit::CANTCREAT))?;
+        }
+        // The operation is over, as in git, and so is a pull that stopped
+        // before its restore: the index follows the target now. These go
+        // last: a stop before them leaves the state, and the same reset run
+        // again clears it.
+        if reset_index {
+            conflict_state::clear_operation_state(&layout)
+                .map_err(|e| (format!("clear operation state: {e}"), exit::CANTCREAT))?;
+            match std::fs::remove_file(layout.pull_head_file()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err((format!("clear pull record: {e}"), exit::CANTCREAT));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    if let Err((msg, code)) = published {
+        return emit_err(&msg, code);
     }
 
     // git-shaped report: `--hard` prints `HEAD is now at <hash> <subject>`;

@@ -1,7 +1,9 @@
 const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
+const MAX_CHAIN_DEPTH: usize = crate::read::MAX_CHAIN_DEPTH;
 use crate::calls;
 use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, membership_lag, pending_delay};
 use crate::seams::{NoObserver, Observer, RequestPolicy};
+use crate::stream::BodyChunks;
 use crate::{
     Clock, Destination, Error, HttpTransport, Plan, Signer,
     proto::{
@@ -15,9 +17,10 @@ use buffa::Message;
 use kit_core::hash::{hash, to_hex};
 use kit_core::{
     hash::Hash,
+    protocol::{PackBody, SliceBody},
     refs::{self, RefWriteCondition},
     transfer::packmap::{ChainState, PlanError, plan_advance},
-    upload_parts::{PartPlan, part_subtree_cv},
+    upload_parts::{PartHasher, PartPlan},
     write_auth::{ContentCommitment, PartCommitment},
 };
 use std::collections::HashSet;
@@ -165,12 +168,17 @@ impl Push {
         let keys: Vec<_> = self.plan.pack_ids().copied().collect();
         for _ in 0..8 {
             let prior = read_ref(&rpc, &self.packmap_ref).await?;
+            // The nodes and listed packs of the chain an appended node links to.
+            let mut linked = None;
             let state = match self.mode {
                 PackmapMode::ResetSelfContained => ChainState::Reset { prior },
                 PackmapMode::Append { self_contained } => match prior {
                     None => ChainState::Missing,
                     Some(root) => match walk_chain(&rpc, root, &self.head_ref).await {
-                        Ok(packs) => ChainState::Append { head: root, packs },
+                        Ok((packs, nodes, listed)) => {
+                            linked = Some((nodes, listed));
+                            ChainState::Append { head: root, packs }
+                        }
                         Err(Error::Packlist(_) | Error::Invalid(_)) if self_contained => {
                             ChainState::Reset { prior }
                         }
@@ -192,6 +200,13 @@ impl Push {
             let Some(node) = node else {
                 return commit_head(&rpc, &self.head_ref, self.condition, self.tip).await;
             };
+            // An appended node lists every key. Refuse a chain a reader would
+            // refuse to walk before the node is uploaded.
+            if let Some((nodes, listed)) = linked
+                && (nodes >= MAX_CHAIN_DEPTH || listed.saturating_add(keys.len()) > MAX_CHAIN_PACKS)
+            {
+                return Err(Error::Limit("packmap chain past the fetch bounds"));
+            }
             let node_ticket = upload(
                 &mut rpc,
                 &self.head_ref,
@@ -320,24 +335,13 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPo
         .map_err(|_| Error::Limit("multipart geometry"))?;
         let mut receipts = Vec::new();
         for index in 0..plan.count() {
-            let offset = usize::try_from(
-                plan.offset(index)
-                    .map_err(|_| Error::Invalid("part offset"))?,
-            )
-            .map_err(|_| Error::Invalid("part offset"))?;
-            let len = usize::try_from(
-                plan.expected_len(index)
-                    .map_err(|_| Error::Invalid("part length"))?,
-            )
-            .map_err(|_| Error::Invalid("part length"))?;
-            let part = &bytes[offset..offset + len];
             let (response, _) = calls::upload_part(
                 rpc,
                 id,
                 ticket.token.clone(),
                 &plan,
                 index,
-                part,
+                &SliceBody(bytes),
                 objects,
                 None,
             )
@@ -354,7 +358,7 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPo
         calls::upload_pack(
             rpc,
             key,
-            bytes,
+            &SliceBody(bytes),
             id,
             ticket.as_ref().and_then(|ticket| ticket.token.clone()),
             objects,
@@ -365,19 +369,21 @@ async fn upload<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPo
     Ok(id)
 }
 
-/// The `UploadPack` stream: a header, then ordered chunks ending in `last`.
-pub(crate) fn pack_messages(
+/// The `UploadPack` stream: a header, then ordered chunks ending in `last`,
+/// read from `body` one chunk at a time. An empty pack sends one empty `last`
+/// chunk.
+pub(crate) fn pack_messages<'a>(
     key: &Hash,
-    bytes: &[u8],
+    body: &'a dyn PackBody,
     ticket_token: Option<Vec<u8>>,
-) -> impl Iterator<Item = UploadPackRequest> {
+) -> impl Iterator<Item = Result<UploadPackRequest, Error>> + 'a {
     let key = *key;
-    let total = bytes.len();
+    let total = body.len();
     let header = UploadPackRequest {
         body: Some(
             UploadPackHeader {
                 pack_id: Some(key.to_vec()),
-                total_bytes: Some(total as u64),
+                total_bytes: Some(total),
                 ticket_token,
                 ..Default::default()
             }
@@ -385,40 +391,49 @@ pub(crate) fn pack_messages(
         ),
         ..Default::default()
     };
-    let chunks = bytes
-        .chunks(CHUNK_SIZE)
-        .chain(bytes.is_empty().then_some(bytes))
-        .enumerate()
-        .map(move |(index, bytes_chunk)| UploadPackRequest {
+    let mut chunks = BodyChunks::new(body, 0, total);
+    let mut ended = false;
+    let chunks = std::iter::from_fn(move || {
+        if ended {
+            return None;
+        }
+        let offset = chunks.position();
+        let message = chunks.next_chunk(CHUNK_SIZE).map(|data| UploadPackRequest {
             body: Some(
                 PackChunk {
                     pack_id: Some(key.to_vec()),
-                    offset: Some((index * CHUNK_SIZE) as u64),
-                    data: Some(bytes_chunk.to_vec()),
-                    last: Some(index * CHUNK_SIZE + bytes_chunk.len() == total),
+                    offset: Some(offset),
+                    data: Some(data),
+                    last: Some(chunks.done()),
                     ..Default::default()
                 }
                 .into(),
             ),
             ..Default::default()
         });
-    std::iter::once(header).chain(chunks)
+        ended = message.is_err() || chunks.done();
+        Some(message)
+    });
+    std::iter::once(Ok(header)).chain(chunks)
 }
 
-pub(crate) fn pack_commitment(key: &Hash, bytes: &[u8]) -> String {
+pub(crate) fn pack_commitment(key: &Hash, body: &dyn PackBody) -> String {
     ContentCommitment::Pack {
         id: *key,
-        len: bytes.len() as u64,
+        len: body.len(),
     }
     .to_string()
 }
 
-/// The `UploadPart` stream: a header, then the part in chunks.
-pub(crate) fn part_messages(
+/// The `UploadPart` stream: a header, then part `index` of `body` in chunks,
+/// read one chunk at a time.
+pub(crate) fn part_messages<'a>(
     ticket_token: Option<Vec<u8>>,
+    plan: &PartPlan,
     index: u32,
-    part: &[u8],
-) -> impl Iterator<Item = UploadPartRequest> {
+    body: &'a dyn PackBody,
+) -> Result<impl Iterator<Item = Result<UploadPartRequest, Error>> + 'a, Error> {
+    let (offset, len) = part_range(plan, index)?;
     let header = UploadPartRequest {
         msg: Some(
             UploadPartHeader {
@@ -430,25 +445,56 @@ pub(crate) fn part_messages(
         ),
         ..Default::default()
     };
-    let chunks = part.chunks(CHUNK_SIZE).map(|bytes| UploadPartRequest {
-        msg: Some(upload_part_request::Msg::Chunk(bytes.to_vec())),
-        ..Default::default()
+    let mut chunks = BodyChunks::new(body, offset, len);
+    let mut ended = false;
+    let chunks = std::iter::from_fn(move || {
+        if ended || chunks.done() {
+            return None;
+        }
+        let message = chunks
+            .next_chunk(CHUNK_SIZE)
+            .map(|bytes| UploadPartRequest {
+                msg: Some(upload_part_request::Msg::Chunk(bytes)),
+                ..Default::default()
+            });
+        ended = message.is_err();
+        Some(message)
     });
-    std::iter::once(header).chain(chunks)
+    Ok(std::iter::once(Ok(header)).chain(chunks))
 }
 
-/// The signed commitment of one part (SPEC-TRANSPORT-CONNECT §7.6).
+/// The offset and length of part `index`.
+fn part_range(plan: &PartPlan, index: u32) -> Result<(u64, u64), Error> {
+    let offset = plan
+        .offset(index)
+        .map_err(|_| Error::Invalid("part offset"))?;
+    let len = plan
+        .expected_len(index)
+        .map_err(|_| Error::Invalid("part length"))?;
+    Ok((offset, len))
+}
+
+/// The signed commitment of part `index` of `body` (SPEC-TRANSPORT-CONNECT
+/// §7.6), hashed from the body one chunk at a time.
 pub(crate) fn part_commitment(
     ticket: Hash,
     plan: &PartPlan,
     index: u32,
-    part: &[u8],
+    body: &dyn PackBody,
 ) -> Result<String, Error> {
+    let (offset, len) = part_range(plan, index)?;
+    let mut hasher = PartHasher::new(plan, index).map_err(|_| Error::Invalid("part hash"))?;
+    let mut chunks = BodyChunks::new(body, offset, len);
+    while !chunks.done() {
+        hasher
+            .update(&chunks.next_chunk(CHUNK_SIZE)?)
+            .map_err(|_| Error::Invalid("part hash"))?;
+    }
     Ok(ContentCommitment::Part(PartCommitment {
         ticket,
         index,
-        subtree: part_subtree_cv(plan, index, part).map_err(|_| Error::Invalid("part hash"))?,
-        len: part.len() as u64,
+        subtree: hasher.finalize().map_err(|_| Error::Invalid("part hash"))?,
+        len,
     })
     .to_string())
 }
@@ -497,9 +543,12 @@ async fn walk_chain<
     rpc: &Rpc<'_, T, S, C, O, P>,
     root: Hash,
     head_ref: &str,
-) -> Result<HashSet<Hash>, Error> {
+) -> Result<(HashSet<Hash>, usize, usize), Error> {
     let mut packs = HashSet::new();
+    let (mut nodes, mut listed) = (0_usize, 0_usize);
     crate::read::walk_nodes(rpc, root, head_ref, |node| {
+        nodes += 1;
+        listed = listed.saturating_add(node.packs.len());
         packs.extend(node.packs.iter().copied());
         if packs.len() > MAX_CHAIN_PACKS {
             return Err(Error::Limit("packmap pack count"));
@@ -507,7 +556,7 @@ async fn walk_chain<
         Ok(node.prev)
     })
     .await?;
-    Ok(packs)
+    Ok((packs, nodes, listed))
 }
 
 /// One `AdvanceRefs` with the whole-push waits: poll a definitive pending or
@@ -650,7 +699,9 @@ mod tests {
     #[test]
     fn empty_upload_has_an_explicit_last_chunk() {
         let key = kit_core::pack::pack_key(b"");
-        let messages: Vec<_> = pack_messages(&key, b"", None).collect();
+        let messages: Vec<_> = pack_messages(&key, &SliceBody(b""), None)
+            .collect::<Result<_, _>>()
+            .unwrap();
         assert_eq!(messages.len(), 2, "header plus empty final chunk");
         let Some(crate::proto::upload_pack_request::Body::Chunk(chunk)) = &messages[1].body else {
             panic!("missing final chunk");
@@ -658,5 +709,29 @@ mod tests {
         assert_eq!(chunk.offset, Some(0));
         assert_eq!(chunk.data.as_deref(), Some(b"".as_slice()));
         assert_eq!(chunk.last, Some(true));
+    }
+
+    /// The streamed messages are the ones the in-memory builder sent: the
+    /// same chunk size, offsets and `last` marker.
+    #[test]
+    fn upload_chunks_keep_their_size_offsets_and_last_marker() {
+        let bytes: Vec<u8> = (0..(2 * CHUNK_SIZE + 7))
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let key = kit_core::pack::pack_key(&bytes);
+        let messages: Vec<_> = pack_messages(&key, &SliceBody(&bytes), None)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(messages.len(), 4);
+        let mut rebuilt = Vec::new();
+        for (index, message) in messages[1..].iter().enumerate() {
+            let Some(crate::proto::upload_pack_request::Body::Chunk(chunk)) = &message.body else {
+                panic!("missing chunk");
+            };
+            assert_eq!(chunk.offset, Some((index * CHUNK_SIZE) as u64));
+            assert_eq!(chunk.last, Some(index == 2));
+            rebuilt.extend_from_slice(chunk.data.as_deref().unwrap());
+        }
+        assert_eq!(rebuilt, bytes);
     }
 }

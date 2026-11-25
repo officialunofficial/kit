@@ -89,7 +89,7 @@ fn upstream_element(proof_bytes: &[u8], leaf: Hash, position: u32, inner_root: H
         return false;
     };
     proof
-        .verify_element_inclusion::<Blake3>(&Digest(leaf), position, &Digest(inner_root))
+        .verify_element_inclusion::<Blake3>(position, &Digest(leaf), &Digest(inner_root))
         .is_ok()
 }
 
@@ -169,8 +169,8 @@ fn check_chunked(
     }
     let position = index.checked_add(1).ok_or(NativeFail::Other("index+1"))?;
     let cw = [
-        (Digest(chunked_meta_leaf(total_size, chunk_size)), 0u32),
-        (Digest(chunked_chunk_leaf(start, end, &chunk_id)), position),
+        (0u32, Digest(chunked_meta_leaf(total_size, chunk_size))),
+        (position, Digest(chunked_chunk_leaf(start, end, &chunk_id))),
     ];
     if proof
         .verify_multi_inclusion::<Blake3>(&cw, &Digest(inner_root))

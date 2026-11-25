@@ -7,7 +7,7 @@
 //! the default push refusal.
 
 use kit_core::hash::Hash;
-use kit_core::protocol::{PackKey, Transport};
+use kit_core::protocol::{PackBody, PackKey, PackSink, Transport};
 use kit_core::refs::Ref;
 
 use crate::SourceError;
@@ -15,15 +15,46 @@ use crate::error::SyncError;
 
 /// A remote repository. Read-only backends keep the default push refusal.
 pub trait RemoteSource {
+    /// Whether the remote supports the attestation log. Unknown sources refuse.
+    fn supports_attestations(&self) -> bool {
+        false
+    }
+
+    /// Publish the attestation log under Missing or Match, consuming uploaded
+    /// pack and node keys. A key without a session reservation must already
+    /// belong to the repository. Any is refused.
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
+        let _ = (condition, tip, keys);
+        Err(SourceError::ProtocolError)
+    }
+
     /// Every branch (`refs/heads/*`) with its tip, named without the prefix.
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError>;
+    /// Every ref under `prefix` (`refs/tags/`, `refs/kit/tagmap/`) with its
+    /// value, named without the prefix and sorted by name, as
+    /// [`Transport::list_refs`] returns them. Required, so that no source can
+    /// silently fetch no tags.
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError>;
     /// A strong read of one ref by its full name (`refs/heads/main`,
     /// `refs/kit/packmap/main`).
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError>;
-    /// Download a packmap node blob. `ref_name` is the branch hint.
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
-    /// Download a pack. `ref_name` is the branch hint.
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError>;
+    /// Download a packmap node blob, of at most the node bound the source
+    /// keeps. `ref_hint` is the full head ref the node is for.
+    fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError>;
+    /// Download a pack into `sink`. `ref_hint` is the full head ref the pack
+    /// is for. A source never retries an attempt after
+    /// [`PackSink::failed`] is set.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: &str,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError>;
 
     /// The remote's repository cursor (SPEC-TRANSPORT §1.2), or `None` when
     /// it offers none.
@@ -36,24 +67,32 @@ pub trait RemoteSource {
     fn supports_push(&self) -> bool {
         false
     }
+    /// Check a content-addressed pack before uploading.
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        let _ = (key, hint);
+        Ok(false)
+    }
+    /// The length of the pack stored under `key`, when the source can read
+    /// it without fetching the pack; `None` when the pack is not stored or
+    /// the length is not known. One attempt, never a retry ladder.
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        let _ = (key, hint);
+        Ok(None)
+    }
     /// Upload a sealed pack using the head ref as its authorization hint.
-    fn upload_pack_via_ref(
+    /// A retry reads `pack` again from its start.
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
-        let _ = (bytes, key, name);
+        let _ = (pack, key, head_ref);
         Err(SourceError::ProtocolError)
     }
     /// Upload a packmap node using the head ref as its authorization hint.
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        name: &str,
-    ) -> Result<(), SourceError> {
-        let _ = (bytes, key, name);
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, head_ref: &str) -> Result<(), SourceError> {
+        let _ = (bytes, key, head_ref);
         Err(SourceError::ProtocolError)
     }
     /// Advance a head under its lease.
@@ -89,9 +128,38 @@ pub trait RemoteSource {
         );
         Err(SourceError::ProtocolError)
     }
+    /// Delete a head ref and then its chain ref, each under `Match`, as
+    /// [`Transport::delete_refs`] defines it. `map_expected` `None` deletes
+    /// the head alone. The default refuses, as the other write verbs do.
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        let _ = (head, head_expected, map, map_expected);
+        Err(SourceError::ProtocolError)
+    }
     /// Remote upload bounds, unchanged from the transport contract.
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         kit_core::protocol::UploadLimits::default()
+    }
+    /// The most distinct objects one advance may carry for the server to
+    /// inspect, when it says (SPEC-TRANSPORT-CONNECT §2.1,
+    /// `inspection_max_objects`). `None` sets no bound.
+    fn inspection_max_objects(&self) -> Option<u64> {
+        None
+    }
+    /// How [`Self::list_refs`] answers, as [`Transport::ref_listing`].
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Ordered
+    }
+    /// Whether a push may send a replacement chunk manifest as a delta, as
+    /// [`Transport::accepts_manifest_deltas`]. A source says `false` unless it
+    /// reaches a remote kit controls; a hosted source keeps full manifests.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
     }
     /// Both conditioned refs can advance atomically.
     fn supports_atomic_advance(&self) -> bool {
@@ -182,27 +250,44 @@ impl<'a> TransportSource<'a> {
 }
 
 impl RemoteSource for TransportSource<'_> {
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        self.transport
+            .pack_exists(key, Some(hint))
+            .map_err(Into::into)
+    }
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        self.transport.pack_len(key, Some(hint)).map_err(Into::into)
+    }
+    fn supports_attestations(&self) -> bool {
+        self.transport.supports_attestations()
+    }
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
+        self.transport
+            .write_attestmap(condition, tip, keys)
+            .map_err(Into::into)
+    }
+
     fn supports_push(&self) -> bool {
         true
     }
-    fn upload_pack_via_ref(
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         self.transport
-            .upload_pack_via_ref(bytes, key, name)
+            .upload_pack(pack, key, Some(head_ref))
             .map_err(Into::into)
     }
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        name: &str,
-    ) -> Result<(), SourceError> {
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, head_ref: &str) -> Result<(), SourceError> {
         self.transport
-            .upload_blob_via_ref(bytes, key, name)
+            .upload_blob(bytes, key, Some(head_ref))
             .map_err(Into::into)
     }
     fn update_ref(
@@ -237,8 +322,25 @@ impl RemoteSource for TransportSource<'_> {
             )
             .map_err(Into::into)
     }
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        self.transport
+            .delete_refs(head, head_expected, map, map_expected)
+            .map_err(Into::into)
+    }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.transport.upload_limits()
+    }
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        self.transport.ref_listing()
+    }
+    fn accepts_manifest_deltas(&self) -> bool {
+        self.transport.accepts_manifest_deltas()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
@@ -265,6 +367,10 @@ impl RemoteSource for TransportSource<'_> {
             .map_err(SourceError::from)
     }
 
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        self.transport.list_refs(prefix).map_err(SourceError::from)
+    }
+
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.transport.read_ref(name).map_err(SourceError::from)
     }
@@ -273,15 +379,28 @@ impl RemoteSource for TransportSource<'_> {
         self.transport.repo_cursor().map_err(SourceError::from)
     }
 
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    /// A node is at most [`MAX_PACKLIST_NODE_BYTES`]: a file, ssh or S3
+    /// remote cannot make the client hold a pack-sized "node".
+    ///
+    /// [`MAX_PACKLIST_NODE_BYTES`]: kit_core::transfer::MAX_PACKLIST_NODE_BYTES
+    fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
         self.transport
-            .download_blob_via_ref(key, ref_name)
+            .download_blob(
+                key,
+                Some(ref_hint),
+                kit_core::transfer::MAX_PACKLIST_NODE_BYTES,
+            )
             .map_err(SourceError::from)
     }
 
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: &str,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
         self.transport
-            .download_pack_via_ref(key, ref_name)
+            .download_pack(key, Some(ref_hint), sink)
             .map_err(SourceError::from)
     }
 
@@ -322,16 +441,29 @@ mod tests {
         }
     }
     impl Transport for Failure {
-        fn upload_pack(&self, _: &[u8], _: &PackKey) -> TransportResult<()> {
+        fn upload_pack(
+            &self,
+            _: &dyn PackBody,
+            _: &PackKey,
+            _: Option<&str>,
+        ) -> TransportResult<()> {
             self.take()
         }
-        fn download_pack(&self, _: &PackKey) -> TransportResult<Vec<u8>> {
+        fn download_pack(
+            &self,
+            _: &PackKey,
+            _: Option<&str>,
+            _: &mut dyn PackSink,
+        ) -> TransportResult<()> {
             self.take()
         }
-        fn pack_exists(&self, _: &PackKey) -> TransportResult<bool> {
+        fn pack_exists(&self, _: &PackKey, _: Option<&str>) -> TransportResult<bool> {
             unreachable!()
         }
         fn update_ref(&self, _: &str, _: RefWriteCondition, _: &Hash) -> TransportResult<()> {
+            self.take()
+        }
+        fn delete_ref(&self, _: &str, _: &Hash) -> TransportResult<()> {
             self.take()
         }
         fn read_ref(&self, _: &str) -> TransportResult<Option<Hash>> {
@@ -372,11 +504,13 @@ mod tests {
                 let error = match verb {
                     0 => source.list_branches().unwrap_err(),
                     1 => source.read_ref("refs/heads/main").unwrap_err(),
-                    2 => source
-                        .download_blob_via_ref(&key, "refs/heads/main")
-                        .unwrap_err(),
+                    2 => source.download_blob(&key, "refs/heads/main").unwrap_err(),
                     _ => source
-                        .download_pack_via_ref(&key, "refs/heads/main")
+                        .download_pack(
+                            &key,
+                            "refs/heads/main",
+                            &mut kit_core::protocol::MemorySink::new(1 << 20),
+                        )
                         .unwrap_err(),
                 };
                 assert_eq!(error.class(), FailureClass::Resumable);
@@ -402,10 +536,14 @@ mod tests {
         let key = PackKey::new([0; 32]);
         match verb {
             0 => source
-                .upload_pack_via_ref(b"pack", &key, "refs/heads/main")
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(b"pack"),
+                    &key,
+                    "refs/heads/main",
+                )
                 .unwrap_err(),
             1 => source
-                .upload_blob_via_ref(b"node", &key, "refs/heads/main")
+                .upload_blob(b"node", &key, "refs/heads/main")
                 .unwrap_err(),
             2 => source
                 .update_ref("refs/heads/main", RefWriteCondition::Missing, &[1; 32])
@@ -526,13 +664,21 @@ mod tests {
         fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
+        fn list_refs(&self, _: &str) -> Result<Vec<Ref>, SourceError> {
+            Err(SourceError::Remote(Box::new(self.0.clone())))
+        }
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
-        fn download_blob_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+        fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
-        fn download_pack_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+        fn download_pack(
+            &self,
+            _: &PackKey,
+            _: &str,
+            _: &mut dyn PackSink,
+        ) -> Result<(), SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
         fn repository_address(&self) -> Option<(String, String)> {
@@ -546,13 +692,21 @@ mod tests {
         fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
             Ok(Vec::new())
         }
+        fn list_refs(&self, _: &str) -> Result<Vec<Ref>, SourceError> {
+            Ok(Vec::new())
+        }
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
             Ok(None)
         }
-        fn download_blob_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+        fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
             Err(SourceError::ProtocolError)
         }
-        fn download_pack_via_ref(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+        fn download_pack(
+            &self,
+            _: &PackKey,
+            _: &str,
+            _: &mut dyn PackSink,
+        ) -> Result<(), SourceError> {
             Err(SourceError::ProtocolError)
         }
         fn supports_atomic_advance(&self) -> bool {
@@ -586,9 +740,13 @@ mod tests {
         else {
             panic!("wrong repository error")
         };
-        let chain_error =
-            crate::packmap::walk_pack_chain(&source, &crate::NoopObserver, "main", [0; 32])
-                .unwrap_err();
+        let chain_error = crate::packmap::walk_pack_chain(
+            &source,
+            &crate::NoopObserver,
+            "refs/heads/main",
+            [0; 32],
+        )
+        .unwrap_err();
         let SyncError::PackChainInvalid {
             source: Some(chain_cause),
             ..
@@ -607,11 +765,13 @@ mod tests {
             &source,
             &crate::NoopObserver,
             "origin",
-            "main",
+            "refs/heads/main",
             &[[0; 32]],
             &mut applied,
             false,
             &mut crate::apply::ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |_| Ok(()),
         )
         else {
             panic!("wrong pack error")

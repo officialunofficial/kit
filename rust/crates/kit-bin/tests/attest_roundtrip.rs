@@ -871,3 +871,38 @@ fn attest_additional_signer_args_clause_pass_through() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn trusted_match_survives_untrusted_envelope_and_predicate_filter_fails_closed() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    init_repo_with_commit(root);
+    assert!(run_in(root, &["attest"]).status.success());
+    let layout = kit_core::layout::RepoLayout::single(root);
+    let commit = kit_core::refs::resolve_head(&layout).unwrap().unwrap();
+    let paths = kit_attest::store::list(&layout, &commit).unwrap();
+    let original = fs::read(&paths[0]).unwrap();
+    let env = kit_attest::envelope::decode(&original).unwrap();
+    let key = kit_core::sign::load_key(&root.join(".kit/keys/default.key")).unwrap();
+    let trust = root.join("trust.toml");
+    fs::write(
+        &trust,
+        format!(
+            "[[trust_root]]\nkeyid = \"{}\"\nkind = \"ed25519\"\npubkey_hex = \"{}\"\n",
+            env.signatures[0].keyid,
+            kit_core::hash::to_hex_bytes(&key.public.0)
+        ),
+    )
+    .unwrap();
+    let mut bad = env.clone();
+    bad.signatures[0].sig = vec![0; 64];
+    let bad_bytes = kit_attest::envelope::encode(&bad).unwrap();
+    kit_attest::store::save(&layout, &commit, bad_bytes.as_bytes()).unwrap();
+    let args = ["verify-attest", "--trust-roots", trust.to_str().unwrap()];
+    assert!(run_in(root, &args).status.success());
+    let mut filtered = args.to_vec();
+    filtered.extend(["--predicate-type", "https://absent.example/v1"]);
+    assert!(!run_in(root, &filtered).status.success());
+    filtered[4] = libkit::attestation::DEFAULT_PREDICATE_TYPE;
+    assert!(run_in(root, &filtered).status.success());
+}

@@ -33,7 +33,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    PackKey, RefWriteCondition, RepoCursor, Transport, TransportError, TransportResult,
+    PackBody, PackKey, PackSink, RefWriteCondition, RepoCursor, Transport, TransportError,
+    TransportResult, read_body, write_body,
 };
 use kit_core::refs::{
     Ref, decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_prefix,
@@ -114,6 +115,26 @@ impl MemoryTransport {
 }
 
 impl Transport for MemoryTransport {
+    /// An in-process remote is kit's own reference store, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
+        if matches!(condition, RefWriteCondition::Any) {
+            return Err(TransportError::ProtocolError);
+        }
+        self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
+    }
+
     // ------------------------------------------------------------------
     // Pack verbs
     // ------------------------------------------------------------------
@@ -122,23 +143,45 @@ impl Transport for MemoryTransport {
     /// providing a [`PackKey`] that matches `BLAKE3(bytes)`; this
     /// implementation does **not** re-hash to verify, trusting the
     /// caller's digest for performance.
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    ///
+    /// The pack is copied into memory: this transport holds what it is sent.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        _head_ref: Option<&str>,
+    ) -> TransportResult<()> {
+        let bytes = read_body(pack)?;
         let mut g = self.inner.lock().expect("MemoryTransport mutex poisoned");
-        g.packs.insert(*key, bytes.to_vec());
+        g.packs.insert(*key, bytes);
         Ok(())
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
-        g.packs
-            .get(key)
-            .cloned()
-            .ok_or(TransportError::PackNotFound)
+    /// Writes the stored pack to `sink` in slices of at most 1 MiB.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        _ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        let bytes = {
+            let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+            g.packs
+                .get(key)
+                .cloned()
+                .ok_or(TransportError::PackNotFound)?
+        };
+        write_body(sink, &bytes)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+    fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
         let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
         Ok(g.packs.contains_key(key))
+    }
+
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        Ok(g.packs.get(key).map(|bytes| bytes.len() as u64))
     }
 
     // ------------------------------------------------------------------
@@ -174,6 +217,22 @@ impl Transport for MemoryTransport {
         }
 
         g.refs.insert(name.to_owned(), encode_ref_wire(hash));
+        g.generation = g.generation.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Remove `name` if it holds `expected`, under the lock that every ref
+    /// write takes. An absent ref or another value is a conflict.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let mut g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        let current: Option<Hash> = g.refs.get(name).and_then(|wire| decode_ref_wire(wire));
+        if current != Some(*expected) {
+            return Err(TransportError::RefConflict);
+        }
+        g.refs.remove(name);
         g.generation = g.generation.wrapping_add(1);
         Ok(())
     }
@@ -270,13 +329,47 @@ mod tests {
     // Pack verb tests (5 tests)
     // ------------------------------------------------------------------
 
+    /// The in-process remote takes a manifest delta.
+    #[test]
+    fn a_memory_remote_accepts_manifest_deltas() {
+        assert!(MemoryTransport::new().accepts_manifest_deltas());
+    }
+
+    /// A delete removes the ref only while it holds the expected value, and
+    /// counts as a write for the cursor.
+    #[test]
+    fn delete_ref_needs_the_expected_value() {
+        let t = MemoryTransport::new();
+        let name = "refs/heads/main";
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+        t.update_ref(name, RefWriteCondition::Missing, &a).unwrap();
+        assert!(matches!(
+            t.delete_ref(name, &b),
+            Err(TransportError::RefConflict)
+        ));
+        assert_eq!(t.read_ref(name).unwrap(), Some(a));
+        let before = t.repo_cursor().unwrap();
+        t.delete_ref(name, &a).unwrap();
+        assert_eq!(t.read_ref(name).unwrap(), None);
+        assert_ne!(t.repo_cursor().unwrap(), before);
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+    }
+
     #[test]
     fn upload_and_download_pack() {
         let t = MemoryTransport::new();
         let data = b"pack file content here";
         let key = pack_key(data);
-        t.upload_pack(data, &key).unwrap();
-        let got = t.download_pack(&key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let got = t.download_blob(&key, None, u64::MAX).unwrap();
         assert_eq!(got, data);
     }
 
@@ -284,7 +377,7 @@ mod tests {
     fn download_missing_pack_returns_not_found() {
         let t = MemoryTransport::new();
         let key = pack_key(b"nonexistent");
-        let err = t.download_pack(&key).unwrap_err();
+        let err = t.download_blob(&key, None, u64::MAX).unwrap_err();
         assert!(matches!(err, TransportError::PackNotFound));
     }
 
@@ -293,25 +386,28 @@ mod tests {
         let t = MemoryTransport::new();
         let data = b"some pack bytes";
         let key = pack_key(data);
-        assert!(!t.pack_exists(&key).unwrap());
-        t.upload_pack(data, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert!(t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
     fn pack_exists_false_for_unknown_key() {
         let t = MemoryTransport::new();
         let key = PackKey::new([0u8; 32]);
-        assert!(!t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
     fn upload_pack_overwrites_existing_entry() {
         let t = MemoryTransport::new();
         let key = PackKey::new([0xABu8; 32]);
-        t.upload_pack(b"first", &key).unwrap();
-        t.upload_pack(b"second", &key).unwrap();
-        assert_eq!(t.download_pack(&key).unwrap(), b"second");
+        t.upload_pack(&kit_core::protocol::SliceBody(b"first"), &key, None)
+            .unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"second"), &key, None)
+            .unwrap();
+        assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), b"second");
     }
 
     // ------------------------------------------------------------------
@@ -522,7 +618,8 @@ mod tests {
         assert_eq!(t.ref_count(), 0);
 
         let key = PackKey::new([0x01u8; 32]);
-        t.upload_pack(b"x", &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &key, None)
+            .unwrap();
         assert_eq!(t.pack_count(), 1);
 
         t.write_ref("refs/heads/main", &blake3_hash(b"h")).unwrap();

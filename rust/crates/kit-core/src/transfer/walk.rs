@@ -4,8 +4,8 @@
 //! closure of its head, so the walk decides what it holds from the head alone:
 //! no negotiation, and no walk of two whole closures.
 //!
-//! * [`HeldCommits`] is the exact set of commits that are ancestors of the
-//!   remote head.
+//! * [`HeldCommits`] marks where the walk can stop. A short linear history
+//!   stops at the remote head itself. Other histories use its ancestors.
 //! * [`PushWalk`] walks the commits the remote lacks, oldest first. For each
 //!   one it compares the tree with the trees of the commit's parents, by path,
 //!   and keeps the entries that differ from every parent. A chunk of a large
@@ -35,6 +35,9 @@ use crate::store::{ObjectStore, StoreError};
 /// it the filter stops, which only makes the plan send more.
 pub const MAX_HELD_SCAN: usize = 2_097_152;
 
+/// The most local commits to probe before collecting the remote history.
+const MAX_BOUNDARY_PROBE: usize = 64;
+
 /// Most chunk ids the plan remembers, with their lengths and whether it
 /// listed them. Past it a chunk that several files share may be listed twice,
 /// and a pack reader accepts that. A length that is not remembered is read
@@ -52,18 +55,42 @@ std::thread_local! {
     static COUNTED: std::cell::RefCell<Vec<Hash>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The commits that are ancestors of the remote head, the head included.
+/// The held commits a push walk can use as stopping points.
 ///
-/// The set counts toward the push walk's cap. A commit this store cannot read
-/// ends its path and prunes nothing: the walk only loses the ancestors behind
-/// it, and the plan then sends more.
+/// [`Self::collect`] collects the remote head and its ancestors. A commit
+/// this store cannot read ends its path, so the plan may send more. The
+/// set counts toward the push walk's cap.
 #[derive(Debug, Default)]
 pub struct HeldCommits {
     ids: HashSet<Hash>,
     tip: Option<Hash>,
+    boundary_only: bool,
 }
 
 impl HeldCommits {
+    /// When every tip reaches the remote head through a single-parent path,
+    /// the head is all the commit walk needs to know. No commit before that
+    /// boundary can also be its ancestor.
+    pub(super) fn for_tips(
+        store: &ObjectStore,
+        tips: &[Hash],
+        remote: Option<Hash>,
+        cap: usize,
+    ) -> Result<Self, StoreError> {
+        if let Some(tip) = remote
+            && cap > 0
+            && store.contains(&tip)
+            && reaches_boundary(store, tips, tip, cap.min(MAX_BOUNDARY_PROBE))
+        {
+            return Ok(Self {
+                ids: HashSet::from([tip]),
+                tip: Some(tip),
+                boundary_only: true,
+            });
+        }
+        Self::collect(store, remote, cap)
+    }
+
     /// The ancestors of `tip`, or nothing when there is no remote head or this
     /// store lacks it.
     ///
@@ -99,6 +126,7 @@ impl HeldCommits {
         Ok(Self {
             ids,
             tip: Some(tip),
+            boundary_only: false,
         })
     }
 
@@ -125,6 +153,27 @@ impl HeldCommits {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
+}
+
+/// A merge, a root, or a commit we cannot read leaves the boundary unproved.
+fn reaches_boundary(store: &ObjectStore, tips: &[Hash], tip: Hash, mut budget: usize) -> bool {
+    for &start in tips {
+        let mut cursor = start;
+        while cursor != tip {
+            if budget == 0 {
+                return false;
+            }
+            budget -= 1;
+            let Ok(Some((_, parents))) = read_commit(store, &cursor) else {
+                return false;
+            };
+            let [parent] = parents.as_slice() else {
+                return false;
+            };
+            cursor = *parent;
+        }
+    }
+    true
 }
 
 /// A chunked file the walk keeps: its manifest, the commit that brought it,
@@ -205,9 +254,8 @@ pub type ObjectSink<'a> = &'a mut dyn FnMut(&Hash, &Hash) -> Result<(), StoreErr
 impl PushWalk {
     /// Walk the commits that `tip` reaches and `held` lacks.
     ///
-    /// `shallow` names commits whose parents this store does not hold. The
-    /// walk takes them as roots. `sink`, when given, sees each object the walk
-    /// keeps, once the held filter has run, with the commit that brought it.
+    /// `sink`, when given, sees each object the walk keeps, once the held
+    /// filter has run, with the commit that brought it.
     ///
     /// A tip that is neither a commit nor a remix gets its full closure,
     /// minus held commits.
@@ -216,36 +264,67 @@ impl PushWalk {
     ///
     /// [`StoreError::ObjectNotFound`] for a new commit or one of its objects
     /// that this store lacks, and [`StoreError::OperationLimitExceeded`] when
-    /// held commits, new commits and kept objects together pass the cap. A
-    /// chunk counts toward nothing.
+    /// visited held commits, new commits and kept objects together pass the
+    /// cap. A chunk counts toward nothing.
     pub fn run(
         store: &ObjectStore,
         tip: Hash,
         held: &HeldCommits,
-        shallow: &HashSet<Hash>,
         limits: WalkLimits,
         sink: Option<ObjectSink<'_>>,
     ) -> Result<Self, StoreError> {
-        let (commits, others) = discover(store, tip, held, shallow, limits)?;
+        Self::run_tips(store, &[tip], held, limits, sink)
+    }
+
+    /// [`PushWalk::run`] for several tips at once: the union of what each
+    /// brings, each object kept once.
+    ///
+    /// A tip that is an annotated tag is peeled: the walk keeps each tag
+    /// object on the way and walks its target as a tip of its own, so a tag
+    /// on a commit sends what that commit's history sends, and a tag on a
+    /// held commit sends only the tag objects.
+    ///
+    /// # Errors
+    ///
+    /// As [`PushWalk::run`].
+    pub fn run_tips(
+        store: &ObjectStore,
+        tips: &[Hash],
+        held: &HeldCommits,
+        limits: WalkLimits,
+        sink: Option<ObjectSink<'_>>,
+    ) -> Result<Self, StoreError> {
+        let mut tags = Vec::new();
+        let mut starts = Vec::with_capacity(tips.len());
+        for &tip in tips {
+            starts.push(peel_tags(store, tip, held, &mut tags)?);
+        }
+        let (commits, others) = discover(store, &starts, held, limits)?;
         let mut walk = Builder {
             store,
             held,
+            closure_held: None,
             limits,
-            objects: BTreeSet::new(),
+            objects: HashSet::new(),
             manifests: Vec::new(),
             non_commit: 0,
             roots: commits
                 .iter()
                 .map(|commit| commit.id)
                 .chain(others.iter().copied())
+                .chain(tags.iter().copied())
                 .collect(),
             log: sink.is_some().then(Vec::new),
         };
         for (owner, commit) in commits.iter().enumerate() {
             walk.add_commit(owner, commit)?;
         }
+        let first_tag = commits.len() + others.len();
         for (offset, root) in others.into_iter().enumerate() {
             walk.add_closure(commits.len() + offset, root)?;
+        }
+        for (offset, tag) in tags.into_iter().enumerate() {
+            walk.keep(first_tag + offset, tag, false)?;
         }
         walk.filter_held();
         if let (Some(sink), Some(log)) = (sink, walk.log.take()) {
@@ -256,7 +335,7 @@ impl PushWalk {
             }
         }
         Ok(Self {
-            objects: walk.objects,
+            objects: walk.objects.into_iter().collect(),
             manifests: walk.manifests,
         })
     }
@@ -276,30 +355,25 @@ impl PushWalk {
         store: &ObjectStore,
         id: Hash,
         held: &HeldCommits,
-        shallow: &HashSet<Hash>,
         limits: WalkLimits,
     ) -> Result<Self, StoreError> {
         let mut walk = Builder {
             store,
             held,
+            closure_held: None,
             limits,
-            objects: BTreeSet::new(),
+            objects: HashSet::new(),
             manifests: Vec::new(),
             non_commit: 0,
             roots: vec![id],
             log: None,
         };
         match read_commit(store, &id)? {
-            Some((tree, mut parents)) => {
-                if shallow.contains(&id) {
-                    parents.clear();
-                }
-                walk.add_commit(0, &NewCommit { id, tree, parents })?;
-            }
+            Some((tree, parents)) => walk.add_commit(0, &NewCommit { id, tree, parents })?,
             None => walk.add_closure(0, id)?,
         }
         Ok(Self {
-            objects: walk.objects,
+            objects: walk.objects.into_iter().collect(),
             manifests: walk.manifests,
         })
     }
@@ -427,19 +501,42 @@ fn read_commit(store: &ObjectStore, id: &Hash) -> Result<Option<(Hash, Vec<Hash>
     })
 }
 
-/// The new commits, parents first, and the roots that are not commits.
-fn discover(
+/// Peel the annotated tags of `tip` that `held` lacks, pushing each onto
+/// `tags`, and return the object the walk takes as the tip.
+fn peel_tags(
     store: &ObjectStore,
     tip: Hash,
     held: &HeldCommits,
-    shallow: &HashSet<Hash>,
+    tags: &mut Vec<Hash>,
+) -> Result<Hash, StoreError> {
+    let mut id = tip;
+    for _ in 0..super::MAX_PEELED_TAGS {
+        if held.contains(&id) || store.object_type(&id)? != ObjectType::Tag {
+            break;
+        }
+        let Object::Tag(tag) = store.read_object(&id)? else {
+            break;
+        };
+        tags.push(id);
+        id = tag.target;
+    }
+    Ok(id)
+}
+
+/// The new commits of every tip, parents first, and the roots that are not
+/// commits.
+fn discover(
+    store: &ObjectStore,
+    tips: &[Hash],
+    held: &HeldCommits,
     limits: WalkLimits,
 ) -> Result<(Vec<NewCommit>, Vec<Hash>), StoreError> {
     let mut seen: HashSet<Hash> = HashSet::new();
     let mut order: Vec<NewCommit> = Vec::new();
     let mut others: Vec<Hash> = Vec::new();
     let mut frames: Vec<(NewCommit, usize)> = Vec::new();
-    let mut next = Some(tip);
+    let mut tips = tips.iter().copied();
+    let mut next = tips.next();
     loop {
         if let Some(id) = next.take()
             && !held.contains(&id)
@@ -449,17 +546,18 @@ fn discover(
                 return Err(limit_error());
             }
             match read_commit(store, &id)? {
-                Some((tree, mut parents)) => {
-                    if shallow.contains(&id) {
-                        parents.clear();
-                    }
-                    frames.push((NewCommit { id, tree, parents }, 0));
-                }
+                Some((tree, parents)) => frames.push((NewCommit { id, tree, parents }, 0)),
                 None => others.push(id),
             }
         }
         let Some((commit, cursor)) = frames.last_mut() else {
-            break;
+            match tips.next() {
+                Some(tip) => {
+                    next = Some(tip);
+                    continue;
+                }
+                None => break,
+            }
         };
         if let Some(parent) = commit.parents.get(*cursor) {
             next = Some(*parent);
@@ -482,8 +580,9 @@ fn entry<'a>(tree: &'a Tree, name: &[u8]) -> Option<&'a TreeEntry> {
 struct Builder<'a> {
     store: &'a ObjectStore,
     held: &'a HeldCommits,
+    closure_held: Option<HeldCommits>,
     limits: WalkLimits,
-    objects: BTreeSet<Hash>,
+    objects: HashSet<Hash>,
     manifests: Vec<ChunkList>,
     /// Kept objects that are not commits.
     non_commit: usize,
@@ -495,6 +594,10 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn held(&self) -> &HeldCommits {
+        self.closure_held.as_ref().unwrap_or(self.held)
+    }
+
     /// Keep `id`, brought by root `owner`. `false` when the walk kept it before.
     fn keep(&mut self, owner: usize, id: Hash, is_commit: bool) -> Result<bool, StoreError> {
         if !self.objects.insert(id) {
@@ -502,7 +605,7 @@ impl Builder<'_> {
         }
         #[cfg(test)]
         COUNTED.with(|counted| counted.borrow_mut().push(id));
-        if self.held.len() + self.objects.len() > self.limits.objects {
+        if self.held().len() + self.objects.len() > self.limits.objects {
             return Err(limit_error());
         }
         if !is_commit {
@@ -616,9 +719,18 @@ impl Builder<'_> {
     /// hold. Serves a tip that is not a commit and the odd entry that names an
     /// object of another kind.
     fn add_closure(&mut self, owner: usize, root: Hash) -> Result<(), StoreError> {
+        // A tree or tag can point into the remote's history without
+        // passing through its head. Use the full set for those edges.
+        if self.held.boundary_only && self.closure_held.is_none() {
+            let held = HeldCommits::collect(self.store, self.held.tip(), self.limits.objects)?;
+            if held.len() + self.objects.len() > self.limits.objects {
+                return Err(limit_error());
+            }
+            self.closure_held = Some(held);
+        }
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
-            if self.held.contains(&id) {
+            if self.held().contains(&id) {
                 continue;
             }
             let ty = self.store.object_type(&id)?;
@@ -660,7 +772,6 @@ impl Builder<'_> {
             Ok(Object::Remix(remix)) => remix.tree_hash,
             Ok(_) | Err(_) => return,
         };
-        let mut dropped: HashSet<Hash> = HashSet::new();
         let mut visited: HashSet<Hash> = HashSet::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -670,23 +781,19 @@ impl Builder<'_> {
             if !visited.insert(id) {
                 continue;
             }
-            if self.objects.remove(&id) {
-                dropped.insert(id);
-            }
+            self.objects.remove(&id);
             let Ok(Object::Tree(tree)) = self.store.read_object(&id) else {
                 continue;
             };
             for held in tree.entries {
-                if self.objects.remove(&held.object_hash) {
-                    dropped.insert(held.object_hash);
-                }
+                self.objects.remove(&held.object_hash);
                 if held.mode == EntryMode::Tree {
                     stack.push(held.object_hash);
                 }
             }
         }
         self.manifests
-            .retain(|manifest| !dropped.contains(&manifest.id));
+            .retain(|manifest| self.objects.contains(&manifest.id));
     }
 }
 

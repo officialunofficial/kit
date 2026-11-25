@@ -29,7 +29,7 @@ proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
-servers and the native CLI client consume one generated codebase. It does not cover S3 multipart,
+servers and the native CLI client consume one generated codebase. It does not cover
 the `WatchRefs` live feed, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
@@ -84,11 +84,11 @@ same trait `kit-transport-s3` and `-ssh` implement.
 | `update_ref(name, condition, hash)` | `UpdateRef` | unary |
 | `write_ref(name, hash)` (default impl: `update_ref(.., Any, ..)`) | *(none &mdash; client calls `UpdateRef` with `expectation = REF_EXPECTATION_ANY`)* | &mdash; |
 | `advance_refs(..)` | `AdvanceRefs` | unary |
-| `pack_exists(key)` | `PackExists` | unary |
-| `upload_pack(bytes, key)` | `UploadPack` | client-streaming |
-| `download_pack(key)` | `DownloadPack` | server-streaming |
-| `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
-| `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
+| `pack_exists(key, ref_hint)` | `PackExists` | unary |
+| `upload_pack(body, key, head_ref)` | `UploadPack` | client-streaming |
+| `download_pack(key, ref_hint, sink)` | `DownloadPack` | server-streaming |
+| `upload_blob(bytes, key, head_ref)` (default impl: `upload_pack` of a `SliceBody`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
+| `download_blob(key, ref_hint, max)` (default impl: `download_pack` into a `MemorySink` of `max`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
 | *(none &mdash; deployment discovery)* | `GetServerInfo` (§2.1) | unary |
 | *(none &mdash; retained storage receipt)* | `GetReceipt` (§2.2) | unary |
 | *(none &mdash; upload ticket)* | `BeginUpload` (§7.6) | unary |
@@ -157,6 +157,7 @@ headers or a bearer token. The response MAY be cached with
 | `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set. Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
 | `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
 | `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
+| `supports_attestations` | Field 23; true enables §4.2. Absent or false means unsupported. |
 | `max_tickets_per_advance` | The most upload tickets one `AdvanceRefs` request may name in `ticket_ids` (§4). Absent means seven. A server that advertises it advertises at least two, because one ticket is the packmap node's. A client treats a value below two as absent and a value above 1,024 as 1,024, and reads the value once per session. A server SHOULD NOT lower the limit while pushes are in flight. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -333,14 +334,18 @@ the server returns the identical receipt envelope bytes.
 A server offering atomic advance MUST commit both writes atomically and MUST
 advertise `atomic_advance = true` through `GetServerInfo` (§2.1). A server that
 does not offer atomic advance MUST NOT advertise it; its fallback writes the
-packmap before the head. That fallback is available only to writes outside the
+packmap before the head, and for a paired deletion (§7.8) deletes the head
+before the packmap. That fallback is available only to writes outside the
 signed replay-protected write contract. Every accepted signed ref write MUST
 satisfy atomic acceptance (§7.1), including both sides of an
 `AdvanceRefs` or paired deletion.
 
-A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
-`head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
-`invalid_argument`; every kit client already sends that pairing.
+A server MAY require one of two pairings, and answer any other with
+`invalid_argument`: `head_ref` `refs/heads/<x>` with `packmap_ref`
+`refs/kit/packmap/<x>`, or `head_ref` `refs/tags/<x>` with `packmap_ref`
+`refs/kit/tagmap/<x>` (SPEC-REFS §2). Every kit client sends one of the
+two. A tag advance moves a tag and its tag map the way a branch advance
+moves a head and its packmap (SPEC-TRANSPORT §7.2).
 
 A server advertises its limit in `max_tickets_per_advance` (§2.1); an absent
 field means seven. A server MUST reject a `ticket_ids` list longer than its
@@ -372,6 +377,46 @@ The immediate path copies the source's coverage as it stands; configured
 publication verification still checks the destination.
 
 ---
+
+### 4.2 Attestation log capability
+
+`GetServerInfo` advertises support for ticketed writes of
+`refs/kit/attestmap`. Clients MUST check the capability before publishing
+or fetching attestations; absence means warn and skip. There is no
+fallback to branch pack lists.
+
+`UpdateRefRequest.ticket_ids = 6` carries the reservation ids for this
+single-ref write. It requires `name = refs/kit/attestmap`, `delete` absent,
+and a `MISSING` or `MATCH` condition. Each id is 32 bytes and unique; the
+§2.1 ticket limit also applies here. Other `UpdateRef` requests carrying tickets return `invalid_argument`.
+CAS failure returns `failed_precondition` and consumes no tickets.
+The ordinary `ReadRef` reads this ref under repository visibility.
+
+A ticketed single-ref write consumes the uploaded attestation-pack and
+KPKL-node tickets atomically with the ref CAS, using the membership,
+replay, and authorization rules of §7.6. It needs the same write grant
+as a branch push, scoped to `refs/kit/attestmap` (SPEC-WRITE-GRANTS §8).
+The server uses its branch-push grant semantics: an oldest-first superset
+of all old pack ids permits `u`, and any replacement needs `f`.
+Compaction therefore needs `f`. Clients use the existing write attempt to
+learn whether it is allowed. A refusal emits one warning that a writer
+with force permission must compact; code push still succeeds. The next
+push holding `f` compacts automatically above 4,096 packs. There is no
+fallback to branch pack lists. Only an exact, not prefix, attestmap scope
+grants this permission. Server decoding also enforces the 64 MiB per-pack
+decoded-byte cap of SPEC-TRANSPORT §1.5; the 512 MiB per-fetch budget is
+reader policy.
+Reads follow repository visibility. A denial or takedown of a commit
+MUST also cover its attestations.
+
+An indexed server MUST run every check in SPEC-TRANSPORT §1.5: bounded
+node and chain walks, pack length and limits, content addresses and
+trailer, plain-blob entry kind, no deltas, pre-inflation size bounds,
+strict in-toto DSSE decoding, and primary-subject membership in the
+repository. It does not check signatures against reader trust roots.
+Attestation packs count toward storage quota, admission, and pack limits.
+The attestmap chain is a remote gc root.
+
 
 ## 5. Error taxonomy &mdash; `TransportError` to Connect code
 
@@ -775,6 +820,14 @@ These are the same checks SPEC-TRANSPORT §4.2 already requires of the
 SSH server's `UploadPack` handling, restated for a Connect stream
 instead of an `SshFrame` sequence.
 
+**Reference-client behavior.** The client reads each chunk from the
+caller's pack body as it sends it, in chunks of 800 KiB, so it holds no
+copy of the pack. The header's `pack_id` and `total_bytes` come from
+the caller before the first byte is read, and the `pack:<id>:<len>`
+commitment needs no pass over the body. A retry reads the body again
+from its start. A failure to read the body is local: it ends the upload
+and is never retried. The messages on the wire are unchanged.
+
 ### 6.2 `DownloadPack` (server-streaming)
 
 **Protocol requirement.**
@@ -831,9 +884,10 @@ Checking the URL hostname alone does not prevent DNS rebinding. A local caller
 MAY override this policy for a private pack host; remote responses MUST NOT
 control that override. Destination rejection is a location-fetch failure.
 
-A location fetch SHOULD honor the remaining local request deadline, clamped
-to the location channel's transfer timeout. This budget is local metadata and
-MUST NOT add headers to the location request. On any location fetch or
+A location fetch SHOULD honor the remaining local request deadline, and SHOULD
+end once the location channel's transfer timeout passes with no data moving.
+These bounds are local metadata and MUST NOT add headers to the location
+request. On any location fetch or
 verification failure, including an invalid location response, the client MUST
 retry once with streaming `DownloadPack` and `accept_location` absent or false,
 unless the local request deadline has expired. The client MUST check the
@@ -843,16 +897,65 @@ including a wasm client without that facility, MUST leave opt-in absent or
 false. Clients MUST provide a configuration switch that disables location
 opt-in.
 
+**Continuing a location.** When a location body stops after some bytes, a
+client MAY ask the location host for the rest instead of reading the body again
+from its start, if the first answer was `200` with a strong `ETag` (not
+starting `W/`) and a `Content-Length`. The request is the same credential-free
+`GET` with `Range: bytes=<n>-` for the `n` bytes already taken and `If-Match`
+with that `ETag`; these are the only headers a continuation adds. The client MUST
+take the body only from a `206` whose `ETag` is the first answer's, whose
+`Content-Range` is `bytes <n>-<total-1>/<total>` for the first answer's length,
+whose `Content-Length` is `total - n`, and that has no content coding. It MUST
+treat a `200`, a `412`, a `416` and a `206` that fails a check as a request to read
+the location again from its start, and MUST NOT append such a body to the prefix.
+Any other status ends the fetch as it does for a first request.
+A prefix does not authenticate itself: the client verifies the whole pack's
+length and key, as for any location bytes, and on a mismatch falls back as above.
+A client SHOULD bound the number of continuations of one location, and ends the
+fetch, so the fallback of the previous paragraph applies, when they run out.
+
 **Reference-client behavior.** The native location channel uses a separate,
 credential-free HTTPS connector and rejects non-public destinations by default.
 Its filtering resolver checks connection addresses; IP literals pass the same
 policy. A local caller can allow private destinations with
 `kit_sync::NativeHttp::allow_private_pack_locations(true)`. The channel does
-not follow redirects, requires HTTP 200 and identity content encoding, and
+not follow redirects, requires HTTP 200 (or an exact `206` to a continuation) and
+identity content encoding, continues an interrupted body at most three times, and
 bounds response bytes before pack verification. `RequestPolicy::request_timeout`
 covers the initial RPC, location fetch, and any streaming fallback. The location
 fetch receives only the remaining budget and cannot exceed its own transfer
 timeout. The wasm client continues to request streaming.
+
+**Reference-client streaming.** These are client rules; the wire is
+unchanged, and a server that streams within them needs no change.
+
+- The client reads each response frame's length from its 5-byte Connect
+  envelope and refuses a `DownloadPack` frame over 4 MiB
+  (`DOWNLOAD_FRAME_MAX`) before reading it; the sync adapters report the
+  refusal as an invalid response. A
+  server that sends a pack in 800 KiB chunks, or a packmap node in one
+  frame under the client's 1 MiB node bound, is unaffected.
+- The client forwards `header.total_bytes` and each chunk's bytes to the
+  caller's pack sink as they arrive. It refuses a declared length over the
+  caller's cap before the first chunk, and checks each chunk's `pack_id`,
+  its `offset` against the bytes received, and that the stream ends with
+  `last` at exactly `total_bytes`. The sink's owner checks the content
+  address: a fetch spools the pack to disk and verifies its length, key and
+  trailer before it reads any entry.
+- A packmap node is a `DownloadPack` into a sink of at most 1 MiB, which
+  refuses a larger declared length before any byte is read.
+- Location bytes stream into the same sink through a check that refuses a
+  declared length other than the location's `total_bytes`, counts the
+  bytes and hashes them. Any failure of the offering call or of the
+  location, such as an invalid location, a length or key mismatch, or a
+  failed fetch, other than the sink's own, makes the client stream the RPC
+  into the same sink, which starts over at its `header`.
+- A streamed answer, to the offer or to the RPC, is hashed only by the
+  sink's owner, so one with the wrong key fails the fetch with no fallback.
+- A failure of the sink itself, such as a full disk, is local and is not a
+  location failure. It ends the download on every attempt, including a
+  streamed answer to a location offer, with no fallback and no retry; the
+  caller reports the sink's I/O error.
 
 **Conformance coverage.** The two ordinary location cases remain Tier 1 wire
 cases. Optional fixture cases for location security, fallback, and expiry are
@@ -1303,12 +1406,13 @@ the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
 sshd configuration asserts (SPEC-TRANSPORT §4.1). SSH carries the
-implicit-membership rule in place of §7.6's upload tickets: packs
+implicit-membership rule, also for `refs/kit/attestmap`, in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
 — never by a later session's. The packmap check only refuses: the
-node's `prev` is absent or the packmap value the write replaces, the
-node and every pack it lists — at most 4,096 — are pending in this
+node's `prev` is absent, or the value the write replaces, or, for a tag
+map create, a node of this repository's chains (a graft, SPEC-TRANSPORT
+§7.2); the node and every pack it lists — at most 4,096 — are pending in this
 session or already members (a pending packlist listed as a pack is
 refused: a packlist is a node, not a pack), or the write is refused. The on-disk layout
 under the repository's path is unchanged,
@@ -1380,6 +1484,9 @@ repository (`creates_namespace` and `creates_repo`). §5.1 requires the
 server to give both to its admission step.
 
 ### 7.6 Upload tickets and resumable parts
+
+Ticketed attestmap writes follow §4.2 and the rules below.
+
 
 **Protocol requirement.**
 
@@ -1510,6 +1617,13 @@ received, and the client keeps them. A client that lost receipts sends
 the missing parts again. A client that calls `BeginUpload` again gets
 the same ticket. The server offers no listing of received parts.
 
+**Reference-client behavior.** The client reads each part from the
+caller's pack body twice and holds no copy of it. The first pass hashes
+the part's bytes into its `part:` commitment; the client then signs the
+request and the second pass streams the part in 800 KiB chunks. A resumed
+upload loads the stored receipts first and reads only the parts without
+one. The messages on the wire are unchanged.
+
 **Single-part packs.** A pack of at most `part_size` bytes uses
 `UploadPack` with the ticket token in its header and the usual `pack:`
 commitment. It sends no `part:` commitment and no `CompleteUpload`.
@@ -1542,7 +1656,17 @@ server advertises none (§2.1, §4).
 the request's, and the ticket's `pack_id` and `bytes` MUST equal the
 request's commitment. Otherwise the request is `permission_denied`.
 An `AdvanceRefs` consuming tickets MUST pair `refs/heads/<x>` with
-`refs/kit/packmap/<x>`; any other pairing is `invalid_argument`.
+`refs/kit/packmap/<x>`, or `refs/tags/<x>` with `refs/kit/tagmap/<x>`;
+any other pairing is `invalid_argument`. `BeginUpload` may name a tag
+ref, `refs/tags/<x>`, whose advance then consumes the ticket. A tag
+cannot step through intermediate values the way a branch push splits
+into smaller advances, so a client refuses before upload a tag push whose
+packs or objects exceed one advance's limits (`max_tickets_per_advance`,
+`inspection_max_objects`), and asks the user to push the branch first.
+A tag map node's `prev` may name a packlist node of one of this
+repository's branch chains (a graft, SPEC-TRANSPORT §7.2). A server
+checks that node's membership as it checks any `prev`; it needs no chain
+walk.
 
 **Errors.** An expired or unknown ticket, including a token that fails
 verification, is `failed_precondition`. A ticket, signer, or
@@ -1687,8 +1811,9 @@ A transactional outbox retains pending outcome-delivery responsibility.
 - On `UpdateRef`, `delete` is valid only with `REF_EXPECTATION_MATCH`
   and an empty `new_id`. The server removes the ref if its current
   value equals `expected_id`.
-- On `AdvanceRefs`, `delete` removes the branch head and its packmap
-  together, under the same rules for each: both expectations are
+- On `AdvanceRefs`, `delete` removes a head and its chain ref together,
+  a branch with its packmap or a tag with its tag map (§4), under the same
+  rules for each: both expectations are
   `MATCH`, and both new ids are empty. A conflict is a typed outcome
   (§4), as for any advance.
 - A `delete` with any other expectation or a nonempty new id is
@@ -1697,14 +1822,19 @@ A transactional outbox retains pending outcome-delivery responsibility.
   tickets.
 - Deleting an absent ref is a CAS conflict: `failed_precondition` on
   `UpdateRef`.
+- A server without atomic advance (§4) deletes the head before its chain
+  ref, so that no reader sees a head whose chain ref is gone.
 
 The write policy authorizes deletion (§7.5). A grant authorizes
 deletion only through its `delete` flag
 ([SPEC-WRITE-GRANTS §8](SPEC-WRITE-GRANTS.md#8-ref-scopes-and-packmap-coverage)).
 A deployment MAY refuse deletion entirely with `permission_denied`.
 
-This document requires no client command for deletion (informative: a
-`push --delete` command is a separate change).
+`kit push --delete` (SPEC-TRANSPORT §7.3) sends one `AdvanceRefs` with
+`delete` for a head and its chain ref, and an `UpdateRef` with `delete` for
+a head that has no chain ref. On `PackmapConflict` it reads the chain ref
+again and retries; on `HeadConflict` it reads the head, and a head already
+gone counts as deleted.
 
 ### 7.9 Consistency and paging
 
@@ -1927,8 +2057,6 @@ Explicitly deferred to later work:
 - ~~The native CLI Connect client.~~ Implemented &mdash; see §7.3.
 - ~~The shared retry/backoff Connect interceptor.~~ Implemented
   directly in `ConnectTransport` &mdash; see §7.3.
-- S3 multipart upload (unrelated transport; not superseded by this
-  document at all).
 - Generated TypeScript (`connect-es`) clients for this service.
 - Implementing version 2: multi-repository routing, the namespace
   and write policies, sharded server metadata, `GetServerInfo`, upload
@@ -2068,10 +2196,14 @@ only in that loop. Read helpers walk a packmap chain and unpack packs into an
 abstract object sink, verifying commit, remix and tag signatures unless the
 caller opts out. The HTTP boundary is injectable and carries buffered Connect
 frames with an explicit response limit; clock, entropy, waiting and signing are
-also injectable. A streaming request body does not fit that boundary: the
-transport must replay the exact request bytes after an ambiguous failure, and
-browser fetch cannot stream request bodies portably, so request bodies stay
-buffered (bounded per part by the ticket part size). Exact-byte replay applies
+also injectable. A streaming request body does not fit that boundary by
+default: the transport must replay the exact request bytes after an ambiguous
+failure, and browser fetch cannot stream request bodies portably, so a channel
+that does not override `send_stream` buffers each request body (bounded per
+part by the ticket part size). The native channel streams request bodies. The
+client hands each decoded `DownloadPack` frame, of at most 4 MiB, to the
+caller's pack sink, and passes location bytes through as the channel writes
+them (§6.2). Exact-byte replay applies
 to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves

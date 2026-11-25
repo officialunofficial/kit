@@ -11,11 +11,12 @@ use std::fs;
 use std::path::Path;
 
 use kit_core::hash::Hash;
-use kit_core::index::Index;
+use kit_core::index::{EntryStatus, Index, IndexEntry};
 use kit_core::layout::RepoLayout;
-use kit_core::object::Object;
-use kit_core::ops::diff::{DiffKind, diff_trees};
-use kit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_observed};
+use kit_core::object::{EntryMode, Object};
+use kit_core::ops::diff::{DiffEntry, DiffKind, diff_trees};
+use kit_core::ops::restore::{RestoreOptions, matches_sparse, nested_repository};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -44,6 +45,36 @@ pub fn sync_index_to_tree_observed(
     tree_hash: Hash,
     observed: &[core_worktree::StatObservation],
 ) -> Result<(), String> {
+    let idx = index_for_tree(layout, store, tree_hash, observed)?;
+    write_index_settled(layout, &idx)
+}
+
+/// [`sync_index_to_tree`] with the index staged on `group`, not written: the
+/// caller publishes it with a token from a flush of the group that covers the
+/// objects of the tree, and flushes the group again for the rename. The racy
+/// window is settled before the staged file is returned, as for the written
+/// index.
+///
+/// # Errors
+/// The text of the failed step.
+pub fn sync_index_to_tree_staged(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let idx = index_for_tree(layout, store, tree_hash, &[])?;
+    stage_index_settled(group, layout, &idx)
+}
+
+/// The index of `tree_hash`, with the stat cache of the current index kept
+/// wherever path and object agree, and `observed` applied.
+fn index_for_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    observed: &[core_worktree::StatObservation],
+) -> Result<Index, String> {
     let mut idx =
         kit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     // Tree-derived entries carry no stat cache. Carry it over from the
@@ -81,7 +112,7 @@ pub fn sync_index_to_tree_observed(
             }
         }
     }
-    write_index_settled(layout, &idx)
+    Ok(idx)
 }
 
 /// The longest wait for the racy window to pass, in nanoseconds. A recorded
@@ -155,6 +186,53 @@ fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
     Ok(())
 }
 
+/// [`write_index_settled`] for a staged index: the wait and the rewrite of
+/// the temp file, so its mtime is judged where the index's would be.
+fn stage_index_settled(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let mut stage = || {
+        kit_core::index::stage_index(group, layout, idx).map_err(|e| format!("write index: {e}"))
+    };
+    let Some(newest) = idx
+        .entries
+        .iter()
+        .map(|e| e.mtime_ns)
+        .filter(|m| *m != 0 && !m.is_multiple_of(1_000_000_000))
+        .max()
+    else {
+        return stage();
+    };
+    let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
+    let now = now_nanos();
+    let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
+    if ready > now && ready - now > SETTLE_MAX_WAIT_NS {
+        return stage();
+    }
+    if ready > now {
+        std::thread::sleep(std::time::Duration::from_nanos(ready - now));
+    }
+    let mut staged = stage()?;
+    for _ in 0..SETTLE_REWRITES {
+        let Ok(meta) = std::fs::metadata(staged.temp_path()) else {
+            break;
+        };
+        let stamp = core_worktree::mtime_nanos(&meta);
+        if stamp == 0
+            || stamp.is_multiple_of(1_000_000_000)
+            || newest < stamp.saturating_sub(window)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_nanos(SETTLE_TICK_NS));
+        // The earlier temp file is dropped, and unlinked, as it is replaced.
+        staged = stage()?;
+    }
+    Ok(staged)
+}
+
 fn now_nanos() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -185,18 +263,54 @@ pub fn restore_worktree_and_index_from(
     tree_hash: Hash,
     base_tree: Option<Hash>,
 ) -> Result<(), String> {
-    let mut observed = Vec::new();
-    restore_tree_to_worktree_observed(
+    let mut stats = Vec::new();
+    kit_core::ops::restore::restore_tree_to_worktree_observed(
         store,
         &tree_hash,
         base_tree,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,
-        Some(&mut observed),
+        Some(&mut stats),
     )
     .map_err(|e| format!("restore worktree: {e}"))?;
-    sync_index_to_tree_observed(layout, store, tree_hash, &observed)
+    sync_index_to_tree_observed(layout, store, tree_hash, &stats)
+}
+
+/// [`restore_worktree_and_index_from`] for a pull, which reports its progress
+/// to `observer` when the observer can take it from other threads.
+///
+/// A restore with a `base_tree` is one the pull's safety check over the whole
+/// worktree has cleared, which refuses every untracked path outside the ignore
+/// rules, so the restore does not walk the directories it leaves alone to look
+/// for one again. A restore with no `base_tree`, as when a pull resumes after a
+/// stop, rewrites every entry and never walked them.
+pub(crate) fn restore_worktree_and_index_progress(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Option<Hash>,
+    observer: &dyn crate::Observer<crate::SyncEvent>,
+) -> Result<(), String> {
+    let mut stats = Vec::new();
+    let mut report =
+        |done, total| observer.event(&crate::SyncEvent::RestoreProgress { done, total });
+    let progress = observer
+        .concurrent()
+        .is_some()
+        .then_some(&mut report as &mut dyn FnMut(usize, usize));
+    kit_core::ops::restore::restore_tree_to_worktree_gated(
+        store,
+        &tree_hash,
+        base_tree,
+        layout.worktree_root(),
+        &RestoreOptions::default(),
+        &crate::restore_fanout::read_chunks_fanout,
+        Some(&mut stats),
+        progress,
+    )
+    .map_err(|e| format!("restore worktree: {e}"))?;
+    sync_index_to_tree_observed(layout, store, tree_hash, &stats)
 }
 
 /// Refuse a destructive restore when the index/worktree contains user work.
@@ -208,9 +322,104 @@ pub fn ensure_restore_safe(
     ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
 }
 
+/// Refuse a restore of `entry` when the store lacks an object it needs (for
+/// a chunked file, its manifest). A check with an unchanged base does not
+/// open the objects the base names. The old side may be the worktree's only
+/// other copy, so a restore must not overwrite or remove it. The new side is
+/// read by the restore, which would otherwise fail after HEAD moved, as when
+/// the target copies an unchanged file to a new path.
+fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Result<(), String> {
+    if let Some(h) = entry.old_hash
+        && !store.contains(&h)
+    {
+        return Err(format!(
+            "restore would lose '{}': its object {} is not found in the store",
+            escape_terminal_text(&entry.path, false),
+            kit_core::hash::to_hex(&h)
+        ));
+    }
+    if let Some(h) = entry.new_hash
+        && !store.contains(&h)
+    {
+        return Err(format!(
+            "restore cannot write '{}': its object {} is not found in the store",
+            escape_terminal_text(&entry.path, false),
+            kit_core::hash::to_hex(&h)
+        ));
+    }
+    Ok(())
+}
+
 /// The refusal for a tracked path that differs from the index.
 fn local_changes_message(path: &str) -> String {
-    format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
+    format!(
+        "restore would overwrite local changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
+}
+
+fn staged_changes_message(path: &str) -> String {
+    format!(
+        "restore would overwrite staged changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
+}
+
+fn overwrite_untracked_message(path: &str) -> String {
+    format!(
+        "restore would overwrite untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
+}
+
+fn remove_untracked_message(path: &str) -> String {
+    format!(
+        "restore would remove untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
+}
+
+/// The texts one caller of [`check_restore_safe`] refuses with, each given
+/// the path it refuses for.
+pub(crate) struct Refusals {
+    /// The index holds work no expected tree has.
+    pub(crate) staged: fn(&str) -> String,
+    /// A tracked path holds work no expected tree has.
+    pub(crate) local: fn(&str) -> String,
+    /// An untracked path lies where the restore writes.
+    pub(crate) overwrite_untracked: fn(&str) -> String,
+    /// A clean restore would sweep an untracked path away.
+    pub(crate) remove_untracked: fn(&str) -> String,
+}
+
+const RESTORE_REFUSALS: Refusals = Refusals {
+    staged: staged_changes_message,
+    local: local_changes_message,
+    overwrite_untracked: overwrite_untracked_message,
+    remove_untracked: remove_untracked_message,
+};
+
+/// What a restore may find in the index and the worktree without destroying
+/// work: each path as one of `trees` has it.
+pub(crate) struct Expected<'a> {
+    /// The trees the index and the worktree may match. A destructive restore
+    /// expects the tree of HEAD; a pull that resumes an interrupted restore
+    /// expects the tree from before the pull or the target. The index must
+    /// equal one of them as a whole, the worktree each path one of them.
+    pub(crate) trees: &'a [Option<Hash>],
+    /// The tree whose unchanged entries the restore leaves alone. The check
+    /// opens no object of an index entry equal to it; for each path the
+    /// restore changes it checks that the store has the old and the new
+    /// object. `None` opens every object.
+    pub(crate) unchanged_base: Option<Hash>,
+    /// The restore that was interrupted may have left its temporary files,
+    /// which the clean restore then sweeps.
+    pub(crate) restore_temp_files: bool,
+    /// Refuse an untracked directory the ignore rules do not match, whatever
+    /// it holds, as a pull recovery always has. Otherwise a directory is
+    /// judged by its descendants, as the clean sweep judges it.
+    pub(crate) refuse_untracked_dirs: bool,
+    pub(crate) refusals: &'a Refusals,
 }
 
 /// Refuse a destructive restore when affected index/worktree paths contain user work.
@@ -220,96 +429,464 @@ pub fn ensure_restore_safe_with_options(
     target_tree: Hash,
     options: &RestoreOptions,
 ) -> Result<(), String> {
+    ensure_restore_safe_from(layout, store, target_tree, options, None)
+}
+
+/// [`ensure_restore_safe_with_options`] for a restore that leaves alone every
+/// entry whose mode and object id are the same in `base_tree`, as
+/// [`restore_worktree_and_index_from`] does with the tree of HEAD. The check
+/// then opens no object of an index entry equal to `base_tree`; for each
+/// path the restore changes, it checks that the store has the old and the
+/// new object. Pass `None` when the restore rewrites every entry: the check
+/// then opens every object, so a missing one refuses the restore before
+/// anything is written.
+pub fn ensure_restore_safe_from(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+    base_tree: Option<Hash>,
+) -> Result<(), String> {
+    let head = current_head_tree(layout, store)?;
+    check_restore_safe(
+        layout,
+        store,
+        &read_or_seed_index_from_head(layout, store)?,
+        target_tree,
+        options,
+        &Expected {
+            trees: &[head],
+            unchanged_base: base_tree,
+            restore_temp_files: false,
+            refuse_untracked_dirs: false,
+            refusals: &RESTORE_REFUSALS,
+        },
+    )
+}
+
+/// [`ensure_restore_safe_from`] for the first checkout of a repository that
+/// has no index file, as a clone with no checkout leaves it (git's initial
+/// checkout). Nothing is tracked yet, so no path is local work; an untracked
+/// path the restore would write over still refuses it.
+pub fn ensure_initial_checkout_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+) -> Result<(), String> {
+    check_restore_safe(
+        layout,
+        store,
+        &Index::new(),
+        target_tree,
+        options,
+        &Expected {
+            trees: &[None],
+            unchanged_base: None,
+            restore_temp_files: false,
+            refuse_untracked_dirs: false,
+            refusals: &RESTORE_REFUSALS,
+        },
+    )
+}
+
+/// The one restore-safety check: refuse a restore of `target_tree` with
+/// `options` that would destroy work, which is anything in the index or the
+/// worktree that is not as one of `expected.trees` has it, an untracked path
+/// the restore would write over, and with `options.clean` an untracked path the
+/// sweep would remove. An untracked path is one that neither the index `idx`
+/// nor an expected tree tracks. Each refusal names the first path it finds.
+pub(crate) fn check_restore_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    idx: &Index,
+    target_tree: Hash,
+    options: &RestoreOptions,
+    expected: &Expected<'_>,
+) -> Result<(), String> {
     let root = layout.worktree_root();
-    let current_tree = current_head_tree(layout, store)?;
-    let idx = read_or_seed_index_from_head(layout, store)?;
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
     let snapshot = kit_core::store::EphemeralSink::new(store);
-    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
-        .map_err(|e| format!("check index state: {e}"))?;
+    let index_tree = core_worktree::build_tree_from_index_against(
+        store,
+        &snapshot,
+        idx,
+        false,
+        expected.unchanged_base,
+    )
+    .map_err(|e| format!("check index state: {e}"))?;
 
-    let staged = diff_trees(&snapshot, current_tree, Some(index_tree))
+    let affects = |path: &str| restore_affects_path(options, path);
+    let staged = differ_from_every(&snapshot, expected.trees, index_tree, &affects)
         .map_err(|e| format!("check staged changes: {e}"))?;
-    if let Some(entry) = staged
-        .entries
-        .iter()
-        .find(|entry| restore_affects_path(options, &entry.path))
-    {
-        return Err(format!(
-            "restore would overwrite staged changes; commit, stash, or reset '{}' first",
-            entry.path
-        ));
+    if let Some(entry) = &staged.matches_none {
+        return Err((expected.refusals.staged)(&entry.path));
     }
 
-    let worktree_tree = core_worktree::build_tree_filtered_observed_with_source(
+    let tracked = tracked_paths(idx, &staged.missing, &affects);
+    // The one walk of the worktree: it builds the snapshot and keeps what it
+    // read of each directory, so the untracked paths are listed from that and
+    // not from a second pass over the disk.
+    let mut listings = core_worktree::DirListings::default();
+    let worktree_tree = core_worktree::build_tree_filtered_listed_with_source(
         &snapshot,
         &snapshot,
         root,
-        Some(&idx),
-        &mut Vec::new(),
+        Some(&tracked),
+        &mut listings,
     )
     .map_err(|e| format!("check working tree changes: {e}"))?;
-    let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
+    let unstaged = differ_from_every(&snapshot, expected.trees, worktree_tree, &affects)
         .map_err(|e| format!("check working tree changes: {e}"))?;
-    if let Some(entry) = unstaged
-        .entries
-        .iter()
-        .find(|entry| entry.kind != DiffKind::Added && restore_affects_path(options, &entry.path))
-    {
-        return Err(local_changes_message(&entry.path));
+    // A path every expected tree lacks is untracked: the checks below judge it.
+    // With several trees, a file where one of them has a directory is no such
+    // path: the checks below count it tracked, by what lies under it, and the
+    // restore would remove it. With one tree, the diff names what lies under it
+    // instead.
+    let several = expected.trees.len() > 1;
+    if let Some((entry, _)) = unstaged.differing.iter().find(|(entry, untracked)| {
+        (!untracked || (several && index_tracks_path_or_descendant(&tracked, &entry.path)))
+            && restore_affects_path(options, &entry.path)
+    }) {
+        return Err((expected.refusals.local)(&entry.path));
     }
 
-    let target_writes = diff_trees(&snapshot, Some(index_tree), Some(target_tree))
-        .map_err(|e| format!("check restore target: {e}"))?
-        .entries
-        .into_iter()
-        .filter(|entry| entry.kind != DiffKind::Removed)
-        .filter(|entry| restore_affects_path(options, &entry.path))
-        .map(|entry| entry.path)
-        .collect::<Vec<_>>();
+    // What the restore writes over a worktree that holds any expected tree. The
+    // index equals one of them on every path the restore affects.
+    let mut target_writes = Vec::new();
+    for tree in expected.trees {
+        let diff = diff_trees(&snapshot, *tree, Some(target_tree))
+            .map_err(|e| format!("check restore target: {e}"))?;
+        for entry in diff.entries.into_iter().filter(|e| affects(&e.path)) {
+            ensure_restore_objects_present(store, &entry)?;
+            if entry.kind != DiffKind::Removed {
+                target_writes.push(entry.path);
+            }
+        }
+    }
+    target_writes.sort_unstable();
+    target_writes.dedup();
     if target_writes.is_empty() && !options.clean {
         return Ok(());
     }
 
-    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
-    let mut worktree_paths = Vec::new();
-    collect_worktree_paths(root, root, "", &mut worktree_paths)
-        .map_err(|e| format!("check untracked paths: {e}"))?;
+    let (ignore, worktree_paths) = restore_paths(root, &target_writes, options.clean, &listings)?;
     // A real directory that only holds a target path is no conflict: the
     // restore writes beside its contents. Its descendants are checked as
     // paths of their own.
     let is_real_dir = |path: &str| fs::symlink_metadata(root.join(path)).is_ok_and(|m| m.is_dir());
     if let Some(path) = worktree_paths.iter().find(|path| {
-        !index_tracks_path_or_descendant(&idx, path)
+        !index_tracks_path_or_descendant(&tracked, path)
             && target_writes.iter().any(|target| {
                 paths_overlap(path, target)
                     && !(is_real_dir(path) && index_path_descends_from(target, path))
             })
     }) {
-        return Err(format!(
-            "restore would overwrite untracked path '{path}'; move or remove it first"
-        ));
+        return Err((expected.refusals.overwrite_untracked)(path));
+    }
+    // A target path is a file or a symlink: the diff lists no directories. One
+    // written where the worktree has a directory replaces the directory,
+    // tracked or not. The walk above leaves out `.kit` and `.git`, so a nested
+    // repository in it is refused here. An untracked path, and so a symlink, on
+    // the way to a written path was refused above.
+    for path in &target_writes {
+        let dir = root.join(path);
+        if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if let Some(entry) =
+            nested_repository(&dir).map_err(|e| format!("check untracked paths: {e}"))?
+        {
+            return Err((expected.refusals.overwrite_untracked)(&format!(
+                "{path}/{entry}"
+            )));
+        }
     }
 
-    if options.clean
-        && let Some(path) = worktree_paths.iter().find(|path| {
-            !index_tracks_path_or_descendant(&idx, path)
+    if options.clean {
+        let mut kept = std::collections::HashMap::new();
+        let mut ignores = std::collections::HashMap::from([(root.to_path_buf(), ignore.clone())]);
+        for path in &worktree_paths {
+            let full_path = root.join(path);
+            let parent = full_path.parent().unwrap_or(root);
+            let ignore = directory_ignore(&mut ignores, &ignore, parent)?;
+            if !index_tracks_path_or_descendant(&tracked, path)
                 && restore_affects_path(options, path)
-                && *path != ".kitignore"
-                && *path != ".gitignore"
-                // A directory is judged by its descendants, which this list
-                // also holds; the sweep keeps one that holds ignored files.
-                && !is_real_dir(path)
-                && !is_ignored_worktree_path(root, &ignore, path)
-        })
-    {
-        return Err(format!(
-            "restore would remove untracked path '{path}'; move or remove it first"
-        ));
+                && path != ".kitignore"
+                && path != ".gitignore"
+                && (expected.refuse_untracked_dirs || !is_real_dir(path))
+                && !is_ignored_worktree_path(root, ignore, path)
+                && (!expected.restore_temp_files || !is_restore_temp(root, &tracked, path))
+                && !sweep_keeps_path(store, target_tree, root, path, &mut kept)
+                    .map_err(|e| format!("check untracked repository at '{path}': {e}"))?
+            {
+                return Err((expected.refusals.remove_untracked)(path));
+            }
+        }
     }
 
     Ok(())
+}
+
+fn restore_paths(
+    root: &Path,
+    targets: &[String],
+    clean: bool,
+    listings: &core_worktree::DirListings,
+) -> Result<(kit_core::ignore::IgnoreList, Vec<String>), String> {
+    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
+    let mut paths = Vec::new();
+    collect_restore_paths(
+        root,
+        root,
+        "",
+        &mut paths,
+        clean.then_some((&ignore, targets)),
+        Some(listings),
+    )
+    .map_err(|e| format!("check untracked paths: {e}"))?;
+    Ok((ignore, paths))
+}
+
+fn directory_ignore<'a>(
+    cache: &'a mut std::collections::HashMap<std::path::PathBuf, kit_core::ignore::IgnoreList>,
+    inherited: &kit_core::ignore::IgnoreList,
+    parent: &Path,
+) -> Result<&'a kit_core::ignore::IgnoreList, String> {
+    use std::collections::hash_map::Entry;
+    match cache.entry(parent.to_path_buf()) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => Ok(entry.insert(
+            inherited
+                .load_directory(parent)
+                .map_err(|e| format!("read ignore file: {e}"))?,
+        )),
+    }
+}
+
+/// Only an unlisted directory with its own metadata marker is kept whole.
+/// A listed directory is swept, even when it has a metadata marker; an
+/// ancestor of a nested repository may also have files the sweep removes.
+fn sweep_keeps_path(
+    store: &ObjectStore,
+    target: Hash,
+    root: &Path,
+    path: &str,
+    cache: &mut std::collections::HashMap<String, bool>,
+) -> Result<bool, String> {
+    let mut path = Some(path);
+    while let Some(candidate) = path {
+        let kept = if let Some(kept) = cache.get(candidate) {
+            *kept
+        } else {
+            let dir = root.join(candidate);
+            let mut holds_repository = false;
+            if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+                for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                    let name = entry.map_err(|e| e.to_string())?.file_name();
+                    if name.to_str().is_some_and(|name| {
+                        name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git")
+                    }) {
+                        holds_repository = true;
+                        break;
+                    }
+                }
+            }
+            let kept = holds_repository && !target_lists_directory(store, target, root, candidate)?;
+            cache.insert(candidate.to_string(), kept);
+            kept
+        };
+        if kept {
+            return Ok(true);
+        }
+        path = candidate.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    Ok(false)
+}
+
+fn target_lists_directory(
+    store: &ObjectStore,
+    mut tree: Hash,
+    root: &Path,
+    path: &str,
+) -> Result<bool, String> {
+    let mut dir = root.to_path_buf();
+    for (depth, name) in path.split('/').enumerate() {
+        if depth > kit_core::store::MAX_TREE_DEPTH {
+            return Err("tree nesting exceeds the depth limit".into());
+        }
+        let Object::Tree(entries) = store.read_object(&tree).map_err(|e| e.to_string())? else {
+            return Err("restore target is not a tree".into());
+        };
+        let entry = entries.entries.iter().find(|entry| {
+            entry.mode == EntryMode::Tree
+                && (entry.name.eq_ignore_ascii_case(name.as_bytes())
+                    || std::str::from_utf8(&entry.name).is_ok_and(|target_name| {
+                        directory_alias(&dir.join(target_name), &dir.join(name))
+                    }))
+        });
+        let Some(entry) = entry else { return Ok(false) };
+        tree = entry.object_hash;
+        dir.push(name);
+    }
+    Ok(true)
+}
+
+// Unix file identity handles casefold directories even when realpath preserves
+// the spelling supplied by the caller. Other targets also compare names without
+// ASCII case above, conservatively refusing more on case-sensitive filesystems.
+fn directory_alias(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
+            (Ok(a), Ok(b)) => a.is_dir() && b.is_dir() && a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// How a tree differs from the expected trees.
+struct Differences {
+    /// The entries of `diff(trees[0], actual)` whose path differs in every
+    /// expected tree, each with whether every expected tree lacks the path.
+    /// With one tree, that is the whole diff, and the flag marks a
+    /// [`DiffKind::Added`] entry.
+    differing: Vec<(DiffEntry, bool)>,
+    /// The first entry of `diff(trees[0], actual)` on a path the restore
+    /// affects, when `actual` differs from every expected tree on such a
+    /// path. `None` when it equals one of them on every path the restore
+    /// affects.
+    matches_none: Option<DiffEntry>,
+    /// The paths some expected tree has and `actual` lacks, as that tree has
+    /// them, the first such tree's entry for each path.
+    missing: Vec<DiffEntry>,
+}
+
+fn differ_from_every(
+    snapshot: &(dyn kit_core::store::ObjectSource + Sync),
+    trees: &[Option<Hash>],
+    actual: Hash,
+    affects: &dyn Fn(&str) -> bool,
+) -> Result<Differences, kit_core::store::StoreError> {
+    let mut differing: Option<Vec<(DiffEntry, bool)>> = None;
+    let mut matches_none: Option<Option<DiffEntry>> = None;
+    let mut missing: Vec<DiffEntry> = Vec::new();
+    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for tree in trees {
+        let entries = diff_trees(snapshot, *tree, Some(actual))?.entries;
+        let first_affected = entries.iter().find(|entry| affects(&entry.path));
+        matches_none = Some(match matches_none {
+            None => first_affected.cloned(),
+            Some(first) => first.filter(|_| first_affected.is_some()),
+        });
+        missing.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.kind == DiffKind::Removed)
+                .filter(|entry| seen_missing.insert(entry.path.clone()))
+                .cloned(),
+        );
+        differing = Some(match differing {
+            None => entries
+                .into_iter()
+                .map(|entry| {
+                    let added = entry.kind == DiffKind::Added;
+                    (entry, added)
+                })
+                .collect(),
+            Some(mut kept) => {
+                let kinds: std::collections::HashMap<String, DiffKind> = entries
+                    .into_iter()
+                    .map(|entry| (entry.path, entry.kind))
+                    .collect();
+                kept.retain_mut(|(entry, added)| match kinds.get(&entry.path) {
+                    Some(kind) => {
+                        *added &= *kind == DiffKind::Added;
+                        true
+                    }
+                    None => false,
+                });
+                kept
+            }
+        });
+    }
+    Ok(Differences {
+        differing: differing.unwrap_or_default(),
+        matches_none: matches_none.flatten(),
+        missing,
+    })
+}
+
+/// The paths the restore treats as its own: the index's, and every path the
+/// restore affects that an expected tree has and the index lacks (`missing`).
+/// Those entries carry the expected tree's object and no stat cache. A file the union holds where
+/// another of its paths needs a directory is left out, so the worktree's
+/// directory is read.
+fn tracked_paths<'a>(
+    idx: &'a Index,
+    missing: &[DiffEntry],
+    affects: &dyn Fn(&str) -> bool,
+) -> std::borrow::Cow<'a, Index> {
+    let mut missing = missing
+        .iter()
+        .filter(|entry| affects(&entry.path))
+        .peekable();
+    if missing.peek().is_none() {
+        return std::borrow::Cow::Borrowed(idx);
+    }
+    let mut tracked = idx.clone();
+    for entry in missing {
+        let (Some(object_hash), Some(mode)) = (entry.old_hash, entry.old_mode) else {
+            continue;
+        };
+        let status = match mode {
+            EntryMode::Blob => EntryStatus::Blob,
+            EntryMode::Executable => EntryStatus::Executable,
+            EntryMode::Symlink => EntryStatus::Symlink,
+            EntryMode::Tree => continue,
+        };
+        tracked.upsert_entry(IndexEntry {
+            path: entry.path.clone(),
+            status,
+            object_hash,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+    }
+    let directories: std::collections::HashSet<String> = tracked
+        .entries
+        .iter()
+        .flat_map(|entry| Path::new(&entry.path).ancestors().skip(1))
+        .filter_map(|parent| parent.to_str())
+        .filter(|parent| !parent.is_empty())
+        .map(str::to_owned)
+        .collect();
+    tracked.retain_entries(|entry| !directories.contains(entry.path.as_str()));
+    std::borrow::Cow::Owned(tracked)
+}
+
+/// Is `path` a temporary file an interrupted restore left: an untracked
+/// regular file with a restore temporary name?
+fn is_restore_temp(root: &Path, tracked: &Index, path: &str) -> bool {
+    if tracked.tracks_path_or_descendant(path) {
+        return false;
+    }
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    kit_core::ops::restore::is_restore_temp_name(name)
+        && fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_file())
 }
 
 #[must_use]
@@ -326,30 +903,82 @@ pub fn collect_worktree_paths(
     prefix: &str,
     out: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    collect_restore_paths(root, dir, prefix, out, None, None)
+}
+
+/// The names of `dir` that are valid UTF-8 and whether each is a directory
+/// (a symlink to one is not), in the order the file system lists them. A
+/// directory that is gone has none.
+fn read_listing(dir: &Path) -> std::io::Result<Vec<(String, bool)>> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
+    let mut listing = Vec::new();
     for entry in read {
         let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
+        listing.push((name, entry.file_type()?.is_dir()));
+    }
+    Ok(listing)
+}
+
+/// An ignored subtree matters only when a target enters it or replaces one
+/// of its ancestors. The directory itself stays in the list for the sweep.
+///
+/// A directory `listings` holds, because the walk of the safety check read it,
+/// is not read again.
+fn collect_restore_paths(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<String>,
+    filter: Option<(&kit_core::ignore::IgnoreList, &[String])>,
+    listings: Option<&core_worktree::DirListings>,
+) -> std::io::Result<()> {
+    let local_ignore = filter
+        .map(|(ignore, _)| ignore.load_directory(dir))
+        .transpose()
+        .map_err(std::io::Error::other)?;
+    let read;
+    let listing: &[(String, bool)] =
+        if let Some(listing) = listings.and_then(|listings| listings.get(prefix)) {
+            listing
+        } else {
+            read = read_listing(dir)?;
+            &read
+        };
+    for (name, is_dir) in listing {
         if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             continue;
         }
         let path = if prefix.is_empty() {
-            name.to_string()
+            name.clone()
         } else {
             format!("{prefix}/{name}")
         };
         out.push(path.clone());
         let full_path = root.join(&path);
-        let meta = fs::symlink_metadata(&full_path)?;
-        if meta.is_dir() {
-            collect_worktree_paths(root, &full_path, &path, out)?;
+        if *is_dir {
+            if let (Some(ignore), Some((_, targets))) = (&local_ignore, filter)
+                && ignore.is_ignored_with_ancestors(&path, true)
+                && !targets.iter().any(|target| paths_overlap(&path, target))
+            {
+                continue;
+            }
+            collect_restore_paths(
+                root,
+                &full_path,
+                &path,
+                out,
+                local_ignore
+                    .as_ref()
+                    .zip(filter.map(|(_, targets)| targets)),
+                listings,
+            )?;
         }
     }
     Ok(())
@@ -556,6 +1185,104 @@ mod tests {
         }
     }
 
+    /// The staged index publishes to the entries the written one has, and the
+    /// stat cache of the old index is kept where path and object agree.
+    #[test]
+    fn the_staged_index_matches_the_written_one_and_keeps_the_stat_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let blob = |data: &[u8]| {
+            put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            )
+        };
+        let (a, b) = (blob(b"a"), blob(b"b"));
+        let entry = |name: &str, hash: Hash| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: hash,
+        };
+        let one = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a)],
+            }),
+        );
+        let two = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a), entry("b", b)],
+            }),
+        );
+        // An old index whose entry for `a` has a stat cache.
+        sync_index_to_tree(&layout, &store, one).unwrap();
+        let mut old = kit_core::index::read_index(&layout).unwrap();
+        let at = old.find_entry("a").unwrap();
+        old.entries[at].mtime_ns = 5_000_000_001;
+        old.entries[at].size = 1;
+        old.entries[at].ino = 9;
+        kit_core::index::write_index(&layout, &old).unwrap();
+
+        let mut group = store.group();
+        let staged = sync_index_to_tree_staged(&mut group, &layout, &store, two).unwrap();
+        // Nothing is published until the group is flushed and the token used.
+        assert_eq!(
+            kit_core::index::read_index(&layout).unwrap().entries.len(),
+            1
+        );
+        let token = group.flush().unwrap();
+        kit_core::index::publish_staged_index(&mut group, staged, &token).unwrap();
+        let _named = group.flush().unwrap();
+
+        let idx = kit_core::index::read_index(&layout).unwrap();
+        assert_eq!(idx.entries.len(), 2);
+        let ea = &idx.entries[idx.find_entry("a").unwrap()];
+        assert_eq!(
+            (ea.object_hash, ea.mtime_ns, ea.size, ea.ino),
+            (a, 5_000_000_001, 1, 9)
+        );
+        let eb = &idx.entries[idx.find_entry("b").unwrap()];
+        assert_eq!((eb.object_hash, eb.mtime_ns, eb.size, eb.ino), (b, 0, 0, 0));
+
+        // The written path gives the same entries.
+        let other = tempfile::tempdir().unwrap();
+        let layout2 = RepoLayout::single(other.path());
+        let store2 = ObjectStore::init(&layout2).unwrap();
+        let (a2, b2) = (
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"a".to_vec(),
+                }),
+            ),
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"b".to_vec(),
+                }),
+            ),
+        );
+        let two2 = put(
+            &store2,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a2), entry("b", b2)],
+            }),
+        );
+        sync_index_to_tree(&layout2, &store2, two2).unwrap();
+        let written = kit_core::index::read_index(&layout2).unwrap();
+        let names = |i: &Index| {
+            i.entries
+                .iter()
+                .map(|e| (e.path.clone(), e.object_hash))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&idx), names(&written));
+    }
+
     /// A recorded mtime far ahead of the clock is skew: the write does not
     /// wait for it.
     #[test]
@@ -594,5 +1321,171 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "a future mtime is not waited for"
         );
+    }
+}
+
+#[cfg(test)]
+mod path_walk_tests {
+    #[test]
+    fn ignored_subtrees_are_skipped_only_when_no_target_overlaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sub/cache/deep")).unwrap();
+        std::fs::write(root.join("sub/.gitignore"), "cache/\n").unwrap();
+        std::fs::write(root.join("sub/cache/deep/keep"), "keep").unwrap();
+        let ignore = kit_core::ignore::load(root).unwrap();
+        for (targets, enters) in [
+            (vec!["other".to_owned()], false),
+            (vec!["sub/cache/deep/new".to_owned()], true),
+            (vec!["sub/cache".to_owned()], true),
+        ] {
+            let mut paths = Vec::new();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut paths,
+                Some((&ignore, &targets)),
+                None,
+            )
+            .unwrap();
+            assert!(paths.contains(&"sub/cache".to_owned()));
+            assert_eq!(paths.contains(&"sub/cache/deep/keep".to_owned()), enters);
+        }
+        let mut paths = Vec::new();
+        super::collect_worktree_paths(root, root, "", &mut paths).unwrap();
+        assert!(paths.contains(&"sub/cache/deep/keep".to_owned()));
+    }
+
+    /// What the safety check's walk read of each directory gives the same list
+    /// as reading the disk again, also when the list enters a directory the walk
+    /// left out (an ignored one a target reaches, and one that hides a tracked
+    /// file), which it reads from the disk.
+    #[test]
+    fn the_walks_listings_give_the_list_a_second_pass_gives() {
+        use kit_core::object::{Blob, Object};
+        use kit_core::store::{EphemeralSink, ObjectSink, ObjectStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let layout = kit_core::layout::RepoLayout::single(root);
+        let store = ObjectStore::init(&layout).unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::create_dir_all(root.join("cache/deep")).unwrap();
+        std::fs::create_dir_all(root.join("shadow")).unwrap();
+        std::fs::create_dir_all(root.join("nested/.git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "cache/\n*.log\n").unwrap();
+        std::fs::write(root.join("a/b/f"), "f").unwrap();
+        std::fs::write(root.join("a/x.log"), "x").unwrap();
+        std::fs::write(root.join("cache/deep/k"), "k").unwrap();
+        std::fs::write(root.join("shadow/inner"), "i").unwrap();
+        std::fs::write(root.join("nested/file"), "n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a", root.join("link")).unwrap();
+
+        // `shadow` is a tracked file in the index while the disk holds a
+        // directory there, which the walk leaves out.
+        let blob = store
+            .put(
+                &kit_core::serialize::serialize(&Object::Blob(Blob {
+                    data: b"s".to_vec(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let mut idx = kit_core::index::Index::new();
+        idx.upsert_entry(kit_core::index::IndexEntry {
+            path: "shadow".to_owned(),
+            status: kit_core::index::EntryStatus::Blob,
+            object_hash: blob,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+
+        let snapshot = EphemeralSink::new(&store);
+        let mut listings = kit_core::worktree::DirListings::default();
+        kit_core::worktree::build_tree_filtered_listed_with_source(
+            &snapshot,
+            &snapshot,
+            root,
+            Some(&idx),
+            &mut listings,
+        )
+        .unwrap();
+        assert!(
+            listings.get("a/b").is_some(),
+            "a directory the walk entered"
+        );
+        assert!(listings.get("cache").is_none(), "an ignored one it did not");
+        assert!(
+            listings.get("shadow").is_none(),
+            "one that hides a tracked file"
+        );
+
+        let ignore = kit_core::ignore::load(root).unwrap();
+        for targets in [
+            vec!["other".to_owned()],
+            vec!["cache/deep/new".to_owned()],
+            vec!["shadow/inner".to_owned()],
+        ] {
+            let mut again = Vec::new();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut again,
+                Some((&ignore, &targets)),
+                None,
+            )
+            .unwrap();
+            let mut listed = Vec::new();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut listed,
+                Some((&ignore, &targets)),
+                Some(&listings),
+            )
+            .unwrap();
+            assert_eq!(listed, again, "targets {targets:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::local_changes_message("a\u{1b}b"),
+            super::staged_changes_message("a\u{1b}b"),
+            super::overwrite_untracked_message("a\u{1b}b"),
+            super::remove_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod nonclean_walk_tests {
+    #[test]
+    fn nonclean_walk_does_not_parse_untracked_directory_ignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("untracked/.gitignore")).unwrap();
+        let (_, paths) = super::restore_paths(
+            dir.path(),
+            &["new".to_owned()],
+            false,
+            &kit_core::worktree::DirListings::default(),
+        )
+        .unwrap();
+        assert!(paths.contains(&"untracked/.gitignore".to_owned()));
     }
 }

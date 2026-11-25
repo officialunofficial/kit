@@ -1,10 +1,11 @@
 //! Restore.
 //!
-//! Materialises a stored [`Tree`](crate::object::Tree) into a target
+//! Materialises a stored [`Tree`] into a target
 //! directory: writes blobs as files, recurses into subtrees as
 //! directories, creates symlinks for symlink entries, and (when
 //! `clean=true`) deletes anything in the target dir that is not in the
-//! tree (preserving `.kit/` and `.git/`).
+//! tree (preserving `.kit/` and `.git/`, and leaving a directory the tree
+//! does not list whole when it holds a nested repository).
 //!
 //! ### Symlink invariant
 //!
@@ -27,16 +28,18 @@
 //! - Bare names without a `/` also match against the basename of
 //!   nested files.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::durable::Parents;
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::layout::RepoLayout;
-use crate::object::{self, EntryMode, Object, TreeEntry};
+use crate::object::{self, EntryMode, Object, Tree, TreeEntry};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
@@ -91,6 +94,27 @@ pub enum RestoreError {
     /// on the ingest side), never a normal runtime condition.
     #[error("read_chunks callback returned {actual} buffers for a {expected}-chunk batch")]
     ChunkBatchLengthMismatch { expected: usize, actual: usize },
+    /// A clean restore with a base tree skipped a subtree, and so did not
+    /// sweep it, where the sweep would have removed this untracked path. The
+    /// path is relative to the restore root. See
+    /// [`restore_tree_to_worktree_with`].
+    #[error("clean restore would leave untracked path '{0}' in a directory it does not change")]
+    UnsweptPath(String),
+    /// The restore writes a file or symlink where the worktree holds a
+    /// directory with a nested repository in it, at any depth. The path is
+    /// the repository's `.kit` or `.git` entry, relative to the restore
+    /// root. The restore refuses rather than remove the repository; a
+    /// caller's safety gate refuses the same case before the restore starts.
+    #[error(
+        "restore would remove untracked path '{0}'; move or delete '{dir}', which holds a repository, and run the command again",
+        dir = .0.rsplit_once('/').map_or(".", |(dir, _)| dir)
+    )]
+    NestedRepository(String),
+    /// A sparse sweep would use a different directory spelling than its gate.
+    #[error(
+        "sparse restore directory '{0}' has a different spelling on disk; rename it to match the tree and run the command again"
+    )]
+    SparseDirectoryAlias(String),
 }
 
 /// Result alias.
@@ -108,7 +132,8 @@ pub struct SparsePattern {
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
     /// If `true`, delete anything in the target dir that is not in the
-    /// tree (preserving `.kit/` and `.git/`). Default `true`.
+    /// tree (preserving `.kit/` and `.git/`, and every directory the tree
+    /// does not list that holds a `.kit` or `.git` entry). Default `true`.
     pub clean: bool,
     /// If `Some`, only restore entries whose path matches the patterns.
     pub sparse_patterns: Option<Vec<SparsePattern>>,
@@ -177,26 +202,125 @@ pub fn matches_sparse(patterns: &[SparsePattern], path: &str, is_dir: bool) -> b
 /// descendants. Used to short-circuit recursion under sparse mode.
 #[must_use]
 pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> bool {
-    for pat in patterns {
-        if pat.negated {
-            continue;
+    patterns.iter().filter(|pat| !pat.negated).any(|pat| {
+        path_matches_pattern(&pat.pattern, dir_prefix)
+            || pat
+                .pattern
+                .strip_prefix('/')
+                .unwrap_or(&pat.pattern)
+                .strip_prefix(dir_prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// [`matches_sparse`] and [`could_match_descendant`] over one pattern list,
+/// answered without scanning the whole list for every path.
+///
+/// A restore that names many files builds one pattern per file, so a scan per
+/// path costs the square of the file count. The matcher indexes the patterns
+/// by the text they can match and looks up only the patterns that could apply
+/// to a path: its leading directories and its last component. Every
+/// candidate is then checked with the same rules as the plain functions, in
+/// list order, so both give identical answers.
+#[derive(Debug)]
+pub struct SparseMatcher<'a> {
+    patterns: &'a [SparsePattern],
+    /// Anchored patterns (leading `/`) by the text after the slash.
+    anchored: HashMap<&'a str, Vec<usize>>,
+    /// Other patterns by their text without one trailing slash.
+    floating: HashMap<&'a str, Vec<usize>>,
+    /// The non-negated patterns' text without a leading slash, sorted.
+    positive_texts: Vec<&'a str>,
+}
+
+impl<'a> SparseMatcher<'a> {
+    #[must_use]
+    pub fn new(patterns: &'a [SparsePattern]) -> Self {
+        let mut anchored: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut floating: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut positive_texts = Vec::new();
+        for (index, pat) in patterns.iter().enumerate() {
+            let text = pat.pattern.as_str();
+            if let Some(exact) = text.strip_prefix('/') {
+                anchored.entry(exact).or_default().push(index);
+            } else {
+                floating
+                    .entry(text.strip_suffix('/').unwrap_or(text))
+                    .or_default()
+                    .push(index);
+            }
+            if !pat.negated {
+                positive_texts.push(text.strip_prefix('/').unwrap_or(text));
+            }
         }
-        if pat.pattern.starts_with(dir_prefix) {
-            return true;
+        positive_texts.sort_unstable();
+        Self {
+            patterns,
+            anchored,
+            floating,
+            positive_texts,
         }
-        if dir_prefix.starts_with(&pat.pattern) {
-            return true;
+    }
+
+    /// Indexes of the patterns that match `path`, ascending.
+    fn matching(&self, path: &str) -> Vec<usize> {
+        let mut found: Vec<usize> = Vec::new();
+        let bytes = path.as_bytes();
+        for end in (0..=bytes.len()).filter(|&i| i == bytes.len() || bytes[i] == b'/') {
+            let leading = &path[..end];
+            found.extend(self.anchored.get(leading).into_iter().flatten().copied());
+            found.extend(self.floating.get(leading).into_iter().flatten().copied());
         }
-        if !dir_prefix.is_empty()
-            && !dir_prefix.ends_with('/')
-            && pat.pattern.len() > dir_prefix.len()
-            && pat.pattern.starts_with(dir_prefix)
-            && pat.pattern.as_bytes()[dir_prefix.len()] == b'/'
+        if let Some(last) = path.rfind('/') {
+            found.extend(
+                self.floating
+                    .get(&path[last + 1..])
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+        }
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&index| path_matches_pattern(&self.patterns[index].pattern, path));
+        found
+    }
+
+    /// Same answer as [`matches_sparse`].
+    #[must_use]
+    pub fn matches(&self, path: &str, is_dir: bool) -> bool {
+        let mut matched = false;
+        for index in self.matching(path) {
+            let pat = &self.patterns[index];
+            if pat.dir_only && !is_dir {
+                let pat_stripped = pat.pattern.strip_suffix('/').unwrap_or(&pat.pattern);
+                if pat_stripped == path {
+                    continue;
+                }
+            }
+            matched = !pat.negated;
+        }
+        matched
+    }
+
+    /// Same answer as [`could_match_descendant`].
+    #[must_use]
+    pub fn could_match_descendant(&self, dir_prefix: &str) -> bool {
+        if self
+            .matching(dir_prefix)
+            .into_iter()
+            .any(|index| !self.patterns[index].negated)
         {
             return true;
         }
+        let below = format!("{dir_prefix}/");
+        let first = self
+            .positive_texts
+            .partition_point(|text| *text < below.as_str());
+        self.positive_texts
+            .get(first)
+            .is_some_and(|text| text.starts_with(&below))
     }
-    false
 }
 
 /// Load patterns from `<repo_root>/.kit/sparse-checkout`. Returns
@@ -233,11 +357,14 @@ pub fn write_sparse_checkout(layout: &RepoLayout, lines: &[&str]) -> RestoreResu
         buf.push('\n');
     }
     let path = layout.sparse_checkout_file();
-    crate::atomic::write_atomic(&path, buf.as_bytes(), true)?;
+    crate::durable::write_pointer(&path, buf.as_bytes(), Parents::Create)?;
     Ok(())
 }
 
 fn path_matches_pattern(pattern: &str, path: &str) -> bool {
+    if let Some(exact) = pattern.strip_prefix('/') {
+        return path == exact || path.strip_prefix(exact).is_some_and(|s| s.starts_with('/'));
+    }
     let pat = pattern.strip_suffix('/').unwrap_or(pattern);
     if pat == path {
         return true;
@@ -268,6 +395,69 @@ pub struct RestoreReport {
     pub symlinks_written: u32,
     /// Number of directories created (or that already existed as dirs).
     pub directories_created: u32,
+}
+
+/// Count metadata entries only, without reading file bodies.
+fn count_restore_files(
+    store: &ObjectStore,
+    tree: Hash,
+    base: Option<Hash>,
+    opts: &RestoreOptions,
+    sparse: Option<&SparseMatcher<'_>>,
+    prefix: &str,
+    depth: usize,
+) -> RestoreResult<usize> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    let base = base.and_then(|h| store.read_object(&h).ok());
+    let base = match &base {
+        Some(Object::Tree(t)) => Some(t),
+        _ => None,
+    };
+    let mut total = 0;
+    for entry in tree.entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let old = base.and_then(|t| {
+            t.entries
+                .binary_search_by(|e| e.name.cmp(&entry.name))
+                .ok()
+                .map(|i| &t.entries[i])
+        });
+        if old.is_some_and(|e| e.mode == entry.mode && e.object_hash == entry.object_hash) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let path = if opts.sparse_patterns.is_none() {
+            String::new()
+        } else if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.mode == EntryMode::Tree {
+            if sparse.is_none_or(|m| m.could_match_descendant(&path)) {
+                total += count_restore_files(
+                    store,
+                    entry.object_hash,
+                    old.filter(|e| e.mode == EntryMode::Tree)
+                        .map(|e| e.object_hash),
+                    opts,
+                    sparse,
+                    &path,
+                    depth + 1,
+                )?;
+            }
+        } else if sparse.is_none_or(|m| m.matches(&path, false)) {
+            total += 1;
+        }
+    }
+    Ok(total)
 }
 
 /// Materialise `tree_hash` into `root` as a working tree.
@@ -314,6 +504,8 @@ pub fn restore_tree_to_worktree(
         None,
         &sequential_read_chunks,
         None,
+        None,
+        true,
     )
 }
 
@@ -351,7 +543,9 @@ pub fn restore_tree_to_worktree(
 /// third-party `hash_chunks` already could on the write side.
 /// `kit-core` has no thread-pool dependency of its own — it stays
 /// usable from wasm targets, which have no OS threads — so the fan-out
-/// decision lives with the caller instead of living in this function.
+/// decision lives with the caller instead of living in this function. (The
+/// check of skipped subtrees below spreads its directory reads over a few
+/// scoped threads of its own where the target has them.)
 /// Reading each chunk (open + integrity-verify + decode) is independent
 /// of every other chunk in a batch, so `kit-bin`'s native
 /// checkout/clone/reset/restore paths pass a rayon-backed `read_chunks`,
@@ -371,9 +565,12 @@ pub fn restore_tree_to_worktree(
 /// necessarily mirror `base_tree`).
 ///
 /// With `opts.clean`, the sweep visits only the directories the restore
-/// enters, so a skipped subtree is not swept. The caller must also have
-/// proved that the worktree holds no untracked path outside the ignore rules,
-/// as the safety gate of a destructive restore does.
+/// enters, so a skipped subtree is not swept. Before it sweeps or writes
+/// anything, the restore walks each subtree it will skip and refuses with
+/// [`RestoreError::UnsweptPath`] when the sweep would have removed a path
+/// there: an untracked file or symlink outside the ignore rules. The safety
+/// gate of a destructive restore refuses such a path first, so after it the
+/// walk finds none.
 ///
 /// # Errors
 /// Same variants as [`restore_tree_to_worktree`], plus
@@ -424,6 +621,39 @@ pub fn restore_tree_to_worktree_observed<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        if opts.sparse_patterns.is_some() {
+            None
+        } else {
+            base_tree
+        },
+        read_chunks,
+        observed,
+        None,
+        true,
+    )
+}
+
+/// Restore files and report completed files out of the selected entries.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_tree_to_worktree_progress<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     let base = if opts.sparse_patterns.is_some() {
         None
     } else {
@@ -438,6 +668,55 @@ where
         base,
         read_chunks,
         observed,
+        Some(progress),
+        true,
+    )
+}
+
+/// [`restore_tree_to_worktree_progress`] for a caller whose safety gate has
+/// already refused every untracked path outside the ignore rules in the whole
+/// worktree, so the restore does not walk the directories it skips to look for
+/// one again.
+///
+/// A path that appeared after the gate stays where it is: the restore never
+/// enters a directory it skips, so it does not remove it. Without this
+/// guarantee from the caller, use [`restore_tree_to_worktree_progress`]. With
+/// `progress` `None`, no completed file is reported, as in
+/// [`restore_tree_to_worktree_observed`].
+///
+/// # Errors
+/// Same as [`restore_tree_to_worktree_progress`], except
+/// [`RestoreError::UnsweptPath`], which it never returns.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_tree_to_worktree_gated<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: Option<&mut dyn FnMut(usize, usize)>,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    let base = if opts.sparse_patterns.is_some() {
+        None
+    } else {
+        base_tree
+    };
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        base,
+        read_chunks,
+        observed,
+        progress,
+        false,
     )
 }
 
@@ -456,22 +735,56 @@ fn restore_tree_to_worktree_impl<F>(
     base_tree: Option<Hash>,
     read_chunks: &F,
     observed: Option<&mut Vec<worktree::StatObservation>>,
+    mut progress: Option<&mut dyn FnMut(usize, usize)>,
+    check_skipped: bool,
 ) -> RestoreResult<RestoreReport>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    // Load the root-level ignore list. Missing = empty list.
-    let ignore_list = match ignore::load(root) {
-        Ok(il) => il,
-        Err(_) => IgnoreList::new(),
+    check_tree_size(store, *tree)?;
+    // Only a clean sweep uses ignore rules. A non-clean restore must also
+    // be able to recover a malformed ignore file.
+    let ignore_list = if opts.clean {
+        ignore::load(root).map_err(|e| RestoreError::Io(io::Error::other(e)))?
+    } else {
+        IgnoreList::new()
     };
+    if opts.clean
+        && check_skipped
+        && let Some(base) = base_tree
+    {
+        let mut skipped = Vec::new();
+        skipped_subtrees(store, *tree, base, root, "", 0, &mut skipped)?;
+        check_unswept(store, skipped, &ignore_list)?;
+    }
+    let sparse = opts.sparse_patterns.as_deref().map(SparseMatcher::new);
+    let sparse = sparse.as_ref();
+    let mut total = 0;
+    let mut case_rename_sources = std::collections::HashMap::new();
+    check_nested_repositories_inner(
+        store,
+        *tree,
+        root,
+        opts,
+        sparse,
+        base_tree,
+        "",
+        0,
+        progress.is_some().then_some(&mut total),
+        &mut case_rename_sources,
+    )?;
     fs::create_dir_all(root)?;
+    if let Some(callback) = progress.as_mut() {
+        callback(0, total);
+    }
     let mut report = RestoreReport::default();
+    let mut last_progress = std::time::Instant::now();
     restore_tree_to_worktree_inner(
         store,
         *tree,
         root,
         opts,
+        sparse,
         "",
         &ignore_list,
         &mut report,
@@ -480,7 +793,17 @@ where
         base_tree,
         read_chunks,
         observed,
+        &mut progress,
+        total,
+        &mut last_progress,
+        &case_rename_sources,
     )?;
+    if let Some(callback) = progress.as_mut() {
+        callback(
+            (report.files_written + report.symlinks_written) as usize,
+            total,
+        );
+    }
     Ok(report)
 }
 
@@ -490,6 +813,7 @@ fn restore_tree_to_worktree_inner<F>(
     tree_hash: Hash,
     target_dir: &Path,
     options: &RestoreOptions,
+    sparse: Option<&SparseMatcher<'_>>,
     path_prefix: &str,
     ignore: &IgnoreList,
     report: &mut RestoreReport,
@@ -498,6 +822,10 @@ fn restore_tree_to_worktree_inner<F>(
     base_tree: Option<Hash>,
     read_chunks: &F,
     mut observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: &mut Option<&mut dyn FnMut(usize, usize)>,
+    total: usize,
+    last_progress: &mut std::time::Instant,
+    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -505,6 +833,15 @@ where
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
+    let scoped;
+    let ignore = if options.clean {
+        scoped = ignore
+            .load_directory(target_dir)
+            .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+        &scoped
+    } else {
+        ignore
+    };
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -519,13 +856,9 @@ where
     };
 
     if options.clean {
-        clean_directory(
-            target_dir,
-            &tree.entries,
-            options.sparse_patterns.as_deref(),
-            path_prefix,
-            Some(ignore),
-        )?;
+        clean_directory(target_dir, &tree.entries, sparse, path_prefix, Some(ignore))?;
+    } else {
+        remove_stale_temps(target_dir, &tree.entries, case_rename_sources);
     }
 
     for entry in &tree.entries {
@@ -536,6 +869,8 @@ where
         let base_entry = base_entries.get(entry.name.as_slice());
         // Identical to what the worktree already holds (see
         // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
+        // A clean restore checked the subtree it does not sweep before it
+        // started ([`check_unswept`]).
         if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
             continue;
         }
@@ -549,11 +884,13 @@ where
         // them would desync the index from the worktree). Ignore rules only
         // protect *untracked* worktree files during the ignore-aware
         // `clean_directory` sweep below.
+        let case_source = case_rename_sources.get(&full_path);
+        if let Some(source) = case_source {
+            at_path(source.check_tracked(store), &full_path)?;
+        }
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
+                if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
                 let stat = at_path(
@@ -566,6 +903,7 @@ where
                         batch_size,
                         read_chunks,
                         observed.is_some(),
+                        case_source,
                     ),
                     &full_path,
                 )?;
@@ -575,9 +913,7 @@ where
                 }
             }
             EntryMode::Tree => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !could_match_descendant(patterns, &full_path)
-                {
+                if sparse.is_some_and(|m| !m.could_match_descendant(&full_path)) {
                     continue;
                 }
                 let dir_path = target_dir.join(name);
@@ -591,6 +927,7 @@ where
                     entry.object_hash,
                     &dir_path,
                     options,
+                    sparse,
                     &full_path,
                     ignore,
                     report,
@@ -601,20 +938,31 @@ where
                         .map(|b| b.object_hash),
                     read_chunks,
                     observed.as_deref_mut(),
+                    progress,
+                    total,
+                    last_progress,
+                    case_rename_sources,
                 )?;
             }
             EntryMode::Symlink => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
+                if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
                 at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    restore_symlink(store, target_dir, name, entry.object_hash, case_source),
                     &full_path,
                 )?;
                 report.symlinks_written += 1;
             }
+        }
+        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+            if let Some(callback) = progress.as_mut() {
+                callback(
+                    (report.files_written + report.symlinks_written) as usize,
+                    total,
+                );
+            }
+            *last_progress = std::time::Instant::now();
         }
     }
     Ok(())
@@ -632,14 +980,408 @@ where
 /// - [`RestoreError::NotATree`] if `tree_hash` is not a tree object.
 /// - [`RestoreError::InvalidSymlinkTarget`] if a symlink entry's target
 ///   is absolute or contains `..`.
+/// - [`RestoreError::NestedRepository`] if a file or symlink would replace a
+///   directory that holds a nested repository.
 pub fn restore_tree(
     store: &ObjectStore,
     tree_hash: Hash,
     target_dir: &Path,
     options: &RestoreOptions,
 ) -> RestoreResult<()> {
+    check_nested_repositories(store, tree_hash, target_dir, options, None)?;
     fs::create_dir_all(target_dir)?;
-    restore_tree_inner(store, tree_hash, target_dir, options, "")
+    let sparse = options.sparse_patterns.as_deref().map(SparseMatcher::new);
+    restore_tree_inner(store, tree_hash, target_dir, options, sparse.as_ref(), "")
+}
+
+/// Refuse a file or symlink write over a directory holding a repository before
+/// changing the worktree. Callers that change HEAD or the index first must call
+/// this before those changes too. Symlink directories are never followed.
+///
+/// # Errors
+/// Returns a restore error when a target tree cannot be read or a directory
+/// that would be replaced contains repository metadata. A restore also
+/// refuses conflicting path aliases on the destination filesystem.
+pub fn check_nested_repositories(
+    store: &ObjectStore,
+    tree: Hash,
+    root: &Path,
+    options: &RestoreOptions,
+    base: Option<Hash>,
+) -> RestoreResult<()> {
+    check_tree_size(store, tree)?;
+    let sparse = options.sparse_patterns.as_deref().map(SparseMatcher::new);
+    check_nested_repositories_inner(
+        store,
+        tree,
+        root,
+        options,
+        sparse.as_ref(),
+        base,
+        "",
+        0,
+        None,
+        &mut std::collections::HashMap::new(),
+    )
+}
+
+/// Refuse a tree that expands past [`crate::store::MAX_TREE_LEAVES`] files,
+/// before any walk of it allocates or writes.
+fn check_tree_size(store: &ObjectStore, tree: Hash) -> RestoreResult<()> {
+    crate::store::check_tree_leaves(store, tree).map_err(|e| match e {
+        crate::store::StoreError::TreeTooDeep => RestoreError::TreeTooDeep,
+        e => RestoreError::Store(e),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_nested_repositories_inner(
+    store: &ObjectStore,
+    tree: Hash,
+    dir: &Path,
+    options: &RestoreOptions,
+    sparse: Option<&SparseMatcher<'_>>,
+    base: Option<Hash>,
+    prefix: &str,
+    depth: usize,
+    mut count: Option<&mut usize>,
+    case_rename_sources: &mut std::collections::HashMap<String, CaseRenameSource>,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    check_name_collisions(&tree.entries, dir, prefix)?;
+    let base = base.and_then(|hash| match store.read_object(&hash).ok()? {
+        Object::Tree(tree) => Some(tree),
+        _ => None,
+    });
+    let disk_names = directory_names(dir)?;
+    for entry in &tree.entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let target = dir.join(name);
+        if let Some(source) = check_worktree_alias(
+            &tree,
+            base.as_ref(),
+            entry,
+            prefix,
+            &target,
+            disk_names.as_ref(),
+            options,
+        )? {
+            case_rename_sources.insert(name_path(prefix, name), source);
+        }
+        let base_entry = base.as_ref().and_then(|base| tree_entry(base, &entry.name));
+        if base_entry.is_some_and(|e| e.mode == entry.mode && e.object_hash == entry.object_hash) {
+            continue;
+        }
+        let path = name_path(prefix, name);
+        let is_tree = entry.mode == EntryMode::Tree;
+        if sparse.is_some_and(|m| {
+            if is_tree {
+                !m.could_match_descendant(&path)
+            } else {
+                !m.matches(&path, false)
+            }
+        }) {
+            continue;
+        }
+        if !is_tree && let Some(count) = count.as_deref_mut() {
+            *count += 1;
+        }
+        // A non-directory ancestor is replaced by the restore. Its descendants
+        // do not exist yet; following a symlink here would inspect another tree.
+        if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+            if is_tree {
+                check_new_tree_names(store, entry.object_hash, dir, &path, depth + 1)?;
+            }
+            if is_tree && let Some(count) = count.as_deref_mut() {
+                *count += count_restore_files(
+                    store,
+                    entry.object_hash,
+                    base_entry
+                        .filter(|e| e.mode == EntryMode::Tree)
+                        .map(|e| e.object_hash),
+                    options,
+                    sparse,
+                    &path,
+                    depth + 1,
+                )?;
+            }
+            continue;
+        }
+        if is_tree {
+            check_nested_repositories_inner(
+                store,
+                entry.object_hash,
+                &target,
+                options,
+                sparse,
+                base_entry
+                    .filter(|e| e.mode == EntryMode::Tree)
+                    .map(|e| e.object_hash),
+                &path,
+                depth + 1,
+                count.as_deref_mut(),
+                case_rename_sources,
+            )?;
+        } else if let Some(entry) = nested_repository(&target)? {
+            return Err(RestoreError::NestedRepository(name_path(&path, &entry)));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CaseRenameSource {
+    path: PathBuf,
+    metadata: fs::Metadata,
+    tracked_mode: EntryMode,
+    tracked_hash: Hash,
+}
+
+impl CaseRenameSource {
+    fn check_tracked(&self, store: &ObjectStore) -> RestoreResult<()> {
+        let matches = if self.metadata.is_symlink() {
+            let target = self.path.read_link()?;
+            self.tracked_mode == EntryMode::Symlink
+                && matches!(store.read_object(&self.tracked_hash)?, Object::Blob(blob)
+                    if blob.data == target.as_os_str().as_encoded_bytes())
+        } else {
+            let (metadata, equal) =
+                worktree::file_content_eq(store, &self.tracked_hash, &self.path)
+                    .map_err(io::Error::other)?;
+            equal && worktree::entry_mode_from_file_metadata(&metadata) == self.tracked_mode
+        };
+        if matches {
+            return Ok(());
+        }
+        Err(io::Error::other("case-only source changed before checkout").into())
+    }
+
+    fn unchanged_at(&self, path: &Path, check_ctime: bool) -> io::Result<bool> {
+        let before = &self.metadata;
+        let now = path.symlink_metadata()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            // A content edit can preserve length and mtime. Check ctime
+            // before Kit moves the source, since the move updates ctime.
+            let identity = |metadata: &fs::Metadata| {
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.mode(),
+                    metadata.len(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    check_ctime.then_some((metadata.ctime(), metadata.ctime_nsec())),
+                )
+            };
+            Ok(identity(before) == identity(&now))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (before, now, check_ctime);
+            Ok(false)
+        }
+    }
+}
+
+fn check_worktree_alias(
+    tree: &Tree,
+    base: Option<&Tree>,
+    entry: &TreeEntry,
+    prefix: &str,
+    target: &Path,
+    names: Option<&std::collections::HashSet<std::ffi::OsString>>,
+    options: &RestoreOptions,
+) -> RestoreResult<Option<CaseRenameSource>> {
+    let Some(names) = names.filter(|names| !names.contains(target.file_name().unwrap_or_default()))
+    else {
+        return Ok(None);
+    };
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return Ok(None);
+    };
+    if entry.mode != EntryMode::Tree
+        && !options.clean
+        && options.sparse_patterns.is_none()
+        && let Some(base) = base
+        && let Some(parent) = target.parent()
+        && let Some(source) = case_rename_source(parent, names, base, tree, target, &metadata)
+    {
+        return Ok(Some(source));
+    }
+
+    let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+    let path = name_path(prefix, name);
+    if entry.mode == EntryMode::Tree && options.clean && options.sparse_patterns.is_some() {
+        return Err(RestoreError::SparseDirectoryAlias(path));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "restore path '{path}' has a different spelling on disk; rename it to match the tree"
+        ),
+    )
+    .into())
+}
+
+/// Allow an alias only when it names an exact tracked file that the target
+/// drops. Use the filesystem's spelling instead of folding Unicode in Kit.
+#[cfg(unix)]
+fn case_rename_source(
+    dir: &Path,
+    names: &std::collections::HashSet<std::ffi::OsString>,
+    base: &Tree,
+    target: &Tree,
+    destination: &Path,
+    metadata: &fs::Metadata,
+) -> Option<CaseRenameSource> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if !(metadata.is_file() || metadata.is_symlink()) {
+        return None;
+    }
+    let same_entry = |name: &std::ffi::OsStr| {
+        fs::symlink_metadata(dir.join(name))
+            .is_ok_and(|other| other.dev() == metadata.dev() && other.ino() == metadata.ino())
+    };
+    // A canonical regular-file path can name the exact directory entry,
+    // even when another entry is a hard link to it. Never follow a symlink.
+    let canonical = metadata
+        .is_file()
+        .then(|| destination.canonicalize().ok())
+        .flatten();
+    let exact = canonical
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| names.get(name))
+        .filter(|name| same_entry(name));
+    let source = exact.or_else(|| {
+        // An alias must name an entry in this directory. Hard links in a
+        // different directory cannot make the spelling ambiguous here.
+        let mut matches = names.iter().filter(|name| same_entry(name));
+        let first = matches.next()?;
+        (metadata.nlink() == 1 || matches.next().is_none()).then_some(first)
+    })?;
+    let name = source.to_str()?.as_bytes();
+    let old = tree_entry(base, name)?;
+    if old.mode == EntryMode::Tree || tree_entry(target, name).is_some() {
+        return None;
+    }
+    Some(CaseRenameSource {
+        path: dir.join(source),
+        metadata: metadata.clone(),
+        tracked_mode: old.mode,
+        tracked_hash: old.object_hash,
+    })
+}
+
+#[cfg(not(unix))]
+fn case_rename_source(
+    _: &Path,
+    _: &std::collections::HashSet<std::ffi::OsString>,
+    _: &Tree,
+    _: &Tree,
+    _: &Path,
+    _: &fs::Metadata,
+) -> Option<CaseRenameSource> {
+    None
+}
+
+fn directory_names(
+    dir: &Path,
+) -> io::Result<Option<std::collections::HashSet<std::ffi::OsString>>> {
+    if !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(None);
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<_>>()
+            .map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+// A missing directory, or a non-directory to replace, has no disk names to
+// inspect. Check all its descendant names against the nearest real directory's
+// filesystem without following the path that the restore will replace.
+fn check_new_tree_names(
+    store: &ObjectStore,
+    tree: Hash,
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    check_name_collisions(&tree.entries, dir, prefix)?;
+    for entry in tree.entries {
+        if entry.mode == EntryMode::Tree && TreeEntry::validate_name(&entry.name) {
+            let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+            check_new_tree_names(
+                store,
+                entry.object_hash,
+                dir,
+                &name_path(prefix, name),
+                depth + 1,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// Probe only potentially colliding names, on the destination filesystem. The
+// private directory is removed before any worktree path is changed. This also
+// catches normalization aliases on filesystems that equate Unicode spellings.
+fn check_name_collisions(entries: &[TreeEntry], dir: &Path, prefix: &str) -> RestoreResult<()> {
+    let mut folded = std::collections::HashSet::new();
+    let ambiguous = entries
+        .iter()
+        .any(|entry| !entry.name.is_ascii() || !folded.insert(entry.name.to_ascii_lowercase()));
+    if !ambiguous {
+        return Ok(());
+    }
+    let parent = dir
+        .ancestors()
+        .find(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "restore parent does not exist"))?;
+    let probe = tempfile::tempdir_in(parent)?;
+    for entry in entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        match fs::create_dir(probe.path().join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "restore path '{}' aliases another tree entry on this filesystem",
+                        name_path(prefix, name)
+                    ),
+                )
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn restore_tree_inner(
@@ -647,6 +1389,7 @@ fn restore_tree_inner(
     tree_hash: Hash,
     target_dir: &Path,
     options: &RestoreOptions,
+    sparse: Option<&SparseMatcher<'_>>,
     path_prefix: &str,
 ) -> RestoreResult<()> {
     let obj = store.read_object(&tree_hash)?;
@@ -655,13 +1398,7 @@ fn restore_tree_inner(
     };
 
     if options.clean {
-        clean_directory(
-            target_dir,
-            &tree.entries,
-            options.sparse_patterns.as_deref(),
-            path_prefix,
-            None,
-        )?;
+        clean_directory(target_dir, &tree.entries, sparse, path_prefix, None)?;
     }
 
     for entry in &tree.entries {
@@ -676,9 +1413,7 @@ fn restore_tree_inner(
         };
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
+                if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
                 at_path(
@@ -693,9 +1428,7 @@ fn restore_tree_inner(
                 )?;
             }
             EntryMode::Tree => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !could_match_descendant(patterns, &full_path)
-                {
+                if sparse.is_some_and(|m| !m.could_match_descendant(&full_path)) {
                     continue;
                 }
                 let dir_path = target_dir.join(name);
@@ -704,16 +1437,21 @@ fn restore_tree_inner(
                 if !dir_meta.is_dir() {
                     return Err(RestoreError::NotADirectory(dir_path));
                 }
-                restore_tree_inner(store, entry.object_hash, &dir_path, options, &full_path)?;
+                restore_tree_inner(
+                    store,
+                    entry.object_hash,
+                    &dir_path,
+                    options,
+                    sparse,
+                    &full_path,
+                )?;
             }
             EntryMode::Symlink => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
+                if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
                 at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    restore_symlink(store, target_dir, name, entry.object_hash, None),
                     &full_path,
                 )?;
             }
@@ -744,7 +1482,7 @@ fn restore_blob(
     let obj = store.read_object(&blob_hash)?;
     match obj {
         Object::Blob(b) => {
-            write_file_atomic(dir, name, &b.data, executable, false)?;
+            write_file_atomic(dir, name, &b.data, executable, false, None)?;
         }
         Object::ChunkedBlob(cb) => {
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
@@ -764,7 +1502,7 @@ fn restore_blob(
             })();
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, None)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
@@ -797,13 +1535,14 @@ fn restore_blob_with<F>(
     batch_size: usize,
     read_chunks: &F,
     observe: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<Option<StatFields>>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
     let obj = store.read_object(&blob_hash)?;
     match obj {
-        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe),
+        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe, case_source),
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first.
@@ -826,7 +1565,7 @@ where
             };
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
             Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
         }
         _ => Err(RestoreError::NotABlob),
@@ -873,8 +1612,14 @@ fn finish_or_discard_tmp(
     tmp_path: &Path,
     final_path: &Path,
     executable: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<()> {
-    let result = result.and_then(|()| Ok(finish_atomic_write(tmp_path, final_path, executable)?));
+    let result = result.and_then(|()| {
+        if executable {
+            apply_executable_bit(tmp_path)?;
+        }
+        Ok(publish_restore_temp(tmp_path, final_path, case_source)?)
+    });
     if result.is_err() {
         let _ = fs::remove_file(tmp_path);
     }
@@ -1033,6 +1778,7 @@ fn restore_symlink(
     dir: &Path,
     name: &str,
     blob_hash: Hash,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<()> {
     let obj = store.read_object(&blob_hash)?;
     let Object::Blob(b) = obj else {
@@ -1051,8 +1797,7 @@ fn restore_symlink(
             Err(e) => return Err(e.into()),
         }
     };
-    let result =
-        prepare_path_for_rename(&final_path).and_then(|()| fs::rename(&tmp_path, &final_path));
+    let result = publish_restore_temp(&tmp_path, &final_path, case_source);
     if result.is_err() {
         let _ = fs::remove_file(&tmp_path);
     }
@@ -1101,13 +1846,14 @@ fn write_file_atomic(
     data: &[u8],
     executable: bool,
     observe: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<Option<StatFields>> {
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     let result = tmp.write_all(data).map_err(RestoreError::from);
     let written = if observe { tmp.metadata().ok() } else { None };
     #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
     drop(tmp);
-    finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+    finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
     Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
 }
 
@@ -1134,17 +1880,89 @@ fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf,
     }
 }
 
-/// Apply the executable bit (if requested) and atomically rename the
-/// tmp file from [`create_tmp_for_write`] into its final path. The tmp
-/// file's handle must already be closed/dropped before calling this
-/// (renaming an open handle is unreliable on some platforms).
-fn finish_atomic_write(tmp_path: &Path, final_path: &Path, executable: bool) -> io::Result<()> {
-    if executable {
-        apply_executable_bit(tmp_path)?;
+const CASE_RENAME_BACKUP_PREFIX: &str = ".kit-restore-backup.";
+
+/// Publish a fully prepared file or symlink. Move a case-only source aside
+/// first so the destination gets its requested spelling. If publication
+/// fails, put the source back or report where it was saved.
+fn publish_restore_temp(
+    tmp_path: &Path,
+    final_path: &Path,
+    case_source: Option<&CaseRenameSource>,
+) -> io::Result<()> {
+    let Some(source) = case_source else {
+        prepare_path_for_rename(final_path)?;
+        return fs::rename(tmp_path, final_path);
+    };
+    let parent = source.path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "restore source has no parent")
+    })?;
+    // Add skips the scratch name. The stale sweep only visits directories
+    // in the target tree, so it cannot remove a file saved in this directory.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(CASE_RENAME_BACKUP_PREFIX);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(fs::Permissions::from_mode(0o700));
     }
-    prepare_path_for_rename(final_path)?;
-    fs::rename(tmp_path, final_path)?;
-    Ok(())
+    let recovery = builder.tempdir_in(parent)?;
+    let backup = recovery.path().join(make_tmp_name());
+    if !source.unchanged_at(&source.path, true)? {
+        return Err(io::Error::other("case-only source changed before checkout"));
+    }
+    move_case_rename_source(&source.path, &backup)?;
+    let recovery = recovery.keep();
+    let result = finish_case_rename(tmp_path, final_path, source, &backup);
+    let _ = fs::remove_dir(recovery);
+    result
+}
+
+fn move_case_rename_source(source: &Path, backup: &Path) -> io::Result<()> {
+    // A directory cannot replace this regular file, even if it raced the
+    // check of the source. A retained backup is always a non-directory.
+    {
+        let _placeholder = fs::File::create_new(backup)?;
+    }
+    fs::rename(source, backup)
+}
+
+fn finish_case_rename(
+    tmp_path: &Path,
+    final_path: &Path,
+    source: &CaseRenameSource,
+    backup: &Path,
+) -> io::Result<()> {
+    if !source.unchanged_at(backup, false).unwrap_or(false) {
+        return Err(io::Error::other(format!(
+            "case-only source changed during checkout. Check for the moved file at {}",
+            backup.display()
+        )));
+    }
+    let result = move_without_replacing(tmp_path, final_path);
+    if let Err(err) = &result
+        && let Err(rollback) = move_without_replacing(backup, &source.path)
+    {
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "{err}. Could not restore the old spelling ({rollback}). Original saved at {}",
+                backup.display()
+            ),
+        ));
+    }
+    let _ = fs::remove_file(backup);
+    result
+}
+
+fn move_without_replacing(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut source = tempfile::TempPath::try_from_path(source)?;
+    // Both paths have owners. A failed move must leave the source in place.
+    source.disable_cleanup(true);
+    source
+        .persist_noclobber(destination)
+        .map_err(|error| error.error)
 }
 
 #[cfg(unix)]
@@ -1197,17 +2015,96 @@ fn ensure_directory(parent: &Path, name: &str) -> io::Result<()> {
     }
 }
 
+/// Clear `final_path` for a rename: remove a directory there, unless it
+/// holds a nested repository ([`nested_repository`]), which fails with a
+/// [`HoldsRepository`] error that [`at_path`] reports as
+/// [`RestoreError::NestedRepository`]. A repository made between the check
+/// and the removal is removed with the directory.
 fn prepare_path_for_rename(final_path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(final_path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(final_path),
+        Ok(meta) if meta.is_dir() => {
+            if let Some(entry) = nested_repository(final_path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::DirectoryNotEmpty,
+                    HoldsRepository(entry),
+                ));
+            }
+            fs::remove_dir_all(final_path)
+        }
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
 }
 
+/// A directory a restore would replace holds a nested repository, whose
+/// `.kit` or `.git` entry is at this path under the directory.
+#[derive(Debug, thiserror::Error)]
+#[error("directory holds a nested repository at '{0}'")]
+struct HoldsRepository(String);
+
+/// The first `.kit` or `.git` entry, of any type, found in `dir` or a
+/// directory under it, as a `/`-separated path relative to `dir`: the mark
+/// of a nested repository that a restore must not remove. Symlinks are not
+/// followed.
+///
+/// # Errors
+/// An I/O error reading `dir` or a directory under it.
+pub fn nested_repository(dir: &Path) -> io::Result<Option<String>> {
+    // Breadth first, so the shallowest repository is named.
+    let mut dirs = std::collections::VecDeque::from([(dir.to_path_buf(), String::new())]);
+    while let Some((dir, prefix)) = dirs.pop_front() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let path = name_path(&prefix, &name);
+            if is_repository_name(&name) {
+                return Ok(Some(path));
+            }
+            if entry.file_type()?.is_dir() {
+                dirs.push_back((entry.path(), path));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Prefix of every restore temporary name, `<prefix>.<pid>.<counter>`.
 const TMP_PREFIX: &str = ".kit-restore-tmp";
+
+/// Remove from the worktree directory `dir` the regular files with a restore
+/// temporary name of another process. Keep names in the target tree and
+/// tracked sources of case-only renames.
+/// A worktree restore holds the worktree, so such a file is one a restore
+/// stopped by a signal left. A file that cannot be removed only stays, and a
+/// symlink a stopped symlink restore left is not touched.
+fn remove_stale_temps(
+    dir: &Path,
+    entries: &[TreeEntry],
+    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
+) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    let own = format!("{TMP_PREFIX}.{}.", process::id());
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_restore_temp_name(name)
+            && !name.starts_with(&own)
+            && !entries.iter().any(|e| e.name == name.as_bytes())
+            && !case_rename_sources
+                .values()
+                .any(|source| source.path == entry.path())
+            && entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
 
 /// A short temporary name for a restore write. It does not contain the
 /// file name, so it stays within the file system's name limit for any
@@ -1217,6 +2114,288 @@ fn make_tmp_name() -> String {
     let pid = process::id();
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{TMP_PREFIX}.{pid}.{counter}")
+}
+
+/// The subtrees a clean restore of `tree_hash` over `base_tree` skips, as
+/// [`restore_tree_to_worktree_inner`] skips them, pushed onto `skipped` for
+/// [`check_unswept`]. `dir` is the worktree directory of `tree_hash`.
+fn skipped_subtrees(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Hash,
+    dir: &Path,
+    path_prefix: &str,
+    depth: usize,
+    skipped: &mut Vec<Unswept>,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+        return Err(RestoreError::NotATree);
+    };
+    // As the restore does, an unreadable or non-tree base skips nothing.
+    let Ok(Object::Tree(base)) = store.read_object(&base_tree) else {
+        return Ok(());
+    };
+    for entry in &tree.entries {
+        if entry.mode != EntryMode::Tree || !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let Some(base_entry) = tree_entry(&base, &entry.name).filter(|b| b.mode == EntryMode::Tree)
+        else {
+            continue;
+        };
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let full_path = name_path(path_prefix, name);
+        // Only a real directory holds anything the sweep would visit; the
+        // walk never follows a symlink out of the worktree.
+        let sub_dir = dir.join(name);
+        if !fs::symlink_metadata(&sub_dir).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if base_entry.object_hash == entry.object_hash {
+            skipped.push(Unswept {
+                tree: entry.object_hash,
+                dir: sub_dir,
+                path: full_path,
+                depth: depth + 1,
+            });
+        } else {
+            skipped_subtrees(
+                store,
+                entry.object_hash,
+                base_entry.object_hash,
+                &sub_dir,
+                &full_path,
+                depth + 1,
+                skipped,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The entry of `tree` named `name`. A decoded tree's entries are sorted by
+/// name with no duplicates.
+fn tree_entry<'t>(tree: &'t crate::object::Tree, name: &[u8]) -> Option<&'t TreeEntry> {
+    tree.entries
+        .binary_search_by(|entry| entry.name.as_slice().cmp(name))
+        .ok()
+        .map(|i| &tree.entries[i])
+}
+
+/// A tracked directory a clean restore skips: the worktree directory `dir`
+/// of the tree `tree`, at the repository-relative `path` and tree `depth`.
+struct Unswept {
+    tree: Hash,
+    dir: PathBuf,
+    path: String,
+    depth: usize,
+}
+
+/// Upper bound on the threads [`check_unswept`] reads directories with.
+const MAX_WALK_THREADS: usize = 8;
+
+/// Refuse when the ignore-aware sweep of a clean restore would remove a path
+/// under one of the `skipped` directories: an untracked file or symlink
+/// outside the ignore rules, at any depth. A directory is judged by what it
+/// holds, as the sweep keeps one that holds ignored files, and one that
+/// holds a nested repository is left whole, as the sweep leaves it.
+///
+/// The walk goes one tree level at a time, each level's directories spread
+/// over up to [`MAX_WALK_THREADS`] threads, the calling thread among them; a
+/// target without threads (wasm32) walks on the calling thread alone. The
+/// refusal names the first path found in the first directory, in level
+/// order, that holds one.
+fn check_unswept(
+    store: &ObjectStore,
+    skipped: Vec<Unswept>,
+    ignore: &IgnoreList,
+) -> RestoreResult<()> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WALK_THREADS);
+    let mut level = skipped;
+    while !level.is_empty() {
+        let workers = threads.min(level.len());
+        let results: Vec<RestoreResult<Vec<Unswept>>> = if workers <= 1 {
+            let mut results = Vec::with_capacity(level.len());
+            for dir in &level {
+                let result = check_unswept_dir(store, dir, ignore);
+                let failed = result.is_err();
+                results.push(result);
+                if failed {
+                    break;
+                }
+            }
+            results
+        } else {
+            check_level_in_parallel(store, &level, ignore, workers)
+        };
+        let mut next = Vec::new();
+        for result in results {
+            next.extend(result?);
+        }
+        level = next;
+    }
+    Ok(())
+}
+
+/// [`check_unswept_dir`] of each of `level` on `workers` threads, the
+/// calling thread one of them, the results in `level` order. After an error
+/// the threads take no more directories, so every directory before the
+/// first error has its result.
+fn check_level_in_parallel(
+    store: &ObjectStore,
+    level: &[Unswept],
+    ignore: &IgnoreList,
+    workers: usize,
+) -> Vec<RestoreResult<Vec<Unswept>>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let work = || {
+        let mut done = Vec::new();
+        while !failed.load(Ordering::Relaxed) {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(dir) = level.get(i) else {
+                break;
+            };
+            let result = check_unswept_dir(store, dir, ignore);
+            if result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            done.push((i, result));
+        }
+        done
+    };
+    let mut done: Vec<(usize, RestoreResult<Vec<Unswept>>)> = std::thread::scope(|scope| {
+        // A thread that cannot be spawned leaves its share to the others;
+        // the calling thread works too, so the level is always finished.
+        let handles: Vec<_> = (1..workers)
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        let mut done = work();
+        for handle in handles {
+            done.extend(
+                handle
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            );
+        }
+        done
+    });
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+/// Check one skipped directory: refuse with [`RestoreError::UnsweptPath`]
+/// on an untracked path the sweep would remove from it or from an untracked
+/// directory under it, and return its tracked subdirectories to check next.
+fn check_unswept_dir(
+    store: &ObjectStore,
+    unswept: &Unswept,
+    ignore: &IgnoreList,
+) -> RestoreResult<Vec<Unswept>> {
+    if unswept.depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&unswept.tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    let mut subdirs = Vec::new();
+    // Untracked directories, walked without recursion: an untracked
+    // directory can nest deeper than any tree.
+    let mut untracked: Vec<(PathBuf, String, bool)> = Vec::new();
+    for_each_name(&unswept.dir, true, |entry, name, is_dir| {
+        match tree_entry(&tree, name.as_bytes()) {
+            Some(tracked) if tracked.mode == EntryMode::Tree && is_dir => {
+                subdirs.push(Unswept {
+                    tree: tracked.object_hash,
+                    dir: entry.path(),
+                    path: name_path(&unswept.path, name),
+                    depth: unswept.depth + 1,
+                });
+            }
+            Some(_) => {}
+            None => untracked.push((entry.path(), name_path(&unswept.path, name), is_dir)),
+        }
+    })?;
+    let mut lists = std::collections::HashMap::new();
+    while let Some((path, full_path, is_dir)) = untracked.pop() {
+        let parent = path.parent().unwrap_or(&unswept.dir);
+        if !lists.contains_key(parent) {
+            let local = ignore
+                .load_directory(parent)
+                .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            lists.insert(parent.to_path_buf(), local);
+        }
+        let local = &lists[parent];
+        if local.is_ignored_with_ancestors(&full_path, is_dir) {
+            continue;
+        }
+        if !is_dir {
+            return Err(RestoreError::UnsweptPath(full_path));
+        }
+        let mut children = Vec::new();
+        let holds_repository = for_each_name(&path, false, |entry, name, child_is_dir| {
+            children.push((entry.path(), name_path(&full_path, name), child_is_dir));
+        })?;
+        // The sweep leaves a nested repository whole ([`sweep_unlisted_dir`]).
+        if !holds_repository {
+            untracked.append(&mut children);
+        }
+    }
+    Ok(subdirs)
+}
+
+/// Call `each` with every entry of `dir` the walk considers, its name, and
+/// whether it is a real directory: every UTF-8 name but `.kit` and `.git`,
+/// which the safety gate leaves out at any depth. In a directory the tree
+/// lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
+/// ([`clean_directory`]); in one it does not, it keeps neither
+/// ([`sweep_unlisted_dir`]). A missing `dir` has none. Returns whether `dir`
+/// holds a `.kit` or `.git` entry.
+fn for_each_name(
+    dir: &Path,
+    listed: bool,
+    mut each: impl FnMut(&fs::DirEntry, &str, bool),
+) -> RestoreResult<bool> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(RestoreError::Io(e)),
+    };
+    let mut holds_repository = false;
+    for entry in read {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        // The safety gate and `sweep_unlisted_dir` skip a name that is not
+        // UTF-8. `clean_directory` refuses one, but only in a directory the
+        // restore enters, and the walk is of directories it skips.
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if is_repository_name(name) {
+            holds_repository = true;
+            continue;
+        }
+        if listed && (name == ".kitignore" || name == ".gitignore") {
+            continue;
+        }
+        let is_dir = entry.file_type()?.is_dir();
+        each(&entry, name, is_dir);
+    }
+    Ok(holds_repository)
+}
+
+/// `name` under the repository-relative directory `prefix`.
+fn name_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
 }
 
 /// Whether `name` is exactly a restore temporary name: the prefix, then
@@ -1242,9 +2421,17 @@ pub fn is_restore_temp_name(name: &str) -> bool {
 /// Attach `path` to an I/O error from `result`.
 fn at_path<T>(result: RestoreResult<T>, path: &str) -> RestoreResult<T> {
     result.map_err(|e| match e {
-        RestoreError::Io(source) => RestoreError::File {
-            path: path.to_string(),
-            source,
+        RestoreError::Io(source) => match source
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<HoldsRepository>())
+        {
+            Some(HoldsRepository(entry)) => {
+                RestoreError::NestedRepository(format!("{path}/{entry}"))
+            }
+            None => RestoreError::File {
+                path: path.to_string(),
+                source,
+            },
         },
         other => other,
     })
@@ -1260,10 +2447,13 @@ fn at_path<T>(result: RestoreResult<T>, path: &str) -> RestoreResult<T> {
 /// matching the ignore list are additionally preserved (ancestor-aware,
 /// so an untracked file *under* an ignored directory survives too), and
 /// `.gitignore` is preserved as well.
+///
+/// An untracked directory is swept by [`sweep_unlisted_dir`], which leaves a
+/// nested repository inside it.
 fn clean_directory(
     target_dir: &Path,
     tree_entries: &[TreeEntry],
-    sparse_patterns: Option<&[SparsePattern]>,
+    sparse: Option<&SparseMatcher<'_>>,
     path_prefix: &str,
     ignore: Option<&IgnoreList>,
 ) -> RestoreResult<()> {
@@ -1272,7 +2462,6 @@ fn clean_directory(
         is_dir: bool,
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
-
     let read = match fs::read_dir(target_dir) {
         Ok(r) => r,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1285,7 +2474,7 @@ fn clean_directory(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        if name_str.eq_ignore_ascii_case(".kit") || name_str.eq_ignore_ascii_case(".git") {
+        if is_repository_name(&name_str) {
             continue;
         }
         if name_str == ".kitignore" {
@@ -1321,9 +2510,9 @@ fn clean_directory(
         {
             continue;
         }
-        if let Some(patterns) = sparse_patterns {
-            let allow = matches_sparse(patterns, &full_path, is_dir)
-                || (is_dir && could_match_descendant(patterns, &full_path));
+        if let Some(matcher) = sparse {
+            let allow = matcher.matches(&full_path, is_dir)
+                || (is_dir && matcher.could_match_descendant(&full_path));
             if !allow {
                 continue;
             }
@@ -1334,20 +2523,18 @@ fn clean_directory(
         });
     }
 
+    let no_ignore_rules = IgnoreList::new();
     for item in to_delete {
         let path = target_dir.join(&item.name);
-        if item.is_dir
-            && let Some(ignore) = ignore
-        {
-            // Keep ignored descendants and the directories that hold them.
+        if item.is_dir {
+            // Keep ignored descendants, nested repositories and the
+            // directories that hold them.
             let prefix = if path_prefix.is_empty() {
                 item.name.clone()
             } else {
                 format!("{path_prefix}/{}", item.name)
             };
-            sweep_unlisted_dir(&path, &prefix, ignore);
-        } else if item.is_dir {
-            let _ = fs::remove_dir_all(&path);
+            sweep_unlisted_dir(&path, &prefix, ignore.unwrap_or(&no_ignore_rules), sparse);
         } else {
             let _ = fs::remove_file(&path);
         }
@@ -1355,14 +2542,43 @@ fn clean_directory(
     Ok(())
 }
 
+/// Whether `name` is a repository's metadata directory or file, `.kit` or
+/// `.git`, ASCII case-insensitively. A `.git` file is a worktree's or a
+/// submodule's link to its repository.
+fn is_repository_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git")
+}
+
 /// Remove everything under `dir` (repo-relative `prefix`) that the ignore
 /// rules do not match, then `dir` itself if nothing is left. A symlink is
 /// removed, never followed.
-fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
+///
+/// A directory that holds a `.kit` or `.git` entry of any type is a nested
+/// repository, and the sweep leaves it and everything in it, as `git clean
+/// -d` does without a second `-f`.
+fn sweep_unlisted_dir(
+    dir: &Path,
+    prefix: &str,
+    ignore: &IgnoreList,
+    sparse: Option<&SparseMatcher<'_>>,
+) {
+    let Ok(local) = ignore.load_directory(dir) else {
+        return;
+    };
+    let ignore = &local;
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
-    for entry in read.flatten() {
+    let Ok(entries) = read.collect::<io::Result<Vec<_>>>() else {
+        return;
+    };
+    if entries
+        .iter()
+        .any(|entry| entry.file_name().to_str().is_some_and(is_repository_name))
+    {
+        return;
+    }
+    for entry in entries {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -1373,8 +2589,14 @@ fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
         if ignore.is_ignored_with_ancestors(&rel, meta.is_dir()) {
             continue;
         }
+        if sparse.is_some_and(|matcher| {
+            !(matcher.matches(&rel, meta.is_dir())
+                || (meta.is_dir() && matcher.could_match_descendant(&rel)))
+        }) {
+            continue;
+        }
         if meta.is_dir() {
-            sweep_unlisted_dir(&entry.path(), &rel, ignore);
+            sweep_unlisted_dir(&entry.path(), &rel, ignore, sparse);
         } else {
             let _ = fs::remove_file(entry.path());
         }
@@ -1406,6 +2628,287 @@ mod tests {
     fn put_tree_with(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn restore_refuses_case_aliases_before_writing_any_tracked_file() {
+        let (_repo, store) = fresh_store();
+        for (existing, nested) in [(false, false), (true, false), (false, true), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            fs::write(dir.path().join("probe"), b"probe").unwrap();
+            if !dir.path().join("PROBE").exists() {
+                return;
+            }
+            fs::remove_file(dir.path().join("probe")).unwrap();
+            fs::write(dir.path().join("aaa"), b"keep").unwrap();
+            let target = if nested {
+                dir.path().join("new")
+            } else {
+                dir.path().to_path_buf()
+            };
+            if existing {
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("readme"), b"keep readme").unwrap();
+            }
+            let blob = put_blob(&store, b"new");
+            let mut entries = vec![TreeEntry {
+                name: b"README".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }];
+            if !existing {
+                entries.push(TreeEntry {
+                    name: b"readme".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                });
+            }
+            let mut tree = put_tree_with(&store, entries);
+            let mut root_entries = if nested {
+                vec![TreeEntry {
+                    name: b"new".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: tree,
+                }]
+            } else {
+                let Object::Tree(tree) = store.read_object(&tree).unwrap() else {
+                    panic!("tree");
+                };
+                tree.entries
+            };
+            root_entries.push(TreeEntry {
+                name: b"aaa".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            });
+            root_entries.sort_by(|a, b| a.name.cmp(&b.name));
+            tree = put_tree_with(&store, root_entries);
+            let result =
+                restore_tree_to_worktree(&store, &tree, dir.path(), &RestoreOptions::default());
+            assert!(result.is_err(), "case alias was accepted");
+            assert_eq!(fs::read(dir.path().join("aaa")).unwrap(), b"keep");
+            if existing {
+                assert_eq!(fs::read(target.join("readme")).unwrap(), b"keep readme");
+            } else {
+                assert!(!target.join("README").exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_source_requires_one_matching_name_in_its_directory() {
+        let dir = TempDir::new().unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let source = work.join("Foo");
+        fs::write(&source, b"original").unwrap();
+        fs::write(work.join("unrelated"), b"other").unwrap();
+        fs::hard_link(&source, dir.path().join("backup")).unwrap();
+        let tree = |name: &[u8]| Tree {
+            entries: vec![TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::ZERO,
+            }],
+        };
+        let mut base = tree(b"Foo");
+        base.entries.extend(tree(b"another-name").entries);
+        let target = tree(b"foo");
+        // Supply the inode from an insensitive lookup without a canonical
+        // spelling, so this also exercises filesystems that preserve input.
+        let unavailable_spelling = work.join("unavailable");
+        let find_source = || {
+            case_rename_source(
+                &work,
+                &directory_names(&work).unwrap().unwrap(),
+                &base,
+                &target,
+                &unavailable_spelling,
+                &source.symlink_metadata().unwrap(),
+            )
+            .map(|source| source.path)
+        };
+        assert_eq!(find_source(), Some(source.clone()));
+        fs::hard_link(&source, work.join("another-name")).unwrap();
+        assert_eq!(find_source(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_alias_requires_a_tracked_file_removed_from_the_target() {
+        let dir = TempDir::new().unwrap();
+        let old_path = dir.path().join("Foo");
+        let new_path = dir.path().join("foo");
+        fs::write(&old_path, b"original").unwrap();
+        if !new_path.exists() {
+            fs::hard_link(&old_path, &new_path).unwrap();
+        }
+        // Model an insensitive lookup on a case-sensitive volume too.
+        let disk_names = ["Foo".into()].into_iter().collect();
+        let entry = |name: &[u8], mode| TreeEntry {
+            name: name.to_vec(),
+            mode,
+            object_hash: crate::hash::ZERO,
+        };
+        let old = entry(b"Foo", EntryMode::Blob);
+        let new = entry(b"foo", EntryMode::Blob);
+        let base = Tree {
+            entries: vec![old.clone()],
+        };
+        let target = Tree {
+            entries: vec![new.clone()],
+        };
+        let ordinary = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let check = |target, base, new, options| {
+            check_worktree_alias(target, base, new, "", &new_path, Some(&disk_names), options)
+        };
+        assert_eq!(
+            check(&target, Some(&base), &new, &ordinary)
+                .unwrap()
+                .map(|source| source.path),
+            Some(old_path)
+        );
+        assert!(check(&target, None, &new, &ordinary).is_err());
+        let retains_old = Tree {
+            entries: vec![old, new.clone()],
+        };
+        assert!(check(&retains_old, Some(&base), &new, &ordinary).is_err());
+        let clean = RestoreOptions {
+            clean: true,
+            sparse_patterns: None,
+        };
+        assert!(check(&target, Some(&base), &new, &clean).is_err());
+        let sparse = RestoreOptions {
+            clean: false,
+            sparse_patterns: Some(Vec::new()),
+        };
+        assert!(matches!(
+            check(&target, Some(&base), &new, &sparse),
+            Err(RestoreError::Io(_))
+        ));
+        let tree_instead = entry(b"foo", EntryMode::Tree);
+        assert!(matches!(
+            check(&target, Some(&base), &tree_instead, &ordinary),
+            Err(RestoreError::Io(_))
+        ));
+        let clean_sparse = RestoreOptions {
+            clean: true,
+            sparse_patterns: Some(Vec::new()),
+        };
+        assert!(matches!(
+            check(&target, Some(&base), &tree_instead, &clean_sparse),
+            Err(RestoreError::SparseDirectoryAlias(path)) if path == "foo"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_case_rename_source_survives_the_temporary_file_sweep() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let old = ".kit-restore-tmp.1.2";
+        let new = ".KIT-RESTORE-TMP.1.2";
+        let source = dir.path().join(old);
+        fs::write(&source, b"original").unwrap();
+        let stale = dir.path().join(".kit-restore-tmp.4294967295.3");
+        fs::write(&stale, b"abandoned write").unwrap();
+        let case_sources =
+            std::collections::HashMap::from([(new.to_owned(), approved_restore_blob(&source))]);
+        remove_stale_temps(dir.path(), &[], &case_sources);
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert!(!stale.exists());
+
+        if !dir.path().join(new).exists() {
+            return;
+        }
+        let base = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: old.as_bytes().to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"original"),
+            }],
+        );
+        let target = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: new.as_bytes().to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"updated"),
+            }],
+        );
+        restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &sequential_read_chunks,
+        )
+        .unwrap();
+        assert_eq!(fs::read(dir.path().join(new)).unwrap(), b"updated");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(new)]);
+    }
+
+    #[test]
+    fn restore_progress_counts_only_selected_files_and_finishes_at_total() {
+        let (_dir, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let subtree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"nested".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: subtree,
+            }],
+        );
+        let target = tempfile::tempdir().unwrap();
+        let mut events = Vec::new();
+        restore_tree_to_worktree_progress(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+            None,
+            &mut |done, total| events.push((done, total)),
+        )
+        .unwrap();
+        assert_eq!(events.first(), Some(&(0, 1)));
+        assert_eq!(events.last(), Some(&(1, 1)));
+        events.clear();
+        restore_tree_to_worktree_progress(
+            &store,
+            &tree,
+            Some(tree),
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+            None,
+            &mut |done, total| events.push((done, total)),
+        )
+        .unwrap();
+        assert!(events.iter().all(|e| *e == (0, 0)));
     }
 
     #[test]
@@ -1541,6 +3044,53 @@ mod tests {
                 for path in planted {
                     assert_eq!(fs::read(&path).unwrap(), b"keep", "{}", path.display());
                 }
+            }
+        }
+    }
+
+    /// A worktree restore removes the temporary files a stopped restore of
+    /// another process left in a directory it writes, and keeps a tracked
+    /// file with such a name, a symlink, and its own process's names.
+    #[test]
+    fn a_worktree_restore_removes_stale_temporary_files() {
+        let (_d, store) = fresh_store();
+        let keep_untracked = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let tracked = format!("{TMP_PREFIX}.4294967295.1");
+        let stale = format!("{TMP_PREFIX}.4294967295.2");
+        let tree = put_tree_with(
+            &store,
+            // Sorted by name: "." sorts before "a".
+            vec![
+                TreeEntry {
+                    name: tracked.as_bytes().to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b"tracked"),
+                },
+                TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b"restored"),
+                },
+            ],
+        );
+        for worktree in [false, true] {
+            let target = TempDir::new().unwrap();
+            fs::write(target.path().join(&stale), b"partial").unwrap();
+            let own = plant_temp_names(target.path(), |path| {
+                fs::write(path, b"keep").unwrap();
+            });
+            if worktree {
+                restore_tree_to_worktree(&store, &tree, target.path(), &keep_untracked).unwrap();
+            } else {
+                restore_tree(&store, tree, target.path(), &keep_untracked).unwrap();
+            }
+            assert_eq!(fs::read(target.path().join(&tracked)).unwrap(), b"tracked");
+            assert_eq!(target.path().join(&stale).exists(), !worktree);
+            for path in own {
+                assert_eq!(fs::read(&path).unwrap(), b"keep", "{}", path.display());
             }
         }
     }
@@ -1827,6 +3377,312 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn approved_restore_blob(path: &Path) -> CaseRenameSource {
+        CaseRenameSource {
+            path: path.to_owned(),
+            metadata: path.symlink_metadata().unwrap(),
+            tracked_mode: EntryMode::Blob,
+            tracked_hash: crate::hash::ZERO,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_case_rename_publication_restores_the_previous_name() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        let approved = approved_restore_blob(&source);
+
+        let unavailable = dir.path().join("unavailable");
+        assert!(publish_restore_temp(&unavailable, &destination, Some(&approved)).is_err());
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("Foo")]);
+        assert_eq!(fs::read(source).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_publication_removes_the_old_name_and_backup() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        let prepared = dir.path().join("prepared");
+        fs::write(&source, b"original").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        let approved = approved_restore_blob(&source);
+
+        publish_restore_temp(&prepared, &destination, Some(&approved)).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("foo")]);
+        assert_eq!(fs::read(destination).unwrap(), b"replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_keeps_both_files_when_rollback_cannot_reclaim_the_name() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let recovery = dir
+            .path()
+            .join(format!("{CASE_RENAME_BACKUP_PREFIX}example"));
+        fs::create_dir(&recovery).unwrap();
+        let backup = recovery.join(".kit-restore-tmp.4294967295.2");
+        let prepared = dir.path().join("prepared");
+        fs::write(&backup, b"original").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        fs::write(&source, b"concurrent write").unwrap();
+        let approved = CaseRenameSource {
+            path: source.clone(),
+            ..approved_restore_blob(&backup)
+        };
+
+        // Use the same name to model two spellings of one directory entry
+        // on case-sensitive test volumes too.
+        let err = finish_case_rename(&prepared, &source, &approved, &backup).unwrap_err();
+        assert!(err.to_string().contains(&backup.display().to_string()));
+        remove_stale_temps(dir.path(), &[], &std::collections::HashMap::new());
+        assert_eq!(fs::read(source).unwrap(), b"concurrent write");
+        assert_eq!(fs::read(backup).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_keeps_a_replacement_moved_to_the_recovery_path() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        let backup = dir.path().join("moved");
+        let prepared = dir.path().join("prepared");
+        fs::write(&source, b"tracked").unwrap();
+        fs::write(&backup, b"concurrent write").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        let approved = approved_restore_blob(&source);
+        fs::remove_file(&source).unwrap();
+
+        let err = finish_case_rename(&prepared, &destination, &approved, &backup).unwrap_err();
+        assert!(err.to_string().contains(&backup.display().to_string()));
+        assert_eq!(fs::read(backup).unwrap(), b"concurrent write");
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_new_case_alias_created_after_preflight() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let concurrent_file = dir.path().join("new file");
+        fs::write(&concurrent_file, b"concurrent write").unwrap();
+        let base = tree_of_one_file(&store, b"Foo", b"original");
+        let target = tree_of_one_file(&store, b"foo", b"replacement");
+        let options = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let err = restore_tree_to_worktree_progress(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &options,
+            &sequential_read_chunks,
+            None,
+            &mut |_, _| {
+                fs::remove_file(&source).unwrap();
+                fs::rename(&concurrent_file, &destination).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("foo")]);
+        assert_eq!(fs::read(destination).unwrap(), b"concurrent write");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_case_rename_source_edited_with_its_mtime_preserved() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let mtime = source.symlink_metadata().unwrap().modified().unwrap();
+        let base = tree_of_one_file(&store, b"Foo", b"original");
+        let chunk = put_blob(&store, b"replacement");
+        let manifest = Object::ChunkedBlob(object::ChunkedBlob::new(11, 0, [(chunk, 11)]).unwrap());
+        let hash = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let target = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"foo".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: hash,
+            }],
+        );
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &|store, chunks| {
+                fs::write(&source, b"new edit").unwrap();
+                let file = fs::File::options().write(true).open(&source).unwrap();
+                file.set_times(fs::FileTimes::new().set_modified(mtime))
+                    .unwrap();
+                assert_eq!(file.metadata().unwrap().modified().unwrap(), mtime);
+                sequential_read_chunks(store, chunks)
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        assert_eq!(fs::read(source).unwrap(), b"new edit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_case_rename_source_that_changed_before_restore_preflight() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"local edit").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let base = tree_of_one_file(&store, b"Foo", b"tracked original");
+        let target = tree_of_one_file(&store, b"foo", b"replacement");
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &sequential_read_chunks,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        assert_eq!(fs::read(source).unwrap(), b"local edit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_accepts_a_case_rename_source_stored_with_a_different_chunk_layout() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        let chunks = [
+            (put_blob(&store, b"orig"), 4),
+            (put_blob(&store, b"inal"), 8),
+        ];
+        let manifest = Object::ChunkedBlob(object::ChunkedBlob::new(8, 4, chunks).unwrap());
+        let hash = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let candidate = CaseRenameSource {
+            tracked_hash: hash,
+            ..approved_restore_blob(&source)
+        };
+        candidate.check_tracked(&store).unwrap();
+        let wrong_mode = CaseRenameSource {
+            tracked_mode: EntryMode::Executable,
+            tracked_hash: hash,
+            ..approved_restore_blob(&source)
+        };
+        assert!(wrong_mode.check_tracked(&store).is_err());
+
+        if destination.exists() {
+            let base = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"Foo".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: hash,
+                }],
+            );
+            let target = tree_of_one_file(&store, b"foo", b"replacement");
+            restore_tree_to_worktree_with(
+                &store,
+                &target,
+                Some(base),
+                dir.path(),
+                &RestoreOptions {
+                    clean: false,
+                    sparse_patterns: None,
+                },
+                &sequential_read_chunks,
+            )
+            .unwrap();
+            assert_eq!(fs::read(destination).unwrap(), b"replacement");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_compares_a_symlink_to_its_tracked_target() {
+        use std::os::unix::fs::symlink;
+
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Link");
+        symlink("tracked-target", &path).unwrap();
+        let source = CaseRenameSource {
+            path: path.clone(),
+            metadata: path.symlink_metadata().unwrap(),
+            tracked_mode: EntryMode::Symlink,
+            tracked_hash: put_blob(&store, b"tracked-target"),
+        };
+        source.check_tracked(&store).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink("new-target", &path).unwrap();
+        assert!(source.check_tracked(&store).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_cannot_move_a_directory_over_the_recovery_file() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("child"), b"keep").unwrap();
+        let backup = dir.path().join("backup");
+
+        assert!(move_case_rename_source(&source, &backup).is_err());
+        assert_eq!(fs::read(source.join("child")).unwrap(), b"keep");
+        assert!(backup.is_file());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_failed_removal_does_not_replace_the_restore_error() {
         use std::os::unix::fs::PermissionsExt;
@@ -1840,6 +3696,7 @@ mod tests {
             &tmp_path,
             &dir.path().join("final"),
             false,
+            None,
         )
         .unwrap_err();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
@@ -1946,6 +3803,8 @@ mod tests {
         assert!(could_match_descendant(&p, "src"));
         assert!(could_match_descendant(&p, "src/lib"));
         assert!(!could_match_descendant(&p, "tests"));
+        assert!(!could_match_descendant(&p, "src/library"));
+        assert!(!could_match_descendant(&p, "src3"));
     }
 
     #[test]
@@ -2122,6 +3981,161 @@ mod tests {
         assert!(!target.path().join("doomed").exists());
     }
 
+    /// A clean restore does not sweep a subtree it skips, so it refuses one
+    /// that holds a path the sweep would have removed, and takes one that
+    /// holds only what the sweep keeps: ignored paths, ignore files and
+    /// directories that hold nothing else.
+    #[test]
+    fn a_clean_restore_refuses_an_untracked_file_in_a_subtree_it_skips() {
+        let (_d, store) = fresh_store();
+        let entry = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let dir = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: h,
+        };
+        let (a1, a2) = (put_blob(&store, b"a-old"), put_blob(&store, b"a-new"));
+        let ignore = put_blob(&store, b"*.log\n");
+        let inner = put_tree_with(&store, vec![entry("x", put_blob(&store, b"x"))]);
+        let kept = put_tree_with(&store, vec![dir("inner", inner)]);
+        let base = put_tree_with(
+            &store,
+            vec![
+                entry(".kitignore", ignore),
+                entry("a", a1),
+                dir("kept", kept),
+            ],
+        );
+        let next = put_tree_with(
+            &store,
+            vec![
+                entry(".kitignore", ignore),
+                entry("a", a2),
+                dir("kept", kept),
+            ],
+        );
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let fresh = || {
+            let target = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+            target
+        };
+        let restore = |target: &TempDir, base_tree| {
+            restore_tree_to_worktree_with(&store, &next, base_tree, target.path(), &opts, &rd)
+        };
+
+        for kept_path in [
+            "kept/inner/build.log",
+            "kept/logs/old.log",
+            "kept/.gitignore",
+            "kept/inner/.kitignore",
+        ] {
+            let target = fresh();
+            let path = target.path().join(kept_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"kept").unwrap();
+            fs::create_dir_all(target.path().join("kept/empty")).unwrap();
+            restore(&target, Some(base)).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"kept", "{kept_path}");
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        }
+
+        for (untracked, named) in [
+            ("kept/inner/notes.txt", "kept/inner/notes.txt"),
+            ("kept/new/deep/notes.txt", "kept/new/deep/notes.txt"),
+            // The sweep keeps an ignore file by name only in a listed
+            // directory, and `new` is not one.
+            ("kept/new/.kitignore", "kept/new/.kitignore"),
+        ] {
+            let target = fresh();
+            let path = target.path().join(untracked);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"mine").unwrap();
+            let err = restore(&target, Some(base)).unwrap_err();
+            assert!(
+                matches!(&err, RestoreError::UnsweptPath(p) if p == named),
+                "{untracked}: {err:?}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"mine");
+            // The refusal comes before the restore writes anything.
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+            // Without a base the restore enters the subtree and sweeps it.
+            restore(&target, None).unwrap();
+            assert!(!path.exists(), "{untracked}");
+        }
+    }
+
+    /// With many skipped directories the walk spreads each tree level over
+    /// threads. It finds an untracked file in any of them, and names the
+    /// first one in level order: a shallower level first, then tree order.
+    #[test]
+    fn a_clean_restore_checks_many_skipped_subtrees_in_level_order() {
+        let (_d, store) = fresh_store();
+        let blob = |name: &str, h| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let x = put_blob(&store, b"x");
+        let inner = put_tree_with(&store, vec![blob("x", x)]);
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let subtree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"sub".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: inner,
+                },
+                blob("x", x),
+            ],
+        );
+        let with_a = |a: &[u8]| {
+            let mut entries = vec![blob("a", put_blob(&store, a))];
+            entries.extend(names.iter().map(|name| TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: subtree,
+            }));
+            put_tree_with(&store, entries)
+        };
+        let (base, next) = (with_a(b"a-old"), with_a(b"a-new"));
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        for (untracked, named) in [
+            (vec!["d29/notes.txt"], "d29/notes.txt"),
+            (vec!["d31/sub/new/notes.txt"], "d31/sub/new/notes.txt"),
+            (vec!["d33/notes.txt", "d07/notes.txt"], "d07/notes.txt"),
+            (vec!["d02/sub/notes.txt", "d38/notes.txt"], "d38/notes.txt"),
+        ] {
+            let target = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+            for path in &untracked {
+                let path = target.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"mine").unwrap();
+            }
+            let err =
+                restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+                    .unwrap_err();
+            assert!(
+                matches!(&err, RestoreError::UnsweptPath(p) if p == named),
+                "{untracked:?}: {err:?}"
+            );
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+        }
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+    }
+
     /// Without `observe`, a restored file reports no stat fields, chunked
     /// or not. With it, the same restore proves them.
     #[test]
@@ -2140,11 +4154,22 @@ mod tests {
         let plain = put_blob(&store, b"plain");
         let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
         for (name, hash) in [("big", big), ("plain", plain)] {
-            let off =
-                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, false).unwrap();
+            let off = restore_blob_with(
+                &store,
+                target.path(),
+                name,
+                hash,
+                false,
+                1,
+                &rd,
+                false,
+                None,
+            )
+            .unwrap();
             assert_eq!(off, None, "{name} without observe");
             let on =
-                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true).unwrap();
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true, None)
+                    .unwrap();
             assert!(on.is_some(), "{name} with observe");
         }
     }
@@ -2858,6 +4883,478 @@ mod tests {
         assert!(!target.path().join("src/secret/key.pem").exists());
     }
 
+    fn sparse(pattern: &str, negated: bool, dir_only: bool) -> SparsePattern {
+        SparsePattern {
+            pattern: pattern.to_string(),
+            negated,
+            dir_only,
+        }
+    }
+
+    /// Small deterministic generator so the differential test needs no
+    /// dependency and fails the same way every run.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(self.0 >> 33).unwrap() % bound
+        }
+    }
+
+    #[test]
+    fn sparse_matcher_answers_like_the_plain_functions() {
+        let names = ["a", "b", "src", "lib", "Makefile", "x.rs", ""];
+        let mut rng = Lcg(7);
+        let path_of = |rng: &mut Lcg| {
+            let depth = 1 + rng.next(4);
+            (0..depth)
+                .map(|_| names[rng.next(names.len() - 1)])
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        for round in 0..300 {
+            let count = 1 + rng.next(8);
+            let patterns: Vec<SparsePattern> = (0..count)
+                .map(|_| {
+                    let mut text = path_of(&mut rng);
+                    match rng.next(6) {
+                        0 => text.insert(0, '/'),
+                        1 => text.push('/'),
+                        _ => {}
+                    }
+                    sparse(&text, rng.next(4) == 0, rng.next(4) == 0)
+                })
+                .collect();
+            let matcher = SparseMatcher::new(&patterns);
+            for _ in 0..60 {
+                let path = path_of(&mut rng);
+                for is_dir in [false, true] {
+                    assert_eq!(
+                        matcher.matches(&path, is_dir),
+                        matches_sparse(&patterns, &path, is_dir),
+                        "round {round}: matches {path:?} dir={is_dir} against {patterns:?}"
+                    );
+                }
+                assert_eq!(
+                    matcher.could_match_descendant(&path),
+                    could_match_descendant(&patterns, &path),
+                    "round {round}: descendants of {path:?} against {patterns:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_matcher_edge_patterns_match_the_plain_functions() {
+        let patterns = vec![
+            sparse("/", false, false),
+            sparse("src//", false, false),
+            sparse("//src", false, true),
+            sparse("", false, false),
+            sparse("/lib/", false, false),
+        ];
+        let matcher = SparseMatcher::new(&patterns);
+        for path in [
+            "", "/", "src", "src/", "src//a", "/src", "a//b", "//src/x", "lib", "lib/a",
+        ] {
+            for is_dir in [false, true] {
+                assert_eq!(
+                    matcher.matches(path, is_dir),
+                    matches_sparse(&patterns, path, is_dir),
+                    "matches {path:?} dir={is_dir}"
+                );
+            }
+            assert_eq!(
+                matcher.could_match_descendant(path),
+                could_match_descendant(&patterns, path),
+                "descendants of {path:?}"
+            );
+        }
+    }
+
+    /// The files under `root` after a restore, sorted, as `dir/name` paths.
+    fn files_under(root: &Path) -> Vec<String> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name().into_string().unwrap();
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if entry.file_type().unwrap().is_dir() {
+                    walk(&entry.path(), &path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        out.sort();
+        out
+    }
+
+    /// A tree with nested directories, a file name that repeats in two
+    /// directories, and a directory the patterns name only by basename.
+    fn nested_selection_tree(store: &ObjectStore) -> Hash {
+        let file = |name: &str| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: put_blob(store, name.as_bytes()),
+        };
+        let sorted = |mut entries: Vec<TreeEntry>| {
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            entries
+        };
+        let dir = |name: &str, entries: Vec<TreeEntry>| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: put_tree_with(store, sorted(entries)),
+        };
+        put_tree_with(
+            store,
+            sorted(vec![
+                dir("build", vec![file("out.o")]),
+                dir("guide", vec![dir("deep", vec![file("y.md")]), file("x.md")]),
+                file("Makefile"),
+                file("README.md"),
+                dir(
+                    "src",
+                    vec![
+                        file("main.rs"),
+                        dir("lib", vec![file("util.rs")]),
+                        file("Makefile"),
+                    ],
+                ),
+                dir("sub", vec![file("Makefile"), file("other.txt")]),
+                dir("tests", vec![file("t.rs")]),
+            ]),
+        )
+    }
+
+    fn restored_with(patterns: Vec<SparsePattern>, clean: bool) -> Vec<String> {
+        let (_d, store) = fresh_store();
+        let root = nested_selection_tree(&store);
+        let target = TempDir::new().unwrap();
+        let opts = RestoreOptions {
+            clean,
+            sparse_patterns: Some(patterns),
+        };
+        restore_tree(&store, root, target.path(), &opts).unwrap();
+        let plain = files_under(target.path());
+        // The worktree path selects the same files as the plain restore.
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(
+            &store,
+            &root,
+            None,
+            target.path(),
+            &opts,
+            &sequential_read_chunks,
+        )
+        .unwrap();
+        assert_eq!(files_under(target.path()), plain);
+        plain
+    }
+
+    #[test]
+    fn sparse_restore_mixed_include_and_exclude_patterns() {
+        for clean in [false, true] {
+            let got = restored_with(
+                vec![
+                    sparse("src", false, false),
+                    sparse("src/lib", true, false),
+                    sparse("/guide", false, false),
+                    sparse("Makefile", false, false),
+                    sparse("build", false, true),
+                ],
+                clean,
+            );
+            assert_eq!(
+                got,
+                [
+                    "Makefile",
+                    "build/out.o",
+                    "guide/deep/y.md",
+                    "guide/x.md",
+                    "src/Makefile",
+                    "src/main.rs",
+                ],
+                "clean={clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_restore_pattern_per_file_selects_those_files() {
+        // One unanchored pattern per selected file. A pattern without a
+        // slash also matches that name in every directory the other
+        // patterns lead into, so `Makefile` brings back `src/Makefile` and
+        // `sub/Makefile` as well. Callers that mean a path anchor it with a
+        // leading slash, as the next test does.
+        let paths = [
+            "guide/deep/y.md",
+            "guide/x.md",
+            "src/lib/util.rs",
+            "sub/other.txt",
+            "Makefile",
+        ];
+        let patterns: Vec<SparsePattern> = paths.iter().map(|p| sparse(p, false, false)).collect();
+        for clean in [false, true] {
+            let got = restored_with(patterns.clone(), clean);
+            assert_eq!(
+                got,
+                [
+                    "Makefile",
+                    "guide/deep/y.md",
+                    "guide/x.md",
+                    "src/Makefile",
+                    "src/lib/util.rs",
+                    "sub/Makefile",
+                    "sub/other.txt",
+                ],
+                "clean={clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_restore_anchored_pattern_per_file_selects_only_those_paths() {
+        let paths = [
+            "guide/deep/y.md",
+            "guide/x.md",
+            "src/lib/util.rs",
+            "sub/other.txt",
+            "Makefile",
+        ];
+        let patterns: Vec<SparsePattern> = paths
+            .iter()
+            .map(|p| sparse(&format!("/{p}"), false, false))
+            .collect();
+        for clean in [false, true] {
+            let got = restored_with(patterns.clone(), clean);
+            assert_eq!(
+                got,
+                [
+                    "Makefile",
+                    "guide/deep/y.md",
+                    "guide/x.md",
+                    "src/lib/util.rs",
+                    "sub/other.txt",
+                ],
+                "clean={clean}"
+            );
+        }
+    }
+
+    /// Run `check` once through [`restore_tree`] and once through the
+    /// worktree restore, each on a fresh store and target.
+    fn on_both_restores(
+        mut check: impl FnMut(&ObjectStore, &Hash, &Path, &RestoreOptions) -> RestoreResult<()>,
+        tree: impl Fn(&ObjectStore) -> Hash,
+        prepare: impl Fn(&Path),
+        options: &RestoreOptions,
+    ) -> Vec<RestoreResult<Vec<String>>> {
+        let mut results = Vec::new();
+        for worktree in [false, true] {
+            let (_d, store) = fresh_store();
+            let root = tree(&store);
+            let target = TempDir::new().unwrap();
+            prepare(target.path());
+            let outcome = if worktree {
+                restore_tree_to_worktree_with(
+                    &store,
+                    &root,
+                    None,
+                    target.path(),
+                    options,
+                    &sequential_read_chunks,
+                )
+                .map(|_| ())
+            } else {
+                restore_tree(&store, root, target.path(), options)
+            };
+            let outcome = outcome.and_then(|()| check(&store, &root, target.path(), options));
+            results.push(outcome.map(|()| files_under(target.path())));
+        }
+        results
+    }
+
+    fn file_entry(store: &ObjectStore, name: &str) -> TreeEntry {
+        TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: put_blob(store, name.as_bytes()),
+        }
+    }
+
+    fn dir_entry(store: &ObjectStore, name: &str, mut entries: Vec<TreeEntry>) -> TreeEntry {
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: put_tree_with(store, entries),
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)] // the shape `on_both_restores` asks for
+    fn no_check(_: &ObjectStore, _: &Hash, _: &Path, _: &RestoreOptions) -> RestoreResult<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sparse_restore_creates_only_the_selected_symlinks() {
+        let tree = |store: &ObjectStore| {
+            let link = TreeEntry {
+                name: b"link".to_vec(),
+                mode: EntryMode::Symlink,
+                object_hash: put_blob(store, b"README.md"),
+            };
+            put_tree_with(store, vec![file_entry(store, "README.md"), link])
+        };
+        for (selected, expected) in [("README.md", "README.md"), ("link", "link")] {
+            let options = RestoreOptions {
+                clean: false,
+                sparse_patterns: Some(vec![sparse(selected, false, false)]),
+            };
+            for result in on_both_restores(no_check, tree, |_| {}, &options) {
+                assert_eq!(result.unwrap(), [expected], "selected {selected}");
+            }
+        }
+    }
+
+    /// A sparse restore refuses to write over a directory that holds a
+    /// repository only for the entries it selects.
+    #[test]
+    fn sparse_restore_checks_nested_repositories_only_under_selected_entries() {
+        let tree = |store: &ObjectStore| {
+            put_tree_with(
+                store,
+                vec![
+                    file_entry(store, "a"),
+                    file_entry(store, "b"),
+                    dir_entry(store, "t", vec![file_entry(store, "sub")]),
+                ],
+            )
+        };
+        let prepare = |root: &Path| {
+            for repo in ["a/.kit", "t/sub/.kit"] {
+                let path = root.join(repo);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"").unwrap();
+            }
+        };
+        let restore = |selected: &str| {
+            let options = RestoreOptions {
+                clean: false,
+                sparse_patterns: Some(vec![sparse(selected, false, false)]),
+            };
+            on_both_restores(no_check, tree, prepare, &options)
+        };
+        for result in restore("b") {
+            assert_eq!(result.unwrap(), ["a/.kit", "b", "t/sub/.kit"]);
+        }
+        for (selected, named) in [("a", "a/.kit"), ("t/sub", "t/sub/.kit")] {
+            for result in restore(selected) {
+                assert!(
+                    matches!(&result, Err(RestoreError::NestedRepository(p)) if p == named),
+                    "selected {selected}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// The total a sparse restore reports counts the files under a selected
+    /// directory, whether or not that directory exists yet.
+    #[test]
+    fn sparse_restore_progress_total_counts_selected_files_under_directories() {
+        let options = RestoreOptions {
+            clean: false,
+            sparse_patterns: Some(vec![sparse("t/sub", false, false)]),
+        };
+        for existing_dir in [false, true] {
+            let (_d, store) = fresh_store();
+            let root = put_tree_with(
+                &store,
+                vec![
+                    dir_entry(&store, "t", vec![file_entry(&store, "sub")]),
+                    dir_entry(&store, "u", vec![file_entry(&store, "other")]),
+                ],
+            );
+            let target = TempDir::new().unwrap();
+            if existing_dir {
+                fs::create_dir_all(target.path().join("t")).unwrap();
+                fs::create_dir_all(target.path().join("u")).unwrap();
+            }
+            let mut reports = Vec::new();
+            restore_tree_to_worktree_progress(
+                &store,
+                &root,
+                None,
+                target.path(),
+                &options,
+                &sequential_read_chunks,
+                None,
+                &mut |done, total| reports.push((done, total)),
+            )
+            .unwrap();
+            assert_eq!(reports.first(), Some(&(0, 1)), "dir exists: {existing_dir}");
+            assert_eq!(reports.last(), Some(&(1, 1)), "dir exists: {existing_dir}");
+        }
+    }
+
+    /// The sweep of a clean restore removes untracked files the patterns
+    /// select, walks only directories that can hold selected paths, and leaves
+    /// the rest alone.
+    #[test]
+    fn sparse_clean_restore_sweeps_only_selected_untracked_paths() {
+        let tree = |store: &ObjectStore| put_tree_with(store, vec![file_entry(store, "top.txt")]);
+        let prepare = |root: &Path| {
+            for file in [
+                "gone.txt",
+                "q.txt",
+                "d/x/gone.txt",
+                "d/x/stay.txt",
+                "d/y/any.txt",
+                "d/w.txt",
+            ] {
+                let path = root.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"untracked").unwrap();
+            }
+            fs::create_dir_all(root.join("d/z")).unwrap();
+            fs::create_dir_all(root.join("e")).unwrap();
+        };
+        let options = RestoreOptions {
+            clean: true,
+            sparse_patterns: Some(
+                ["top.txt", "gone.txt", "d/x/gone.txt", "d/y"]
+                    .into_iter()
+                    .map(|p| sparse(p, false, false))
+                    .collect(),
+            ),
+        };
+        let check = |_: &ObjectStore, _: &Hash, root: &Path, _: &RestoreOptions| {
+            // Directories are not listed by `files_under`; these must stay.
+            assert!(root.join("d/z").is_dir(), "an unselected empty directory");
+            assert!(root.join("e").is_dir(), "an unselected top-level directory");
+            assert!(!root.join("d/y").exists(), "a selected directory, emptied");
+            Ok(())
+        };
+        for result in on_both_restores(check, tree, prepare, &options) {
+            assert_eq!(
+                result.unwrap(),
+                ["d/w.txt", "d/x/stay.txt", "q.txt", "top.txt"]
+            );
+        }
+    }
+
     #[test]
     fn sparse_checkout_roundtrip() {
         let target = TempDir::new().unwrap();
@@ -3019,6 +5516,109 @@ mod tests {
     }
 
     #[test]
+    fn clean_restore_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let empty = put_tree_with(&store, Vec::new());
+        restore_tree_to_worktree(&store, &empty, &out, &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("secret.env")).unwrap(),
+            "private"
+        );
+    }
+
+    #[test]
+    fn snapshot_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let hash = crate::worktree::build_tree(&store, &out).unwrap();
+        let Object::Tree(tree) = store.read_object(&hash).unwrap() else {
+            panic!("not a tree")
+        };
+        assert!(!tree.entries.iter().any(|e| e.name == b"secret.env"));
+    }
+
+    #[test]
+    fn non_clean_restores_do_not_read_nested_ignore_files() {
+        let (_repo, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join("sub")).unwrap();
+        fs::write(
+            target.path().join("sub/.gitignore"),
+            vec![b'a'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let sub = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"sub".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: sub,
+            }],
+        );
+        let opts = RestoreOptions {
+            clean: false,
+            ..RestoreOptions::default()
+        };
+        restore_tree_to_worktree(&store, &tree, target.path(), &opts).unwrap();
+        assert_eq!(
+            fs::read(target.path().join("sub/tracked")).unwrap(),
+            b"target"
+        );
+    }
+
+    #[test]
+    fn clean_restore_keeps_files_ignored_before_ancestor_rules_change() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".gitignore"), "*.env\n").unwrap();
+        fs::create_dir(target.path().join("config")).unwrap();
+        fs::write(target.path().join("config/secret.env"), "private data").unwrap();
+        let config = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b".gitignore".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b""),
+                },
+                TreeEntry {
+                    name: b"config".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: config,
+                },
+            ],
+        );
+        restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.path().join("config/secret.env")).unwrap(),
+            "private data"
+        );
+    }
+
+    #[test]
     fn worktree_restore_clean_keeps_ignored_files_in_an_unlisted_directory() {
         // `build/` is not in the target tree. The sweep removes its plain
         // file and keeps the ignored file and the directory that holds it. A
@@ -3044,6 +5644,271 @@ mod tests {
         );
         assert!(!target.path().join("build/plain.txt").exists());
         assert!(!target.path().join("gone").exists());
+    }
+
+    /// The clean sweep leaves a directory the tree does not list whole when
+    /// it holds a nested repository: a `.git` or `.kit` directory, a `.git`
+    /// file (a worktree's or a submodule's link), any case, at any depth.
+    /// It still removes what lies outside the nested repository.
+    #[test]
+    fn a_clean_restore_leaves_nested_repositories_in_untracked_directories() {
+        let (_d, store) = fresh_store();
+        let root = put_tree_with(&store, Vec::new());
+        let kept = [
+            "vendor/lib/.git/HEAD",
+            "vendor/lib/.git/objects/ab/cdef",
+            "vendor/lib/README",
+            "linked/.git",
+            "linked/src.rs",
+            "deep/a/b/.kit/config",
+            "deep/a/b/notes.txt",
+            "caps/.GIT/HEAD",
+            "caps/.Kit/config",
+        ];
+        let removed = ["vendor/top.txt", "deep/a/plain.txt", "gone/f.txt"];
+        let ignore_aware = |target: &Path| {
+            restore_tree_to_worktree(&store, &root, target, &RestoreOptions::default()).map(drop)
+        };
+        let plain = |target: &Path| restore_tree(&store, root, target, &RestoreOptions::default());
+        let mut lost = Vec::new();
+        for (mode, sweep) in [
+            (
+                "ignore-aware",
+                &ignore_aware as &dyn Fn(&Path) -> RestoreResult<()>,
+            ),
+            ("plain", &plain),
+        ] {
+            let target = TempDir::new().unwrap();
+            for path in kept.iter().chain(&removed) {
+                let path = target.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"mine").unwrap();
+            }
+            sweep(target.path()).unwrap();
+            lost.extend(
+                kept.into_iter()
+                    .filter(|path| {
+                        fs::read(target.path().join(path)).ok().as_deref() != Some(b"mine")
+                    })
+                    .map(|path| format!("{mode}: {path}")),
+            );
+            for path in removed {
+                assert!(!target.path().join(path).exists(), "{mode}: {path}");
+            }
+            assert!(!target.path().join("gone").exists());
+        }
+        assert!(lost.is_empty(), "the sweep removed {lost:#?}");
+    }
+
+    /// A symlink named `.git` marks a nested repository too; the sweep
+    /// leaves it and never follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_restore_leaves_a_directory_with_a_git_symlink() {
+        let (_d, store) = fresh_store();
+        let root = put_tree_with(&store, Vec::new());
+        for ignore_aware in [true, false] {
+            let outside = TempDir::new().unwrap();
+            fs::write(outside.path().join("HEAD"), b"ref").unwrap();
+            let target = TempDir::new().unwrap();
+            fs::create_dir(target.path().join("sub")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), target.path().join("sub/.git")).unwrap();
+            fs::write(target.path().join("sub/file"), b"mine").unwrap();
+            if ignore_aware {
+                restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
+                    .unwrap();
+            } else {
+                restore_tree(&store, root, target.path(), &RestoreOptions::default()).unwrap();
+            }
+            let link = fs::symlink_metadata(target.path().join("sub/.git")).unwrap();
+            assert!(link.is_symlink(), "ignore-aware: {ignore_aware}");
+            assert_eq!(fs::read(target.path().join("sub/file")).unwrap(), b"mine");
+            assert_eq!(fs::read(outside.path().join("HEAD")).unwrap(), b"ref");
+        }
+    }
+
+    /// In a directory the tree lists, the sweep keeps the `.git` and removes
+    /// the untracked paths beside it, as it does at the root.
+    #[test]
+    fn a_clean_restore_keeps_a_git_in_a_listed_directory() {
+        let (_d, store) = fresh_store();
+        let x = put_blob(&store, b"x");
+        let listed = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"x".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: x,
+            }],
+        );
+        let root = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"listed".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: listed,
+            }],
+        );
+        let target = TempDir::new().unwrap();
+        fs::create_dir_all(target.path().join("listed/.git")).unwrap();
+        fs::write(target.path().join("listed/.git/HEAD"), b"ref").unwrap();
+        fs::write(target.path().join("listed/extra"), b"drop").unwrap();
+        restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read(target.path().join("listed/.git/HEAD")).unwrap(),
+            b"ref"
+        );
+        assert_eq!(fs::read(target.path().join("listed/x")).unwrap(), b"x");
+        assert!(!target.path().join("listed/extra").exists());
+    }
+
+    /// A restore that writes a file or symlink where the worktree holds a
+    /// directory removes the directory, but refuses when it holds a nested
+    /// repository at any depth, and leaves the repository as it was.
+    #[test]
+    fn a_restore_refuses_to_write_over_a_nested_repository() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"tracked");
+        let link = put_blob(&store, b"target");
+        let opts = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        for mode in [EntryMode::Blob, EntryMode::Symlink] {
+            if cfg!(not(unix)) && mode == EntryMode::Symlink {
+                continue;
+            }
+            let root = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"vendor".to_vec(),
+                    mode,
+                    object_hash: if mode == EntryMode::Blob { blob } else { link },
+                }],
+            );
+            for (repo, named) in [
+                ("vendor/.git/HEAD", "vendor/.git"),
+                ("vendor/lib/.kit/config", "vendor/lib/.kit"),
+                ("vendor/wt/.git", "vendor/wt/.git"),
+            ] {
+                for ignore_aware in [true, false] {
+                    let target = TempDir::new().unwrap();
+                    let path = target.path().join(repo);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, b"mine").unwrap();
+                    fs::write(target.path().join("vendor/README"), b"mine").unwrap();
+                    let err = if ignore_aware {
+                        restore_tree_to_worktree(&store, &root, target.path(), &opts).map(drop)
+                    } else {
+                        restore_tree(&store, root, target.path(), &opts)
+                    }
+                    .unwrap_err();
+                    assert!(
+                        matches!(&err, RestoreError::NestedRepository(p) if p == named),
+                        "{repo} {mode:?} ignore-aware {ignore_aware}: {err:?}"
+                    );
+                    assert!(
+                        err.to_string()
+                            .starts_with("restore would remove untracked path '")
+                    );
+                    assert_eq!(fs::read(&path).unwrap(), b"mine", "{repo}");
+                    assert_eq!(
+                        fs::read(target.path().join("vendor/README")).unwrap(),
+                        b"mine"
+                    );
+                }
+            }
+            // A directory with no repository in it is replaced.
+            let target = TempDir::new().unwrap();
+            fs::create_dir_all(target.path().join("vendor/lib")).unwrap();
+            fs::write(target.path().join("vendor/lib/x"), b"mine").unwrap();
+            restore_tree_to_worktree(&store, &root, target.path(), &opts).unwrap();
+            assert!(
+                !fs::symlink_metadata(target.path().join("vendor"))
+                    .unwrap()
+                    .is_dir()
+            );
+        }
+    }
+
+    /// A clean restore with a base takes a nested repository in a subtree it
+    /// skips, with the files beside its `.git`: the sweep would leave it whole.
+    #[test]
+    fn a_clean_restore_takes_a_nested_repository_in_a_subtree_it_skips() {
+        let (_d, store) = fresh_store();
+        let blob = |name: &str, h| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let kept = put_tree_with(&store, vec![blob("x", put_blob(&store, b"x"))]);
+        let with_a = |a: &[u8]| {
+            put_tree_with(
+                &store,
+                vec![
+                    blob("a", put_blob(&store, a)),
+                    TreeEntry {
+                        name: b"kept".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: kept,
+                    },
+                ],
+            )
+        };
+        let (base, next) = (with_a(b"a-old"), with_a(b"a-new"));
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        let nested = [
+            "kept/clone/.git/HEAD",
+            "kept/clone/README",
+            "kept/deep/wt/.git",
+        ];
+        for path in nested {
+            let path = target.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"mine").unwrap();
+        }
+        fs::write(target.path().join("kept/deep/wt/src.rs"), b"mine").unwrap();
+        restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        for path in nested.iter().chain(&["kept/deep/wt/src.rs"]) {
+            assert_eq!(
+                fs::read(target.path().join(path)).unwrap(),
+                b"mine",
+                "{path}"
+            );
+        }
+        // A file beside the nested repository, outside it, is refused.
+        fs::write(target.path().join("kept/deep/notes.txt"), b"mine").unwrap();
+        let err =
+            restore_tree_to_worktree_with(&store, &base, Some(next), target.path(), &opts, &rd)
+                .unwrap_err();
+        assert!(
+            matches!(&err, RestoreError::UnsweptPath(p) if p == "kept/deep/notes.txt"),
+            "{err:?}"
+        );
+        // A caller whose safety gate refused such a path asks for no second
+        // walk of the directories the restore leaves alone: the restore
+        // changes the directories it enters and leaves the file where it is.
+        restore_tree_to_worktree_gated(
+            &store,
+            &base,
+            Some(next),
+            target.path(),
+            &opts,
+            &rd,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+        assert_eq!(
+            fs::read(target.path().join("kept/deep/notes.txt")).unwrap(),
+            b"mine"
+        );
     }
 
     #[cfg(unix)]

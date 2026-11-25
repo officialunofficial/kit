@@ -44,10 +44,10 @@ These divergences stay while kit uses BLAKE3.
 
 - Submodules and subtrees.
 - Hooks, including `core.hooksPath`.
-- The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches and
-  nothing else: no wildcard, no leading `+` and no ref outside `refs/heads/`.
-  `push` does not take `--tags` or `--delete`. A remote delete and a tag
-  transfer need a transport verb that kit does not have.
+- The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches,
+  a lone tag name or `refs/tags/<t>` for one tag, and nothing else: no
+  wildcard, no leading `+`, no renamed tag and no other ref. `push --delete`
+  takes one branch or tag, never an empty `<src>`.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
 - Shallow clone. `clone --depth` is a usage error. A clone holds the full
@@ -248,8 +248,8 @@ The summaries have the shape of the Git summaries:
 
 - `push` prints `To <url>`, then one line for each ref. It prints
   `* [new branch]`, `<old>..<new>`, `+ <old>...<new> (forced update)` or
-  `! [rejected] ... (non-fast-forward)`. It prints `Everything up-to-date`
-  when nothing changes.
+  `! [rejected] ... (non-fast-forward)`, and ` - [deleted]` for
+  `push --delete`. It prints `Everything up-to-date` when nothing changes.
 - `pull` prints `Updating <a>..<b>`, `Fast-forward` and a diffstat. It prints
   `Already up to date.` when nothing changes.
 - `fetch` prints `From <url>` and one line for each ref. It prints nothing
@@ -276,8 +276,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   compares the index with the working tree. `kit diff --staged` matches Git.
 - **Untracked directories.** `status` lists each untracked file. Git lists the
   directory, for example `u/`.
-- **Ignore files.** kit reads `.gitignore` and `.kitignore` at the repository
-  root. kit does not read ignore files in subdirectories.
+- **Ignore files.** kit reads `.gitignore` and `.kitignore` in each visited
+  directory. Deeper files win, with `.kitignore` last at each level.
+  Per-directory rules override `.kit/info/exclude`, then the global
+  `$XDG_CONFIG_HOME/git/ignore` (default `~/.config/git/ignore`).
+  kit does not read Git’s `core.excludesFile` config key.
 - **Conflict markers.** kit labels the sides `ours` and `theirs`. Git uses
   `HEAD` and the name of the merged branch.
 - **Author and date.** `log` prints the signing identity, for example
@@ -331,12 +334,42 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `<branch>` under its own name, the current branch or not. Both sides must be branches, as a
   name or as `refs/heads/<name>`. A refspec push records no upstream unless
   `-u` is set. Git also takes a tag, a wildcard, a leading `+` and an empty
-  `<src>`; kit rejects each of them.
+  `<src>`; kit rejects each of them, and deletes through `--delete`.
 - **`fetch --prune`.** `fetch --prune` deletes the tracking refs of one
   remote whose branch the remote lost. It deletes a ref only after a complete
   fetch, and only when a fresh read of the remote branch finds nothing. It
   prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
-  tags that a refspec maps; kit has no tag transfer and prunes no tag.
+  tags that a refspec maps; kit prunes no tag.
+- **Tags on `push`.** `push --tags` pushes every local tag and nothing else,
+  and conflicts with `--all` and a refspec, as in Git. `push <remote> <t>`
+  pushes one tag; a name that is both a branch and a tag is an error, and
+  `refs/heads/<n>` or `refs/tags/<n>` picks one. A remote tag with another
+  value is refused unless `--force` (or `--force-with-lease`), and a forced
+  update conditions on the value kit read. Unlike Git, kit refuses an
+  unsigned annotated tag and an annotated tag
+  whose object names another tag. Each tag is reported on its own line, and
+  the push exits 1 if any was refused.
+- **`push --delete`.** `push --delete <remote> <name>` deletes one remote
+  branch or tag, as Git's does, and takes `refs/heads/<n>` or
+  `refs/tags/<n>` for a name the remote holds as both. Unlike Git, a branch
+  is deleted only while it holds its tracking ref's value, the lease of a
+  push, and a branch with no tracking ref is refused. The tracking ref goes
+  with it. Git refuses to delete a ref the remote does not hold; kit does
+  so for a tag, but reports a tracked branch the remote no longer holds as
+  deleted. The branch's packmap or the tag's tag map goes too
+  (SPEC-TRANSPORT §7.3). Git takes several refs and `:<dst>`; kit takes one
+  ref, and refuses `--delete` with `--all`, `--tags`, `--force`,
+  `--force-with-lease` and `-u`. An S3 remote refuses every delete, since
+  kit cannot delete there under a condition.
+- **Tags on `fetch`, `pull` and `clone`.** kit takes every remote tag by
+  default, as Git's `--tags` does; Git follows only the tags that point into
+  the fetched history. `--tags` is accepted and means the same, and
+  `--no-tags` skips them. A tag publishes only once kit proves its closure,
+  its tag object's name and, with signature checks on, its history. A remote
+  tag with another value than the local one is refused with `would clobber
+  existing tag`, as in Git, and kit has no `--force` for it. A refused tag
+  prints ` ! [rejected]        <t> -> <t> (<reason>)` and the command exits 1
+  after the branches and the other tags are published.
 - **`branch -r` / `-a`.** `branch -r` lists the `refs/remotes/<remote>/*`
   refs of every remote as `<remote>/<branch>`. `branch -a` lists the local
   branches, then the tracking refs as `remotes/<remote>/<branch>`. The `*`
@@ -443,12 +476,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
-  tags. `push` sends none, and the pack chain of a branch carries only the
-  objects that the branch reaches, so a remote tag object has no transfer
-  path. Tags need a listing and a transfer step in the transport first.
 - `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
   file of a paused rebase holds a closed list of keywords, and a new keyword
   would change that state format.
-- `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
-  kit rejects each form. `stash` always saves the whole working tree.
+- `stash push -a` / `--all` &mdash; ignored files are not included.
+- `switch @{-N}` with N greater than 1 &mdash; kit retains only the previous
+  HEAD. `switch -`, `checkout -`, and `@{-1}` are supported.
+- `stash push` pathspec glob and magic syntax &mdash; kit accepts file and
+  directory prefixes only. `-u` / `--include-untracked` is supported.

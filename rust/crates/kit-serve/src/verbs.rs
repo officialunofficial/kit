@@ -9,10 +9,13 @@
 //! | `ReadRef` | any other | `INTERNAL "read ref failed"` |
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
 //! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
-//! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
+//! | `UpdateRef` | an empty `new_id` (a delete) under `ANY` or `MISSING` | `INVALID_REQUEST`, [`DELETE_NEEDS_MATCH`] |
+//! | `UpdateRef` | a CAS conflict, a delete's included | [`cas_conflict_body`] |
 //! | `UpdateRef` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
-//! | `ListRefs` | any | `INTERNAL "list refs failed"` |
+//! | `ListRefs` | no `page_size`, or a `page_size` of 0 | `INVALID_REQUEST`, [`LIST_NEEDS_PAGE_SIZE`] |
+//! | `ListRefs` | a `page_token` over 512 bytes | `INVALID_REQUEST "invalid page token"` |
+//! | `ListRefs` | any other | `INTERNAL "list refs failed"` |
 //! | `ReadRepoCursor` | any | a reply with no cursor |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a read, after the header | `INTERNAL "pack read failed"` |
@@ -29,7 +32,7 @@ use kit_core::protocol::PackKey;
 use kit_core::refs::{RefWriteCondition, validate_ref_name};
 use kit_rpc::kit::common::v1::RefEntry;
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, DownloadPackHeader, ListRefsResponse, PackChunk, PackExistsResponse,
+    DownloadPack, DownloadPackHeader, ListRefs, ListRefsResponse, PackChunk, PackExistsResponse,
     ReadRefResponse, ReadRepoCursorResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
@@ -60,6 +63,23 @@ const MAX_LISTING_BYTES: usize = kit_rpc::MAX_FRAME_BYTES as usize - 1024;
 /// the tags and the lengths.
 const LISTING_ENTRY_OVERHEAD: usize = 48;
 
+/// The most refs in one `ListRefs` reply. A request for more gets this many.
+/// Even 1,000 names of the longest length fit one frame, as the check below
+/// proves, so a page never needs a byte count.
+pub const MAX_LIST_PAGE_REFS: usize = 1000;
+
+const _: () = assert!(
+    MAX_LIST_PAGE_REFS * (MAX_REF_NAME_BYTES + LISTING_ENTRY_OVERHEAD) <= MAX_LISTING_BYTES
+);
+
+/// The reply to a `ListRefs` that names no page size. A client from before
+/// listings paged sends none: it is refused, not given a first page that it
+/// would take for the whole listing and prune against.
+pub const LIST_NEEDS_PAGE_SIZE: &str = "list refs needs a page_size; upgrade the client";
+
+/// The reply to a `ListRefs` page token that no listing could have returned.
+const INVALID_PAGE_TOKEN: &str = "invalid page token";
+
 /// A request digest as a pack key.
 fn pack_key(id: Option<&[u8]>) -> Result<PackKey, VerbError> {
     digest(DigestField::Pack, id)
@@ -81,6 +101,20 @@ fn decode_update_ref(req: &UpdateRef) -> Result<(String, RefWriteCondition, Hash
     let condition =
         condition(expectation, req.expected_id.as_deref().unwrap_or_default()).map_err(bad)?;
     Ok((req.name.clone().unwrap_or_default(), condition, new))
+}
+
+/// The reply to a delete (an empty `new_id`) under `ANY` or `MISSING`.
+pub const DELETE_NEEDS_MATCH: &str = "a delete (empty new_id) requires a MATCH expectation";
+
+/// A decoded delete, an `UpdateRef` with an empty `new_id` (SPEC-TRANSPORT
+/// §4.2.1): the name and the value the ref must hold. Only `MATCH` deletes.
+fn decode_delete_ref(req: &UpdateRef) -> Result<(String, Hash), VerbError> {
+    let bad = |message| (ErrorCode::InvalidRequest, message);
+    let expectation = req.expectation.map_or(0, |e| e.to_i32());
+    match condition(expectation, req.expected_id.as_deref().unwrap_or_default()).map_err(bad)? {
+        RefWriteCondition::Match(expected) => Ok((req.name.clone().unwrap_or_default(), expected)),
+        _ => Err(bad(DELETE_NEEDS_MATCH)),
+    }
 }
 
 /// The reply to a failed CAS (SPEC-TRANSPORT §4.2.1): `Error{INVALID_REQUEST}`
@@ -117,18 +151,6 @@ fn check_name(name: &str) -> Result<(), VerbError> {
     } else {
         Ok(())
     }
-}
-
-/// Whether a listing of `refs` fits one reply frame.
-fn listing_fits(refs: &[(String, Hash)]) -> bool {
-    let mut total = 0usize;
-    for (name, _) in refs {
-        total = total.saturating_add(name.len() + LISTING_ENTRY_OVERHEAD);
-        if total > MAX_LISTING_BYTES {
-            return false;
-        }
-    }
-    true
 }
 
 /// The verbs of one session: its repository and the key that the transport
@@ -189,7 +211,7 @@ impl<'r> Verbs<'r> {
             }),
             Body::ReadRef(req) => self.read_ref(req.name.as_deref().unwrap_or_default()),
             Body::UpdateRef(req) => self.update_ref(req),
-            Body::ListRefs(req) => self.list_refs(req.prefix.as_deref().unwrap_or_default()),
+            Body::ListRefs(req) => self.list_refs(req),
             Body::ReadRepoCursor(_) => Ok(self.read_repo_cursor()),
             _ => return None,
         })
@@ -216,6 +238,9 @@ impl<'r> Verbs<'r> {
     }
 
     fn update_ref(&self, req: &UpdateRef) -> Result<Body, VerbError> {
+        if req.new_id.as_deref().unwrap_or_default().is_empty() {
+            return self.delete_ref(req);
+        }
         let failed = (ErrorCode::InvalidRequest, "update ref failed");
         let (name, condition, new) = decode_update_ref(req)?;
         check_name(&name)?;
@@ -232,14 +257,47 @@ impl<'r> Verbs<'r> {
         }
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Body, VerbError> {
-        let failed = (ErrorCode::Internal, "list refs failed");
-        let listed = self.repo.list_refs(prefix).map_err(|_| failed)?;
-        if !listing_fits(&listed) {
+    /// `UpdateRef` with an empty `new_id`: delete the ref if it holds
+    /// `expected_id`. An absent ref or another value is a CAS conflict, and
+    /// nothing is deleted.
+    fn delete_ref(&self, req: &UpdateRef) -> Result<Body, VerbError> {
+        let failed = (ErrorCode::InvalidRequest, "update ref failed");
+        let (name, expected) = decode_delete_ref(req)?;
+        check_name(&name)?;
+        if !is_served_ref_name(&name) {
             return Err(failed);
         }
+        if !self.may_write() {
+            return Err(WRITE_NOT_PERMITTED);
+        }
+        match self.repo.delete_ref(&name, &expected) {
+            Ok(RefUpdate::Committed) => Ok(Body::UpdateRefResponse(Box::default())),
+            Ok(RefUpdate::Conflict { current }) => Ok(cas_conflict_body(current)),
+            Err(_) => Err(failed),
+        }
+    }
+
+    /// `ListRefs` (SPEC-TRANSPORT §4.2): one page of the listing, in name
+    /// order. The page token is the last name of the page before, so the
+    /// listing carries on across a reconnect. A name that was listed and has
+    /// since gone is as good a token as one that is still there.
+    fn list_refs(&self, req: &ListRefs) -> Result<Body, VerbError> {
+        let failed = (ErrorCode::Internal, "list refs failed");
+        let page_size = match req.page_size {
+            Some(size) if size > 0 => (size as usize).min(MAX_LIST_PAGE_REFS),
+            _ => return Err((ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE)),
+        };
+        let token = req.page_token.as_deref().unwrap_or_default();
+        if token.len() > MAX_REF_NAME_BYTES {
+            return Err((ErrorCode::InvalidRequest, INVALID_PAGE_TOKEN));
+        }
+        let page = self
+            .repo
+            .list_refs_page(req.prefix.as_deref().unwrap_or_default(), token, page_size)
+            .map_err(|_| failed)?;
         Ok(Body::ListRefsResponse(Box::new(ListRefsResponse {
-            refs: listed
+            refs: page
+                .refs
                 .into_iter()
                 .map(|(name, id)| RefEntry {
                     name: Some(name),
@@ -247,6 +305,7 @@ impl<'r> Verbs<'r> {
                     ..Default::default()
                 })
                 .collect(),
+            next_page_token: page.next_after,
             ..Default::default()
         })))
     }
@@ -421,21 +480,5 @@ mod tests {
             cond(RefExpectation::Match),
             RefWriteCondition::Match([2; 32])
         );
-    }
-
-    #[test]
-    fn a_listing_that_overflows_a_frame_is_refused() {
-        let entry = |n: usize| ("a".repeat(n), [0u8; 32]);
-        assert!(listing_fits(&[]));
-        assert!(listing_fits(&vec![entry(100); 1000]));
-        let per_entry = 100 + LISTING_ENTRY_OVERHEAD;
-        assert!(listing_fits(&vec![
-            entry(100);
-            MAX_LISTING_BYTES / per_entry
-        ]));
-        assert!(!listing_fits(&vec![
-            entry(100);
-            MAX_LISTING_BYTES / per_entry + 1
-        ]));
     }
 }

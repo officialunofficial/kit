@@ -31,6 +31,22 @@ fn dir(layout: &RepoLayout) -> PathBuf {
     layout.applied_packs_dir().join(".verified")
 }
 
+/// Drop every record. A history walk then stops at no recorded tip.
+///
+/// # Errors
+/// The records cannot be removed.
+pub(crate) fn forget_all(layout: &RepoLayout) -> std::io::Result<()> {
+    remove_dir_if_present(&dir(layout))
+}
+
+/// Remove `path` and everything under it; a missing one is already removed.
+pub(crate) fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// The record of `branch` of `remote`. Length prefixes keep two different
 /// pairs from naming one file.
 pub(crate) fn path(layout: &RepoLayout, remote: &str, branch: &str) -> PathBuf {
@@ -76,7 +92,7 @@ pub(crate) fn load(path: &Path) -> Option<Hash> {
 pub(crate) fn persist(path: &Path, tip: &Hash) -> std::io::Result<()> {
     let body = format!("{VERIFIED_TIP_TAG}\n{}", to_hex(tip));
     let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
-    crate::applied_packs::write_atomic(path, bytes.as_bytes())
+    kit_core::durable::write_cache(path, bytes.as_bytes(), kit_core::durable::Parents::Create)
 }
 
 /// Whether the record of `branch` of `remote` names `tip`: a fetch that

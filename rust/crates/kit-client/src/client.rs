@@ -19,7 +19,11 @@ use crate::proto::{
 };
 use crate::seams::{NoObserver, NoRequestPolicy, Observer, RequestPolicy, WriteIntent, procedures};
 use kit_core::{
-    hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan, write_auth::ContentCommitment,
+    hash::Hash,
+    protocol::{PackBody, PackSink},
+    refs::RefWriteCondition,
+    upload_parts::PartPlan,
+    write_auth::ContentCommitment,
 };
 
 /// The signer type of an anonymous client. It has no values.
@@ -99,6 +103,7 @@ pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver, P: ?Sized = 
     unsigned_writes: bool,
     pack_locations: bool,
     location_lifetime: std::sync::OnceLock<Option<u64>>,
+    attestation_info: std::sync::OnceLock<GetServerInfoResponse>,
 }
 
 impl<T, S, C, O, P: ?Sized> std::fmt::Debug for Client<'_, T, S, C, O, P> {
@@ -124,6 +129,7 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -144,6 +150,7 @@ impl<'a, T: HttpTransport, C: Clock> Client<'a, T, NoSigner, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -177,6 +184,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 
@@ -193,6 +201,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -251,6 +260,7 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             unsigned_writes: self.unsigned_writes,
             pack_locations: self.pack_locations,
             location_lifetime: self.location_lifetime,
+            attestation_info: self.attestation_info,
         }
     }
 
@@ -270,6 +280,7 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             unsigned_writes: self.unsigned_writes,
             pack_locations: self.pack_locations,
             location_lifetime: self.location_lifetime,
+            attestation_info: self.attestation_info,
         }
     }
 }
@@ -353,7 +364,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// # Errors
     /// Transport, remote or decoding failures.
     pub async fn server_info(&self) -> Result<GetServerInfoResponse, Error> {
-        self.rpc()
+        let info: GetServerInfoResponse = self
+            .rpc()
             .unary_with(
                 "GetServerInfo",
                 &crate::proto::GetServerInfoRequest::default(),
@@ -361,7 +373,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             )
             .await
             .map(|(value, _)| value)
-            .map_err(Error::typed)
+            .map_err(Error::typed)?;
+        let _ = self.attestation_info.set(info.clone());
+        Ok(info)
     }
 
     /// One `ListRefs` page. `page_size` 0 asks for the server's maximum.
@@ -576,32 +590,47 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Ok(Reply { value, identity })
     }
 
-    /// `DownloadPack`, bounded by `max_bytes`: a larger declared size or a
-    /// longer response is [`Error::Limit`]. The response cap is `max_bytes` plus
-    /// 1/512 plus 8 KiB for framing, which assumes the server's chunks are at
-    /// least about 30 KiB (the reference server sends 800 KiB). The pack must hash to `pack_id`.
-    /// A transport with incremental responses retains the final pack and one
-    /// response frame. The buffered fallback retains the response plus the
-    /// returned pack, so its peak memory is about twice `max_bytes` plus framing.
-    /// An individual frame is bounded by the same response cap. A failed
-    /// negotiated location triggers one separately signed streaming call with
-    /// a fresh identity, which is returned in the reply.
+    /// `DownloadPack` into `sink`, bounded by `max_bytes`: a larger declared
+    /// size or a longer response is [`Error::Limit`]. Returns the pack's
+    /// length. The response cap is `max_bytes` plus 1/512 plus 8 KiB for
+    /// framing, which assumes the server's chunks are at least about 30 KiB
+    /// (the reference server sends 800 KiB).
+    ///
+    /// The client writes each chunk to `sink` as it arrives and holds one
+    /// response frame, at most [`DOWNLOAD_FRAME_MAX`](crate::DOWNLOAD_FRAME_MAX)
+    /// bytes, whose length it checks before reading the frame. It checks the
+    /// chunks' order and the declared length, but not the key: **the sink's
+    /// owner verifies that the bytes hash to `pack_id`** before using them,
+    /// as kit-sync's spool does. A transport without incremental responses
+    /// still buffers the whole response first.
+    ///
+    /// When the server offers a location, its bytes go to the same sink
+    /// through a check of their length and key; on a mismatch or any
+    /// location failure, one separately signed streaming call with a fresh
+    /// identity restarts the sink ([`PackSink::begin`]), and that identity
+    /// is returned in the reply. A local write failure, shown by
+    /// [`PackSink::failed`], ends the download at once, with no fallback.
     ///
     /// # Errors
-    /// Transport, remote, limit or commitment failures.
+    /// Transport, remote, limit or order failures, or the sink's failure.
     pub async fn download_pack(
         &self,
         pack_id: &Hash,
         ref_hint: Option<&str>,
         max_bytes: u64,
+        sink: &mut dyn PackSink,
         identity: Option<&Identity>,
-    ) -> Result<Reply<Vec<u8>>, Error> {
+    ) -> Result<Reply<u64>, Error> {
         let opts = Opts {
             identity,
             hint: ref_hint,
             ..Opts::default()
         };
-        reply(self.rpc().download_with(*pack_id, max_bytes, opts).await)
+        reply(
+            self.rpc()
+                .download_with(*pack_id, max_bytes, opts, sink)
+                .await,
+        )
     }
 
     /// Walk a branch's packmap chain from `packmap_root` and return its pack
@@ -636,6 +665,53 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<Reply<UpdateRefResponse>, Error> {
         self.require_write_auth()?;
         reply(calls::update_ref(&self.rpc(), name, expected, Some(new_id), identity).await)
+    }
+
+    /// Consume upload reservations atomically with an attestmap CAS.
+    /// Discovery refuses unsupported servers before sending a write. The server
+    /// decides whether the pack set needs append or force permission.
+    pub async fn write_attestmap(
+        &self,
+        expected: RefWriteCondition,
+        new_id: Hash,
+        tickets: &[Hash],
+        identity: Option<&Identity>,
+    ) -> Result<Reply<crate::proto::UpdateRefResponse>, Error> {
+        self.require_write_auth()?;
+        if matches!(expected, RefWriteCondition::Any)
+            || tickets.len() > 1024
+            || tickets
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != tickets.len()
+        {
+            return Err(Error::Invalid("attestmap CAS or reservation count"));
+        }
+        let info = match self.attestation_info.get() {
+            Some(info) => info.clone(),
+            None => self.server_info().await?,
+        };
+        if info.protocol.as_deref() != Some("kit.transport.v1")
+            || info.spec_version.is_none_or(|version| version < 2)
+            || info.supports_attestations != Some(true)
+        {
+            return Err(Error::Invalid("attestation log unsupported"));
+        }
+        if tickets.len() > crate::advance_ticket_limit(&info) as usize {
+            return Err(Error::Invalid("attestmap reservation count"));
+        }
+        reply(
+            calls::update_ref_committing(
+                &self.rpc(),
+                kit_core::refs::ATTESTMAP_REF,
+                expected,
+                Some(new_id),
+                tickets,
+                identity,
+            )
+            .await,
+        )
     }
 
     /// `UpdateRef` with `delete`, under the same precondition rules.
@@ -725,17 +801,19 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     }
 
     /// `UploadPack` of the whole `pack`, optionally under a ticket token. The
-    /// framed request is buffered, so peak memory is the pack plus its frames
-    /// plus the transport's replay copy. The observer's
-    /// [`new_objects`](crate::WriteIntent::new_objects) and ticket ids are empty
-    /// here (only the opaque token is passed).
+    /// pack is read from its body one 800 KiB chunk at a time as the request
+    /// is sent, so a channel that streams requests holds one chunk; the
+    /// default buffered channel still holds the framed request. The signed
+    /// commitment is the pack's id and length, known before any byte is read.
+    /// The observer's [`new_objects`](crate::WriteIntent::new_objects) and
+    /// ticket ids are empty here (only the opaque token is passed).
     ///
     /// # Errors
-    /// As [`Client::begin_upload`].
+    /// As [`Client::begin_upload`], and a local failure to read the body.
     pub async fn upload_pack(
         &self,
         pack_id: &Hash,
-        pack: &[u8],
+        pack: &dyn PackBody,
         ticket_token: Option<&[u8]>,
         identity: Option<&Identity>,
     ) -> Result<Reply<UploadPackResponse>, Error> {
@@ -754,27 +832,24 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         )
     }
 
-    /// `UploadPart` for part `index` of a multipart upload. `plan` is the
-    /// geometry the ticket's part size and the server's part limit define, and
-    /// `part` must be exactly the part the plan expects at `index`.
+    /// `UploadPart` for part `index` of a multipart upload of `pack`. `plan`
+    /// is the geometry the ticket's part size and the server's part limit
+    /// define, and `pack` must be the whole pack the plan covers. The part is
+    /// read from `pack` twice and never held whole: once to compute its
+    /// signed commitment, then once to send it.
     ///
     /// # Errors
-    /// A part that does not fit the plan, otherwise as [`Client::begin_upload`].
+    /// A pack whose length is not the plan's, otherwise as
+    /// [`Client::begin_upload`], and a local failure to read the body.
     pub async fn upload_part(
         &self,
         ticket: &UploadTicket,
         plan: &PartPlan,
         index: u32,
-        part: &[u8],
+        pack: &dyn PackBody,
         identity: Option<&Identity>,
     ) -> Result<Reply<UploadPartResponse>, Error> {
         self.require_write_auth()?;
-        let expected = plan
-            .expected_len(index)
-            .map_err(|_| Error::Invalid("part length"))?;
-        if expected != part.len() as u64 {
-            return Err(Error::Invalid("part length"));
-        }
         let ticket_id = id32(ticket.id.as_deref(), "ticket id")?;
         reply(
             calls::upload_part(
@@ -783,7 +858,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                 ticket.token.clone(),
                 plan,
                 index,
-                part,
+                pack,
                 None,
                 identity,
             )

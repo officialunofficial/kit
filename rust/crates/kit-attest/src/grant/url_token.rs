@@ -373,6 +373,21 @@ mod tests {
     }
 
     #[test]
+    fn encoded_statement_cap_is_checked_before_base64_decoding() {
+        let statement = statement(object());
+        let request = request(&statement.repository, &statement.target, ISSUED);
+        let cap = MAX_STATEMENT_BYTES.div_ceil(3) * 4;
+        assert!(matches!(
+            verify_url_token(&format!("{}.AA", "!".repeat(cap)), &[], &request),
+            Err(GrantError::TokenBase64)
+        ));
+        assert!(matches!(
+            verify_url_token(&format!("{}.AA", "!".repeat(cap + 1)), &[], &request),
+            Err(GrantError::StatementTooLong)
+        ));
+    }
+
+    #[test]
     fn statement_roundtrips() {
         for target in [
             object(),

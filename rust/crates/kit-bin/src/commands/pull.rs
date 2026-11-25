@@ -54,11 +54,17 @@ struct PullOpts {
     /// `--abort`. Does not combine with `--all` or `--rebase`.
     #[arg(long = "no-ff", conflicts_with_all = ["all", "rebase"])]
     no_ff: bool,
+    #[command(flatten)]
+    tags: super::fetched_tags::TagFlags,
+    #[command(flatten)]
+    attestations: super::fetched_tags::AttestationFlags,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
-    /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`. With
-    /// `--all`, one JSON object is printed per remote pulled. With
-    /// `--rebase`, the object is the one that `kit rebase` prints.
+    /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`, plus
+    /// the tag fields of `kit fetch --format=json`. With `--all`, one JSON
+    /// object is printed per remote pulled. With `--rebase`, the object is
+    /// the one that `kit rebase` prints, and with `--no-ff` the one of
+    /// `kit merge`; neither carries the tag fields.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
     /// Suppress transfer progress output on stderr.
@@ -124,6 +130,7 @@ pub fn run(args: &[String]) -> u8 {
 /// is empty), fast-forwarding the current branch and reporting a
 /// git-style summary. Shared by the single-remote path and the `--all`
 /// loop. With `--rebase` it fetches and then rebases.
+#[allow(clippy::too_many_lines)] // Keep transfer, progress and the final exit status together.
 fn pull_one(
     cwd: &Path,
     layout: &RepoLayout,
@@ -171,19 +178,30 @@ fn pull_one(
                                 &resolved.name,
                                 require_signed,
                                 false,
+                                opts.tags.fetch_tags(),
+                                &cfg.merged,
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
-                            .map(|_| None)
+                            .map(|fetch| (fetch, None))
                         } else {
                             remote_dispatch::pull_all_with_source(
                                 cwd,
                                 source,
                                 &resolved.name,
                                 None,
+                                true,
                                 require_signed,
+                                opts.tags.fetch_tags(),
+                                &cfg.merged,
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
-                            .map(Some)
+                            .map(|report| {
+                                let mut fetch = report.fetch;
+                                fetch.maintenance = report.maintenance;
+                                (fetch, Some(report.outcome))
+                            })
                         }
                     })
                     .and_then(|result| result);
@@ -194,10 +212,29 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
-                Ok(None) if opts.no_ff => merge_fetched(layout, &resolved.name, json),
-                Ok(None) => rebase_onto_fetched(layout, &resolved.name, json),
-                Ok(Some(report)) => {
-                    report_fast_forward(layout, &resolved.name, endpoint, report.outcome, json)
+                Ok((fetch, outcome)) => {
+                    let tags = {
+                        let mut stderr = std::io::stderr().lock();
+                        super::fetched_tags::print_new(&fetch, &mut stderr);
+                        super::fetched_tags::print_problems(&fetch, &mut stderr)
+                    };
+                    let code = match outcome {
+                        None if opts.no_ff => {
+                            merge_fetched(layout, &resolved.name, require_signed, json)
+                        }
+                        None => rebase_onto_fetched(layout, &resolved.name, require_signed, json),
+                        Some(outcome) => report_fast_forward(
+                            layout,
+                            &resolved.name,
+                            endpoint,
+                            outcome,
+                            &fetch,
+                            json,
+                        ),
+                    };
+                    super::maintenance::print(fetch.maintenance.as_ref(), quiet);
+                    // A refused tag fails the pull only after the branch moved.
+                    if code == exit::OK { tags } else { code }
                 }
                 Err(libkit::transfer::Error::Interrupted) => {
                     emit_err_json("pull: interrupted", exit::TEMPFAIL, json)
@@ -222,6 +259,7 @@ fn report_fast_forward(
     remote: &str,
     endpoint: &str,
     outcome: kit_sync::PullOutcome,
+    fetch: &kit_sync::FetchReport,
     json: bool,
 ) -> u8 {
     let (branch, old_tip, new_tip, up_to_date) = match outcome {
@@ -249,13 +287,15 @@ fn report_fast_forward(
     report_pull(layout, endpoint, old_tip, new_tip, up_to_date);
     if json {
         let mut obj = JsonObject::new();
-        obj.field_bool("ok", true)
+        obj.field_bool("ok", !fetch.tags_incomplete())
             .field_str("remote", remote)
             .field_str("endpoint", endpoint)
             .field_opt_str("branch", branch.as_deref())
             .field_opt_hash("old", old_tip.as_ref())
             .field_opt_hash("new", new_tip.as_ref())
             .field_bool("up_to_date", up_to_date);
+        super::fetched_tags::json_fields(&mut obj, fetch);
+        super::maintenance::json_field(&mut obj, fetch.maintenance.as_ref());
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
@@ -264,7 +304,7 @@ fn report_fast_forward(
 
 /// Rebase the current branch onto the branch that the fetch updated, unless
 /// the branch has that tip already.
-fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -301,6 +341,9 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
         }
     };
+    if let Err(code) = verify_fetched_tip(layout, &store, &upstream, require_signed, json) {
+        return code;
+    }
     // A branch that holds the fetched tip has nothing to replay. Replaying it
     // would rewrite its commits for no change.
     if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
@@ -321,7 +364,7 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
 /// Merge the branch that the fetch updated into the current branch, and write
 /// a merge commit even when a fast-forward is possible. A branch that holds
 /// the fetched tip is up to date and gets no commit.
-fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+fn merge_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -358,6 +401,9 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
         }
     };
+    if let Err(code) = verify_fetched_tip(layout, &store, &upstream, require_signed, json) {
+        return code;
+    }
     // The merge treats a fetched tip that `HEAD` already holds as a base, and
     // would write an empty merge commit for it.
     if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
@@ -372,9 +418,10 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             }
         }
     }
-    // The tracking ref names the target, so the message reads `Merge
-    // remote-tracking branch '<remote>/<branch>'`.
-    let target = format!("refs/remotes/{remote}/{branch}");
+    // Use the verified tip even if a fetch in another worktree moves the
+    // shared tracking ref. Keep the message that names the tracking branch.
+    let target = kit_core::hash::to_hex(&upstream);
+    let message = format!("Merge remote-tracking branch '{remote}/{branch}'");
     super::merge::start(
         layout,
         &store,
@@ -382,9 +429,55 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             target: &target,
             no_commit: false,
             no_ff: true,
-            message: None,
+            message: Some(&message),
         },
         json,
+    )
+}
+
+/// Verify the selected tip while the caller holds the worktree lock, before
+/// merge or rebase can write operation state, files, the index or HEAD.
+fn verify_fetched_tip(
+    layout: &RepoLayout,
+    store: &kit_core::store::ObjectStore,
+    tip: &Hash,
+    require_signed: bool,
+    json: bool,
+) -> Result<(), u8> {
+    // Merge and rebase resolve revision strings with local refs taking
+    // precedence over hashes. Refuse a shadowing ref so they use this tip.
+    let revision = kit_core::hash::to_hex(tip);
+    match libkit::revspec::resolve_revision(store, layout, &revision) {
+        Ok(resolved) if resolved == *tip => {}
+        Ok(_) => {
+            return Err(emit_err_json(
+                &format!(
+                    "pull: a local ref shadows fetched tip {revision}; rename the ref before pulling"
+                ),
+                exit::GENERAL_ERROR,
+                json,
+            ));
+        }
+        Err(e) => {
+            return Err(emit_err_json(
+                &format!("pull: {e}"),
+                exit::GENERAL_ERROR,
+                json,
+            ));
+        }
+    }
+    if !require_signed {
+        return Ok(());
+    }
+    kit_sync::verify_pull_tip(layout, store, tip, &crate::progress::Terminal::detached()).map_err(
+        |e| {
+            let code = match e {
+                kit_sync::SyncError::UnsignedOrInvalidObject { .. } => exit::DATAERR,
+                kit_sync::SyncError::Interrupted => exit::TEMPFAIL,
+                _ => exit::GENERAL_ERROR,
+            };
+            emit_err_json(&format!("pull: {e}"), code, json)
+        },
     )
 }
 

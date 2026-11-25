@@ -5,10 +5,7 @@
 #   cp kit.fish ~/.config/fish/completions/
 # or copy to a system completions dir on your distribution.
 #
-# Scope: subcommand completion + top-level flags. Completing sub-options
-# (branch names, remote URLs, etc.) is deferred so this file stays small
-# and easy to verify by eye — matches the bash/zsh completions shipped
-# alongside it.
+# Argument names come from the private, local-only kit __complete helper.
 
 # Disable file completion at the top level; we'll only complete known
 # subcommands until the user provides one.
@@ -215,6 +212,10 @@ complete -c kit -n "__fish_seen_subcommand_from reflog" \
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l all -d "Mirror every local branch"
 complete -c kit -n "__fish_seen_subcommand_from push" \
+    -l tags -d "Push every local tag"
+complete -c kit -n "__fish_seen_subcommand_from push" \
+    -l delete -d "Delete a remote branch or tag"
+complete -c kit -n "__fish_seen_subcommand_from push" \
     -l force -d "Overwrite the remote branch unconditionally (skip CAS)"
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l force-with-lease -d "Overwrite only if the remote hasn't moved"
@@ -222,6 +223,10 @@ complete -c kit -n "__fish_seen_subcommand_from push" \
     -l dry-run -d "Show what would be pushed"
 complete -c kit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
+complete -c kit -n "__fish_seen_subcommand_from clone" \
+    -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from clone" \
+    -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from branch" \
     -s v -l verbose -d "Show abbreviated id + subject"
 complete -c kit -n "__fish_seen_subcommand_from branch" \
@@ -414,8 +419,8 @@ complete -c kit -n "__fish_seen_subcommand_from verify-proof" \
     -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from verify-proof" \
     -l payload-out -d "Write verified payload bytes" -r
-complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify" \
-    -a "export verify"
+complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify repair-indexes" \
+    -a "export verify repair-indexes"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l history -d "Full ancestry (history mode)"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
@@ -503,11 +508,15 @@ complete -c kit -n "__fish_seen_subcommand_from revert" -l format -d "Output for
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l all -d "Pull from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l rebase -d "Replay the current branch onto the fetched branch"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-ff -d "Always create a merge commit"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l all -d "Fetch from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s p -l prune -d "Delete remote-tracking refs gone from the remote"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"
@@ -515,3 +524,11 @@ complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcom
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from remove move" -s f -l force -d "Override the safety check (twice for a locked tree)"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from prune" -l dry-run -d "Report what would be pruned"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from lock" -l reason -d "Why the tree is locked" -r
+
+function __kit_argument_names
+    set -l words (commandline -opc)
+    command kit __complete $words[2..-1] 2>/dev/null
+end
+complete -c kit -n 'test (count (commandline -opc)) -gt 1' -a '(__kit_argument_names)'
+complete -c kit -n "__fish_seen_subcommand_from stash" -s u -l include-untracked -d "Include non-ignored untracked files"
+complete -c kit -n "__fish_seen_subcommand_from switch checkout" -a "- '@{-1}'" -d "Return to the previous HEAD"

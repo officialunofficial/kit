@@ -31,17 +31,8 @@ pub struct EncodedRangePlan {
     pub encoded_size: u64,
 }
 
-fn varint_size(mut value: u64) -> u128 {
-    let mut size = 1;
-    while value >= 128 {
-        value >>= 7;
-        size += 1;
-    }
-    size
-}
-
 fn vector_size(bytes: u64) -> u128 {
-    varint_size(bytes) + u128::from(bytes)
+    merkle::varint_size(bytes) as u128 + u128::from(bytes)
 }
 
 fn capped(size: u128) -> Result<u64, RangeProofError> {
@@ -65,7 +56,7 @@ fn prefix_size(commit_bytes: u64, steps: &[PrefixStep]) -> Result<u128, RangePro
     if steps.len() > crate::store::MAX_TREE_DEPTH {
         return Err(VerifyError::TooManySteps(steps.len()).into());
     }
-    let mut size = 38 + vector_size(commit_bytes) + varint_size(steps.len() as u64);
+    let mut size = 38 + vector_size(commit_bytes) + merkle::varint_size(steps.len() as u64) as u128;
     for step in steps {
         if step.name_len == 0 || step.name_len > 255 {
             return Err(VerifyError::Malformed.into());
@@ -303,8 +294,9 @@ impl ChunkedRangeSizer {
             // its proof) and the chunk's canonical bytes.
             let chunk_size = self.check(self.prefix + 64 + chunk_proof + vector_size(canonical))?;
             self.container += vector_size(chunk_size);
-            let encoded_size =
-                self.check(self.container + varint_size((index - first_index + 1) as u64))?;
+            let encoded_size = self.check(
+                self.container + merkle::varint_size((index - first_index + 1) as u64) as u128,
+            )?;
             (self.end <= next).then_some(EncodedRangePlan {
                 kind: RangeProofKind::Kdsp,
                 first: first_index,

@@ -466,6 +466,8 @@ mod tests {
             &with(6, "refs/kit/packmap/main=u"),
             GrantError::PackmapPattern,
         );
+        rejects(&with(6, "refs/kit/tagmap/*=c"), GrantError::TagmapPattern);
+        rejects(&with(6, "refs/kit/tagmap/v1=c"), GrantError::TagmapPattern);
         rejects(&with(6, "refs/heads/main=x"), GrantError::UnknownRefFlag);
         rejects(
             &with(6, "refs/heads/main=uc"),

@@ -7,9 +7,9 @@
 //! takes every setting as an argument. It never reads the config or the
 //! process state.
 //!
-//! The `*_with_source` operations take a [`RemoteSource`] and an observer. The
-//! other operations take a [`Transport`] and report nothing. Both kinds run
-//! the same engine.
+//! The `*_with_source` and `*_with_options` operations take a [`RemoteSource`]
+//! and an observer. The other operations take a [`Transport`] and report
+//! nothing. Both kinds run the same engine.
 
 pub mod envelope;
 mod error;
@@ -43,6 +43,8 @@ pub const DEFAULT_REBASELINE_DEPTH: usize = 64;
 /// What a successful push published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pushed {
+    /// Envelopes published.
+    pub attestations_pushed: usize,
     /// Branches pushed.
     pub refs: usize,
     /// Advances published in total. A push makes one advance for each branch
@@ -53,6 +55,10 @@ pub struct Pushed {
 /// The settings of a push that do not come from the repository.
 #[derive(Clone, Copy)]
 pub struct PushSettings<'a> {
+    /// Publish locally authored envelopes.
+    pub attestations: bool,
+    /// Resolved endpoint for the push cache key.
+    pub remote_url: &'a str,
     /// The durability schedule of the object store.
     pub sync_policy: SyncPolicy,
     /// The chain depth at which the push re-baselines the pack chain. Zero
@@ -76,6 +82,8 @@ impl std::fmt::Debug for PushSettings<'_> {
 impl Default for PushSettings<'_> {
     fn default() -> Self {
         Self {
+            attestations: false,
+            remote_url: "",
             sync_policy: SyncPolicy::Batch,
             rebaseline_threshold: DEFAULT_REBASELINE_DEPTH,
             authority: None,
@@ -86,6 +94,8 @@ impl Default for PushSettings<'_> {
 impl<'a> PushSettings<'a> {
     fn options(&self, observer: &'a dyn Observer<SyncEvent>) -> PushOptions<'a> {
         let mut options = PushOptions::default();
+        options.attestations = self.attestations;
+        options.remote_url = self.remote_url.into();
         options.sync_policy = self.sync_policy;
         options.rebaseline_threshold = self.rebaseline_threshold;
         options.control.authority = self.authority;
@@ -137,6 +147,7 @@ pub fn push_all_with_source(
     options.target = PushTarget::All { force };
     let report = kit_sync::push(cwd, source, &options)?;
     Ok(Pushed {
+        attestations_pushed: report.attestations_pushed,
         refs: report.refs,
         steps: report.steps,
     })
@@ -172,60 +183,80 @@ pub fn push_branch_tracked_with_source(
     Ok((report.tip.ok_or(Error::NotCommit)?, report.steps))
 }
 
-/// Fetch the refs of `remote`, then fast-forward the current branch from its
-/// tracking ref. Returns the number of branches fetched.
-///
-/// `require_signed` checks the signature of every new commit, remix and tag,
-/// and fails closed. Only an explicit opt-out of the caller turns it off.
+/// Push local tags to the remote, and return one result per tag, sorted by
+/// name. A refused tag is no error: its result says why, and the others
+/// still go. Without `force`, a remote tag that holds another value is
+/// refused; with it, the tag moves from the value the push read.
 ///
 /// # Errors
-/// The fetch or the fast-forward fails.
-pub fn pull_with_source(
+/// As [`push_all_with_source`], and [`Error::NoSuchTag`] when a named tag is
+/// not a local tag.
+pub fn push_tags_with_source(
     cwd: &Path,
     source: &dyn RemoteSource,
     remote: &str,
-    target_branch: Option<&str>,
-    require_signed: bool,
-    sync_policy: SyncPolicy,
+    selection: kit_sync::push::TagSelection,
+    force: bool,
+    settings: &PushSettings<'_>,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<usize, Error> {
-    let options = sync_options(target_branch, require_signed, sync_policy);
-    let report = kit_sync::pull(cwd, source, remote, &options, observer)?;
-    Ok(report.fetch.branches_fetched)
+) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
+    let mut options = settings.options(observer);
+    options.remote_name = remote;
+    options.target = PushTarget::Tags { selection, force };
+    Ok(kit_sync::push(cwd, source, &options)?.tags)
 }
 
-/// [`pull_with_source`] without the move of `HEAD`. It downloads every object
-/// that each remote ref reaches, and writes the ref to
-/// `refs/remotes/<remote>/<branch>`. Returns the number of branches fetched.
-///
-/// With `prune`, the fetch then deletes the tracking refs whose branch the
-/// remote no longer has.
+/// Delete one remote branch or tag with its chain ref, each under `Match`
+/// (SPEC-TRANSPORT §7.3). A branch's lease is its tracking ref, which goes
+/// too; a tag's expected value is the one read just before.
 ///
 /// # Errors
-/// The fetch fails.
-pub fn fetch_with_source(
+/// As [`push_all_with_source`], and [`Error::Delete`] when nothing was
+/// deleted: a stale lease, no tracking ref, a name the remote does not hold
+/// or holds twice, or a refusal (an s3 remote refuses every delete).
+pub fn push_delete_with_source(
     cwd: &Path,
     source: &dyn RemoteSource,
     remote: &str,
-    require_signed: bool,
-    prune: bool,
-    sync_policy: SyncPolicy,
+    target: kit_sync::push::DeleteTarget,
+    settings: &PushSettings<'_>,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<usize, Error> {
-    let options = sync_options(None, require_signed, sync_policy).with_prune(prune);
-    let report = kit_sync::fetch(cwd, source, remote, &options, observer)?;
-    Ok(report.branches_fetched)
+) -> Result<kit_sync::push::DeletedRef, Error> {
+    let mut options = settings.options(observer);
+    options.remote_name = remote;
+    options.target = PushTarget::Delete(target);
+    kit_sync::push(cwd, source, &options)?
+        .deleted
+        .ok_or(Error::NotCommit)
 }
 
-fn sync_options(
-    target_branch: Option<&str>,
-    require_signed: bool,
-    sync_policy: SyncPolicy,
-) -> SyncOptions {
-    SyncOptions::default()
-        .with_verify_signatures(require_signed)
-        .with_target_branch(target_branch.map(str::to_owned))
-        .with_sync_policy(sync_policy)
+/// Fetch with explicit synchronization options, including attestation controls.
+/// Set `options.attestations` to false to skip attestation reads and writes.
+///
+/// # Errors
+/// The code fetch fails. Attestation failures appear only in the report.
+pub fn fetch_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::FetchReport, Error> {
+    Ok(kit_sync::fetch(cwd, source, remote, options, observer)?)
+}
+
+/// Pull with explicit synchronization options, including attestation controls.
+///
+/// # Errors
+/// The code fetch or fast-forward fails.
+pub fn pull_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::PullReport, Error> {
+    Ok(kit_sync::pull(cwd, source, remote, options, observer)?)
 }
 
 /// Push every branch over `transport`. Returns the number of branches pushed.
@@ -275,71 +306,26 @@ pub fn push_branch(
     tip: Hash,
     condition: RefWriteCondition,
 ) -> Result<(), Error> {
-    push_branch_with_depth(
-        transport,
-        store,
-        branch,
-        tip,
-        condition,
-        DEFAULT_REBASELINE_DEPTH,
-    )
-}
-
-/// [`push_branch`] with a chain depth in place of the default.
-///
-/// # Errors
-/// As [`push_branch`].
-pub fn push_branch_with_depth(
-    transport: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: RefWriteCondition,
-    rebaseline_threshold: usize,
-) -> Result<(), Error> {
-    push_branch_with_limits(
-        transport,
-        store,
-        branch,
-        tip,
-        condition,
-        rebaseline_threshold,
-        kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP,
-    )
-}
-
-/// [`push_branch_with_depth`] with a bound on the payload of one pack in place
-/// of the preferred size of 256 MiB. The push grows it only when one commit needs more.
-///
-/// # Errors
-/// As [`push_branch`].
-pub fn push_branch_with_limits(
-    transport: &dyn Transport,
-    store: &ObjectStore,
-    branch: &str,
-    tip: Hash,
-    condition: RefWriteCondition,
-    rebaseline_threshold: usize,
-    pack_payload_cap: u64,
-) -> Result<(), Error> {
     push_branch_steps(
         transport,
         store,
         branch,
         tip,
         condition,
-        rebaseline_threshold,
-        pack_payload_cap,
+        DEFAULT_REBASELINE_DEPTH,
+        kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP,
         &PushControl::default(),
         &mut |_| Ok(()),
     )
     .map(drop)
 }
 
-/// [`push_branch_with_limits`] that splits a push too large for one advance
-/// along the first-parent history of the branch. It reports each published
-/// advance to `on_step` with the commit that the remote branch now holds.
-/// Returns the number of advances.
+/// [`push_branch`] with a chain depth and a bound on the payload of one pack
+/// in place of the defaults (the preferred pack size is 256 MiB; the push
+/// grows it only when one commit needs more). It splits a push too large for
+/// one advance along the first-parent history of the branch. It reports each
+/// published advance to `on_step` with the commit that the remote branch now
+/// holds. Returns the number of advances.
 ///
 /// The split applies when the transport uploads with tickets and the estimate
 /// of the packs of the push exceeds the data-pack budget of one advance. The
@@ -410,55 +396,52 @@ pub fn plan_push_steps(
     .map_err(Into::into)
 }
 
-/// [`pull_with_source`] over `transport` with the default settings. It checks
-/// signatures and reports no progress.
+/// [`pull_with_options`] over `transport` with the default settings. It checks
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
-/// As [`pull_with_source`].
+/// As [`pull_with_options`].
 pub fn pull_all(
     cwd: &Path,
     transport: &dyn Transport,
     remote: &str,
     target_branch: Option<&str>,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     pull_all_with(cwd, transport, remote, target_branch, true)
 }
 
 /// [`pull_all`] with a switch for the check of signatures.
 ///
 /// # Errors
-/// As [`pull_with_source`].
+/// As [`pull_with_options`].
 pub fn pull_all_with(
     cwd: &Path,
     transport: &dyn Transport,
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
-) -> Result<usize, Error> {
-    pull_with_source(
-        cwd,
-        &source(transport),
-        remote,
-        target_branch,
-        require_signed,
-        SyncPolicy::Batch,
-        &NoopObserver,
-    )
+) -> Result<kit_sync::PullReport, Error> {
+    let options = SyncOptions::default()
+        .with_verify_signatures(require_signed)
+        .with_target_branch(target_branch.map(str::to_owned))
+        .with_tags(true)
+        .with_sync_policy(SyncPolicy::Batch);
+    pull_with_options(cwd, &source(transport), remote, &options, &NoopObserver)
 }
 
-/// [`fetch_with_source`] over `transport` with the default settings. It checks
-/// signatures and reports no progress.
+/// [`fetch_with_options`] over `transport` with the default settings. It checks
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
-/// As [`fetch_with_source`].
-pub fn fetch_all(cwd: &Path, transport: &dyn Transport, remote: &str) -> Result<usize, Error> {
-    fetch_with_source(
-        cwd,
-        &source(transport),
-        remote,
-        true,
-        false,
-        SyncPolicy::Batch,
-        &NoopObserver,
-    )
+/// As [`fetch_with_options`].
+pub fn fetch_all(
+    cwd: &Path,
+    transport: &dyn Transport,
+    remote: &str,
+) -> Result<kit_sync::FetchReport, Error> {
+    let options = SyncOptions::default()
+        .with_verify_signatures(true)
+        .with_tags(true)
+        .with_sync_policy(SyncPolicy::Batch);
+    fetch_with_options(cwd, &source(transport), remote, &options, &NoopObserver)
 }

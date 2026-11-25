@@ -38,8 +38,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::atomic::{write_atomic, write_create_new};
 use crate::bounded_read;
+use crate::durable::{Flushed, Group, Parents, Staged};
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
 use crate::layout::RepoLayout;
 
@@ -179,6 +179,12 @@ pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 pub const PACKMAP_REF_PREFIX: &str = "refs/kit/packmap/";
 /// The wire name prefix of a tag.
 pub const TAG_REF_PREFIX: &str = "refs/tags/";
+/// The wire name prefix of a tag's transfer chain ref, valued like a packmap
+/// (`refs/kit/tagmap/<tag>`, SPEC-REFS §2).
+pub const TAGMAP_REF_PREFIX: &str = "refs/kit/tagmap/";
+/// Repository-wide pack-list chain of attestation envelopes.
+pub const ATTESTMAP_REF: &str = "refs/kit/attestmap";
+
 /// The ref that carries published bridge attestations on a git mirror
 /// (SPEC-GIT-BRIDGE §11).
 pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";
@@ -187,11 +193,13 @@ pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 /// `refs/heads/<branch>` and `refs/kit/packmap/<branch>`, and each must
 /// fit [`MAX_REF_NAME_BYTES`], so the longer prefix sets the bound (495).
 pub const MAX_BRANCH_NAME_BYTES: usize = MAX_REF_NAME_BYTES - PACKMAP_REF_PREFIX.len();
-/// Longest new tag name, in bytes: `refs/tags/<tag>` must fit
-/// [`MAX_REF_NAME_BYTES`] (502).
-pub const MAX_TAG_NAME_BYTES: usize = MAX_REF_NAME_BYTES - TAG_REF_PREFIX.len();
+/// Longest new tag name, in bytes: a tag travels as `refs/tags/<tag>` and
+/// `refs/kit/tagmap/<tag>`, and each must fit [`MAX_REF_NAME_BYTES`], so the
+/// longer prefix sets the bound (496).
+pub const MAX_TAG_NAME_BYTES: usize = MAX_REF_NAME_BYTES - TAGMAP_REF_PREFIX.len();
 
 const _: () = assert!(PACKMAP_REF_PREFIX.len() >= BRANCH_REF_PREFIX.len());
+const _: () = assert!(TAGMAP_REF_PREFIX.len() >= TAG_REF_PREFIX.len());
 
 /// Which name bound a [`RefError::RefNameTooLong`] broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,7 +241,10 @@ impl RefNameKind {
                 ", because refs/heads/<name> and refs/kit/packmap/<name> must \
                  each fit the 512-byte ref-name limit"
             }
-            Self::Tag => ", because refs/tags/<name> must fit the 512-byte ref-name limit",
+            Self::Tag => {
+                ", because refs/tags/<name> and refs/kit/tagmap/<name> must \
+                 each fit the 512-byte ref-name limit"
+            }
         }
     }
 }
@@ -308,6 +319,33 @@ pub fn check_pushable_branch(branch: &str) -> RefResult<()> {
     check_new_name(&format!("{BRANCH_REF_PREFIX}{branch}"), RefNameKind::Ref)
 }
 
+/// Check the wire names a transfer of tag `tag` uses, `refs/tags/<tag>` and
+/// `refs/kit/tagmap/<tag>`: each must be a valid ref name, so the tag has at
+/// most [`MAX_TAG_NAME_BYTES`] bytes and at most [`MAX_REF_SEGMENTS`] less
+/// three segments. A local tag made before this bound stays readable and
+/// deletable, but is neither pushed nor fetched.
+///
+/// # Errors
+/// [`RefError::RefNameTooLong`] for a tag over [`MAX_TAG_NAME_BYTES`], and
+/// [`RefError::InvalidRefName`] naming `tag` for any other failure.
+pub fn check_pushable_tag(tag: &str) -> RefResult<()> {
+    check_new_name(tag, RefNameKind::Tag)?;
+    if validate_ref_name_grammar(&format!("{TAGMAP_REF_PREFIX}{tag}")) {
+        Ok(())
+    } else {
+        Err(RefError::InvalidRefName(tag.to_owned()))
+    }
+}
+
+/// Check a new name of `kind` for a local write: [`check_new_name`], and for a
+/// tag, [`check_pushable_tag`].
+fn check_new_local_name(name: &str, kind: RefNameKind) -> RefResult<()> {
+    match kind {
+        RefNameKind::Tag => check_pushable_tag(name),
+        RefNameKind::Ref | RefNameKind::Branch => check_new_name(name, kind),
+    }
+}
+
 /// Check a local branch or tag name about to be written under `sub_dir`.
 /// A name within `kind`'s bound always passes. A longer one passes only
 /// while the ref already exists and fits [`MAX_REF_NAME_BYTES`]: a ref
@@ -324,7 +362,7 @@ fn check_local_write(
     let stored_before_bounds = name.len() <= MAX_REF_NAME_BYTES
         && name_grammar_ok(name, usize::MAX)
         && ref_path(common_dir, sub_dir, name).is_file();
-    match check_new_name(name, kind) {
+    match check_new_local_name(name, kind) {
         Err(RefError::RefNameTooLong { .. } | RefError::InvalidRefName(_))
             if stored_before_bounds =>
         {
@@ -357,7 +395,7 @@ fn check_existing_ref_name(name: &str) -> RefResult<()> {
 ///   and `..` segments) — git's `check-ref-format` rule, kept for
 ///   parity: a dot-leading component is invalid in both grammars, so
 ///   nothing on-disk under a dot-leading directory (e.g. crash debris
-///   from a temp-directory rename, or an in-flight `atomic::write_atomic`
+///   from a temp-directory rename, or an in-flight `durable::write_pointer`
 ///   temp file) can ever surface as a ref in `collect_refs` / listings.
 ///   No empty segments (no `//`, no leading `/`, no trailing `/`).
 /// - No `\\` or NUL bytes.
@@ -418,7 +456,8 @@ fn name_grammar_ok(name: &str, max_segments: usize) -> bool {
 /// Canonical per-branch lock name for ancestry publication and recovery.
 #[cfg(feature = "history-mmr")]
 pub(crate) fn history_lock_name(branch: &str) -> String {
-    let full_ref = format!("refs/heads/{branch}");
+    // ASCII-folded, like `cas_lock_name`.
+    let full_ref = format!("refs/heads/{}", branch.to_ascii_lowercase());
     format!(
         "refs-history-{}.lock",
         to_hex(&crate::hash::hash(full_ref.as_bytes()))
@@ -426,6 +465,8 @@ pub(crate) fn history_lock_name(branch: &str) -> String {
 }
 
 pub(crate) mod ancestry_state;
+/// The branch history a build with history records writes beside a branch.
+pub use ancestry_state::DIRECTORY as BRANCH_HISTORY_DIR;
 
 /// Retention roots of unfinished history publications, including when the
 /// history-mmr feature is disabled. Corruption must abort GC.
@@ -443,10 +484,16 @@ pub fn pending_history_roots(layout: &RepoLayout) -> RefResult<BTreeSet<Hash>> {
 /// Hash the complete identity so nested or punctuation-heavy names cannot
 /// overflow a single lock filename. Namespace prefixes remain in the digest;
 /// history and mutation guards also have distinct filename prefixes.
+///
+/// The key is ASCII-lowercased. On a case-insensitive file system `Main` and
+/// `main` are one ref file, and two spellings must share one lock, as git's
+/// `Main.lock` and `main.lock` do. On a case-sensitive file system the two
+/// refs only share a lock, which is safe.
 pub(crate) fn cas_lock_name(common_dir: &Path, path: &Path) -> String {
     let ref_key = path
         .strip_prefix(common_dir)
-        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy());
+        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy())
+        .to_ascii_lowercase();
     format!(
         "refs-{}.lock",
         to_hex(&crate::hash::hash(ref_key.as_bytes()))
@@ -536,7 +583,7 @@ pub fn init(layout: &RepoLayout) -> RefResult<()> {
     let head_path = layout.head_file();
     if !head_path.exists() {
         let body = format!("{HEAD_REF_PREFIX}main\n");
-        write_atomic(&head_path, body.as_bytes(), false)?;
+        crate::durable::write_pointer(&head_path, body.as_bytes(), Parents::Existing)?;
     }
     Ok(())
 }
@@ -575,6 +622,62 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
     Err(RefError::InvalidHead)
 }
 
+/// Read the previous HEAD saved by checkout in this worktree.
+/// Missing state returns `NoHead`; unreadable or malformed state is an error.
+pub fn read_previous_head(layout: &RepoLayout) -> RefResult<Head> {
+    let raw = bounded_read::read_capped(
+        &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
+        HEAD_MAX_BYTES,
+    )
+    .map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            RefError::NoHead
+        } else {
+            RefError::Io(e)
+        }
+    })?;
+    parse_previous_head(&raw)
+}
+
+fn parse_previous_head(raw: &[u8]) -> RefResult<Head> {
+    let text = core::str::from_utf8(raw).map_err(|_| RefError::InvalidHead)?;
+    if let Some(branch) = text
+        .strip_prefix(HEAD_REF_PREFIX)
+        .and_then(|s| s.strip_suffix('\n'))
+    {
+        if validate_ref_name(branch) {
+            return Ok(Head::Branch(branch.to_owned()));
+        }
+    } else if let Some(h) = text
+        .strip_suffix('\n')
+        .and_then(|s| parse_lowercase_hash(s.as_bytes()))
+    {
+        return Ok(Head::Detached(h));
+    }
+    Err(RefError::InvalidHead)
+}
+
+/// Exercise the previous HEAD byte parser without filesystem I/O.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_parse_previous_head(raw: &[u8]) -> Option<Head> {
+    parse_previous_head(raw).ok()
+}
+
+/// Atomically save one previous HEAD. The caller holds the worktree lock.
+pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
+    let body = match head {
+        Head::Branch(branch) => format!("{HEAD_REF_PREFIX}{branch}\n"),
+        Head::Detached(h) => format!("{}\n", crate::hash::to_hex(h)),
+    };
+    crate::durable::write_pointer(
+        &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
+        body.as_bytes(),
+        Parents::Existing,
+    )?;
+    Ok(())
+}
+
 /// Write `HEAD` as a symbolic ref pointing at `branch`.
 ///
 /// # Errors
@@ -584,7 +687,7 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
 pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let body = format!("{HEAD_REF_PREFIX}{branch}\n");
-    write_atomic(&layout.head_file(), body.as_bytes(), false)?;
+    crate::durable::write_pointer(&layout.head_file(), body.as_bytes(), Parents::Existing)?;
     Ok(())
 }
 
@@ -594,7 +697,7 @@ pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 /// - [`RefError::Io`] for filesystem failures.
 pub fn write_head_detached(layout: &RepoLayout, h: &Hash) -> RefResult<()> {
     let wire = encode_ref_wire(h);
-    write_atomic(&layout.head_file(), &wire, false)?;
+    crate::durable::write_pointer(&layout.head_file(), &wire, Parents::Existing)?;
     Ok(())
 }
 
@@ -659,6 +762,125 @@ pub fn update_ref(
     let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
     let wire = encode_ref_wire(h);
     cas_write(layout.common_dir(), &path, &wire, branch, condition)
+}
+
+/// A branch ref write staged in a [`Group`]: its temp file is written out and
+/// invisible until [`publish_staged_ref`].
+#[derive(Debug)]
+#[must_use = "a staged ref is invisible until it is published"]
+pub struct StagedRef {
+    staged: Staged,
+    common_dir: PathBuf,
+    path: PathBuf,
+    name: String,
+    wire: [u8; 65],
+}
+
+/// Stage the write of `h` to the branch `branch`, as [`update_ref`] makes it
+/// but in two steps, so its bytes share the flush of the objects it names.
+/// The name is checked now, the condition at [`publish_staged_ref`].
+///
+/// # Errors
+/// As [`update_ref`] for the name, [`RefError::Io`] when the temp file cannot
+/// be written, or the group is poisoned.
+pub fn stage_ref_update(
+    group: &mut Group,
+    layout: &RepoLayout,
+    branch: &str,
+    h: &Hash,
+) -> RefResult<StagedRef> {
+    check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
+    let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
+    let wire = encode_ref_wire(h);
+    let staged = group.stage(&path, &wire, Parents::Create)?;
+    Ok(StagedRef {
+        staged,
+        common_dir: layout.common_dir().to_path_buf(),
+        path,
+        name: branch.to_string(),
+        wire,
+    })
+}
+
+/// The lock of a branch ref whose staged write was published. A ref write
+/// holds its lock until its rename is durable (SPEC-REFS §5.1.1): flush the
+/// group, then drop this.
+#[derive(Debug)]
+#[must_use = "the ref stays locked until this is dropped; flush the group first"]
+pub struct PublishedRef(#[allow(dead_code)] RefMutation);
+
+impl std::fmt::Debug for RefMutation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefMutation")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Publish a staged branch ref: take the ref lock, check `condition` and
+/// rename. `after` must come from a flush of `group` that covers the objects
+/// the ref names. The rename is not durable yet: the caller flushes `group`,
+/// and only then drops the returned lock, so that no other writer reads the
+/// ref before it is durable.
+///
+/// # Errors
+/// [`RefError::Conflict`] when `condition` fails, as [`update_ref`]. A
+/// refused token or a failed rename is [`RefError::Io`]. The staged file is
+/// dropped on any error.
+pub fn publish_staged_ref(
+    group: &mut Group,
+    staged: StagedRef,
+    condition: RefWriteCondition,
+    after: &Flushed,
+) -> RefResult<PublishedRef> {
+    let StagedRef {
+        staged,
+        common_dir,
+        path,
+        name,
+        wire,
+    } = staged;
+    let mutation = RefMutation::acquire(&common_dir, &path, &name)?;
+    mutation.write_staged(group, staged, &wire, condition, after)?;
+    Ok(PublishedRef(mutation))
+}
+
+/// A detached `HEAD` write staged in a [`Group`].
+#[derive(Debug)]
+#[must_use = "a staged HEAD is invisible until it is published"]
+pub struct StagedHead(Staged);
+
+/// Stage the write of a detached `HEAD`, as [`write_head_detached`] makes it
+/// but in two steps.
+///
+/// # Errors
+/// [`RefError::Io`] when the temp file cannot be written, or the group is
+/// poisoned.
+pub fn stage_head_detached(
+    group: &mut Group,
+    layout: &RepoLayout,
+    h: &Hash,
+) -> RefResult<StagedHead> {
+    let wire = encode_ref_wire(h);
+    Ok(StagedHead(group.stage(
+        &layout.head_file(),
+        &wire,
+        Parents::Existing,
+    )?))
+}
+
+/// Publish a staged detached `HEAD`. The caller flushes `group` for the
+/// rename before it reports success.
+///
+/// # Errors
+/// As [`publish_staged_ref`], without the condition.
+pub fn publish_staged_head(
+    group: &mut Group,
+    staged: StagedHead,
+    after: &Flushed,
+) -> RefResult<()> {
+    group.publish_sibling(staged.0, after)?;
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -851,14 +1073,14 @@ pub fn write_remote_ref(
 ///
 /// `push`/`fetch` publish one tracking ref per branch
 /// (`refs/remotes/<remote>/<branch>`) in a loop; each individual
-/// [`write_remote_ref`] call goes through `write_atomic`'s
+/// [`write_remote_ref`] call goes through `write_pointer`'s
 /// temp+fsync+rename+**dirsync** pattern, so N branches cost N serial
 /// directory fsyncs even though every write lands under the same
 /// `refs/remotes/<remote>/` tree. `RemoteRefBatch` instead:
 ///
 /// 1. [`Self::write`]s each ref durable-content-before-visible (fsyncs
 ///    the wire bytes, then renames — same invariant
-///    `crate::atomic::write_content_synced` gives object writes: a
+///    `crate::durable::write_content_synced` gives object writes: a
 ///    reader can never observe a torn file), immediately, one call at a
 ///    time, deferring only the directory fsync that makes the RENAME
 ///    itself crash-durable;
@@ -868,7 +1090,7 @@ pub fn write_remote_ref(
 ///    exactly one fsync for the whole batch.
 ///
 /// This is deliberately scoped to `refs/remotes/*` ONLY — see
-/// `atomic.rs`'s module docs for why branch heads (`refs/heads/*`,
+/// `durable`'s module docs for why branch heads (`refs/heads/*`,
 /// [`write_ref`]/[`update_ref`]) keep the unbatched per-write contract:
 /// tracking refs are a locally-cached, recomputable-from-a-re-fetch
 /// view of another repository, not a pointer anything else orders
@@ -938,7 +1160,7 @@ impl<'a> RemoteRefBatch<'a> {
             .to_path_buf();
         fs::create_dir_all(&parent)?;
         let wire = encode_ref_wire(h);
-        crate::atomic::write_content_synced(&path, &wire)?;
+        crate::durable::write_content_synced(&path, &wire)?;
         self.touched_dirs.insert(parent);
         Ok(())
     }
@@ -958,7 +1180,7 @@ impl<'a> RemoteRefBatch<'a> {
     /// matching [`Self::write`]'s partial-failure contract).
     pub fn commit(self) -> RefResult<()> {
         for dir in &self.touched_dirs {
-            crate::atomic::sync_dir(dir)?;
+            crate::durable::flush_dir(dir)?;
         }
         Ok(())
     }
@@ -1121,7 +1343,7 @@ pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> Ref
         for h in boundaries {
             out.extend_from_slice(&encode_ref_wire(h));
         }
-        write_atomic(&path, &out, true)?;
+        crate::durable::write_pointer(&path, &out, Parents::Create)?;
         Ok(())
     }
 }
@@ -1216,8 +1438,14 @@ impl RefMutation {
 
     fn write(&self, wire: &[u8; 65], condition: RefWriteCondition) -> RefResult<()> {
         self.check(condition)?;
-        // Even a same-tip raw write refuses to bypass an outstanding intent.
-        // Ordinary writes preserve a matching snapshot only for a true no-op.
+        self.guard_history(wire)?;
+        self.write_preserving_history(wire, condition)
+    }
+
+    /// The history rule of a write of `wire`. Even a same-tip raw write
+    /// refuses to bypass an outstanding intent. Ordinary writes preserve a
+    /// matching snapshot only for a true no-op.
+    fn guard_history(&self, wire: &[u8; 65]) -> RefResult<()> {
         if self.current().ok().flatten() != decode_ref_wire(wire) {
             self.invalidate_history()?;
         } else if ancestry_state::Transaction::read(&ancestry_state::branch_dir(
@@ -1232,7 +1460,30 @@ impl RefMutation {
         {
             return Err(RefError::InvalidRef("pending history publication".into()));
         }
-        self.write_preserving_history(wire, condition)
+        Ok(())
+    }
+
+    /// [`Self::write`] of a staged temp file: the check and the rename that
+    /// `after` licenses, under this lock. The caller flushes the rename
+    /// before it releases the lock (SPEC-REFS §5.1.1).
+    fn write_staged(
+        &self,
+        group: &mut Group,
+        staged: Staged,
+        wire: &[u8; 65],
+        condition: RefWriteCondition,
+        after: &Flushed,
+    ) -> RefResult<()> {
+        self.check(condition)?;
+        self.guard_history(wire)?;
+        if matches!(condition, RefWriteCondition::Missing) {
+            if !group.publish_new_sibling(staged, after)? {
+                return Err(RefError::Conflict(self.name.clone()));
+            }
+        } else {
+            group.publish_sibling(staged, after)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn write_preserving_history(
@@ -1242,11 +1493,11 @@ impl RefMutation {
     ) -> RefResult<()> {
         self.check(condition)?;
         if matches!(condition, RefWriteCondition::Missing) {
-            if !write_create_new(&self.path, wire, true)? {
+            if !crate::durable::write_pointer_new(&self.path, wire, Parents::Create)? {
                 return Err(RefError::Conflict(self.name.clone()));
             }
         } else {
-            write_atomic(&self.path, wire, true)?;
+            crate::durable::write_pointer(&self.path, wire, Parents::Create)?;
         }
         Ok(())
     }
@@ -1258,7 +1509,7 @@ impl RefMutation {
         self.invalidate_history()?;
         match fs::remove_file(&self.path) {
             Ok(()) => {
-                crate::atomic::sync_dir(self.path.parent().expect("ref path has parent"))?;
+                crate::durable::flush_dir(self.path.parent().expect("ref path has parent"))?;
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -1618,12 +1869,12 @@ mod tests {
 
     /// A new branch name must leave `refs/heads/<b>` and
     /// `refs/kit/packmap/<b>` within 512 bytes (495), a new tag
-    /// `refs/tags/<t>` (502); a branch created before that bound stays
-    /// writable locally but cannot be pushed.
+    /// `refs/tags/<t>` and `refs/kit/tagmap/<t>` (496); a branch or tag
+    /// created before that bound stays writable locally but cannot be pushed.
     #[test]
     fn branch_and_tag_bounds_derive_from_their_wire_names() {
         assert_eq!(MAX_BRANCH_NAME_BYTES, 495);
-        assert_eq!(MAX_TAG_NAME_BYTES, 502);
+        assert_eq!(MAX_TAG_NAME_BYTES, 496);
         let (_dir, layout) = fresh_repo();
         let id = h("c");
         update_ref(&layout, &long_name(495), RefWriteCondition::Missing, &id).unwrap();
@@ -1648,13 +1899,39 @@ mod tests {
             write_head_branch(&layout, &long_name(496)),
             Err(RefError::RefNameTooLong { .. })
         ));
-        write_tag(&layout, &long_name(502), &id).unwrap();
-        let err = write_tag(&layout, &long_name(503), &id).unwrap_err();
+        write_tag(&layout, &long_name(496), &id).unwrap();
+        check_pushable_tag(&long_name(496)).unwrap();
+        let err = write_tag(&layout, &long_name(497), &id).unwrap_err();
         assert!(
             err.to_string()
-                .contains("tag name too long (503 bytes; at most 502"),
+                .contains("tag name too long (497 bytes; at most 496")
+                && err.to_string().contains("refs/kit/tagmap/<name>"),
             "{err}"
         );
+        // 29 segments fit `refs/kit/tagmap/<t>`; 30 do not, though the short
+        // name alone is within the 32-segment bound.
+        let deep = |n: usize| vec!["s"; n].join("/");
+        write_tag(&layout, &deep(29), &id).unwrap();
+        check_pushable_tag(&deep(29)).unwrap();
+        assert!(matches!(
+            write_tag(&layout, &deep(30), &id),
+            Err(RefError::InvalidRefName(name)) if name == deep(30)
+        ));
+        assert!(matches!(
+            check_pushable_tag(&deep(30)),
+            Err(RefError::InvalidRefName(name)) if name == deep(30)
+        ));
+
+        // A 500-byte tag made before the bound: readable, writable,
+        // deletable, not pushable.
+        let old_tag = long_name(500);
+        let path = ref_path(layout.common_dir(), TAGS_DIR, &old_tag);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&id)).unwrap();
+        assert_eq!(read_tag(&layout, &old_tag).unwrap(), Some(id));
+        write_tag(&layout, &old_tag, &h("next")).unwrap();
+        assert!(check_pushable_tag(&old_tag).is_err());
+        delete_tag(&layout, &old_tag).unwrap();
 
         // A 500-byte branch made before the bound: writable, not pushable.
         let old = long_name(500);
@@ -1941,12 +2218,16 @@ mod tests {
         // adversarial nesting; anything deeper is silently skipped (not an
         // error, not a stack overflow). A directory tree that bypassed the
         // writer is the only way to build one.
-        let (_dir, kit) = fresh_repo();
+        let (dir, kit) = fresh_repo();
         write_ref(&kit, "main", &h("shallow")).unwrap();
         let mut deep = kit.common_dir().join(HEADS_DIR);
         for _ in 0..MAX_REF_WALK_DEPTH + 5 {
             deep.push("d");
         }
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            deep.join("leaf"),
+            kit.common_dir().join(HEADS_DIR),
+        );
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("leaf"), encode_ref_wire(&h("deep"))).unwrap();
 
@@ -1954,6 +2235,8 @@ mod tests {
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"main"), "shallow ref must still be listed");
         assert_eq!(names.len(), 1, "deep entry must be skipped: {names:?}");
+        drop(cleanup);
+        dir.close().unwrap();
     }
 
     /// A local ref stored before names had a segment bound stays listed,
@@ -2331,6 +2614,56 @@ mod tests {
                 "history and mutation guards must be distinct"
             );
         }
+    }
+
+    #[test]
+    fn two_spellings_of_one_ref_share_one_lock_key() {
+        let (_dir, layout) = fresh_repo();
+        for namespace in [HEADS_DIR, TAGS_DIR, "refs/remotes/default"] {
+            let lower = ref_path(layout.common_dir(), namespace, "release/v1");
+            let mixed = ref_path(layout.common_dir(), namespace, "Release/V1");
+            assert_eq!(
+                cas_lock_name(layout.common_dir(), &lower),
+                cas_lock_name(layout.common_dir(), &mixed)
+            );
+        }
+        let branch = ref_path(layout.common_dir(), HEADS_DIR, "v1");
+        let tag = ref_path(layout.common_dir(), TAGS_DIR, "v1");
+        assert_ne!(
+            cas_lock_name(layout.common_dir(), &branch),
+            cas_lock_name(layout.common_dir(), &tag),
+            "a branch and a tag keep distinct locks"
+        );
+        #[cfg(feature = "history-mmr")]
+        assert_eq!(history_lock_name("Main"), history_lock_name("main"));
+    }
+
+    #[test]
+    fn a_write_waits_for_the_lock_held_under_another_spelling_of_the_branch() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, layout) = fresh_repo();
+        update_ref(&layout, "main", RefWriteCondition::Any, &h("base")).unwrap();
+        let held = crate::repo_lock::acquire_default(
+            layout.common_dir(),
+            &cas_lock_name(
+                layout.common_dir(),
+                &ref_path(layout.common_dir(), HEADS_DIR, "main"),
+            ),
+        )
+        .unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = update_ref(&layout, "Main", RefWriteCondition::Any, &h("next"));
+            done_tx.send(result).unwrap();
+        });
+        let premature = done_rx.recv_timeout(Duration::from_millis(200));
+        drop(held);
+        worker.join().unwrap();
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "a write under `Main` ran while `main` was locked: {premature:?}"
+        );
     }
 
     /// All mutations must join the CAS critical section, including calls
@@ -2789,8 +3122,8 @@ mod tests {
     // `push`/`fetch` publish one remote-tracking ref per branch in a loop
     // (`kit-bin`'s `remote_dispatch::push_all_with` /
     // `kit-sync`'s `fetch_objects_inner`). Each `write_remote_ref` call goes through
-    // `cas_write` → `write_atomic`, which pays a parent-directory fsync
-    // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N
+    // `cas_write` → `write_pointer`, which pays a parent-directory fsync
+    // EVERY call (`durable::flush_dir`) — so N branches cost N
     // directory fsyncs, serially, even though they all land in the same
     // `refs/remotes/<remote>/` directory. `RemoteRefBatch` amortises that
     // into one fsync per distinct directory touched, however many refs
@@ -2807,11 +3140,11 @@ mod tests {
     fn write_remote_ref_loop_pays_one_dir_sync_per_ref_today() {
         let (_dir, kit) = fresh_repo();
         let n: u64 = 25;
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         for i in 0..n {
             write_remote_ref(&kit, "origin", &format!("branch-{i}"), &h(&format!("c{i}"))).unwrap();
         }
-        let calls = crate::atomic::testing::dir_sync_calls();
+        let calls = crate::durable::testing::dir_sync_calls();
         assert_eq!(
             calls, n,
             "the current per-ref write path must cost exactly one directory \
@@ -2831,14 +3164,14 @@ mod tests {
             .map(|i| (format!("branch-{i}"), h(&format!("c{i}"))))
             .collect();
 
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let mut batch = RemoteRefBatch::new(&kit, "origin").unwrap();
         for (branch, hash) in &entries {
             batch.write(branch, hash).unwrap();
         }
         batch.commit().unwrap();
 
-        let calls = crate::atomic::testing::dir_sync_calls();
+        let calls = crate::durable::testing::dir_sync_calls();
         assert_eq!(
             calls, 1,
             "batching {n} tracking-ref writes into one flat remote \
@@ -2921,11 +3254,11 @@ mod tests {
     #[test]
     fn remote_ref_batch_of_zero_entries_is_a_noop_commit() {
         let (_dir, kit) = fresh_repo();
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let batch = RemoteRefBatch::new(&kit, "origin").unwrap();
         batch.commit().unwrap();
         assert_eq!(
-            crate::atomic::testing::dir_sync_calls(),
+            crate::durable::testing::dir_sync_calls(),
             0,
             "an empty batch must not touch any directory"
         );
@@ -3084,3 +3417,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod staged_tests;

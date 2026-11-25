@@ -222,8 +222,8 @@ impl Diff<'_> {
         &self.entries
     }
 
-    /// The body of the patch for `entry`. It reads through [`patch_body`]
-    /// without a hash check.
+    /// The body of the patch for `entry`. Worktree bytes are read when
+    /// requested and checked against the snapshot id.
     ///
     /// # Errors
     /// [`Error::ReadObject`] when a blob of the entry cannot be read.
@@ -396,7 +396,7 @@ fn resolve_endpoints(
             return Err(Error::UnknownRevision(first.clone()));
         }
         let head = head_tree(repo)?;
-        let staged = staged_tree(repo, snapshot)?;
+        let staged = staged_tree(repo, snapshot, head)?;
         return Ok((head, staged, args.to_vec()));
     }
 
@@ -580,11 +580,16 @@ fn head_tree(repo: &Repo) -> Result<Option<Hash>, Error> {
     }
 }
 
-/// The staged tree. The diff only shows it, so the tree is not hashed again.
-/// A read verifies each object that it touches.
-fn staged_tree(repo: &Repo, snapshot: &EphemeralSink<'_>) -> Result<Option<Hash>, Error> {
+/// The staged tree opens only entries that differ from HEAD by path, mode
+/// or object id. The diff publishes nothing; a read verifies each object
+/// that it touches.
+fn staged_tree(
+    repo: &Repo,
+    snapshot: &EphemeralSink<'_>,
+    base: Option<Hash>,
+) -> Result<Option<Hash>, Error> {
     let index = index::read_or_seed_from_head(repo.layout(), repo.store()).map_err(Error::Index)?;
-    worktree::build_tree_from_index_with(repo.store(), snapshot, &index, false)
+    worktree::build_tree_from_index_against(repo.store(), snapshot, &index, false, base)
         .map(Some)
         .map_err(Error::BuildIndexTree)
 }
@@ -812,6 +817,34 @@ mod tests {
 
     fn reads_of(source: &RecordingSource, hash: &Hash) -> usize {
         source.reads.borrow().iter().filter(|h| *h == hash).count()
+    }
+
+    #[test]
+    fn patch_body_refuses_an_inline_worktree_blob_that_changed_after_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let layout = kit_core::layout::RepoLayout::single(root.path());
+        let store = kit_core::store::ObjectStore::init(&layout).unwrap();
+        let snapshot = EphemeralSink::new(&store);
+        let path = worktree.path().join("file.txt");
+        std::fs::write(&path, b"new\n").unwrap();
+        let old = kit_core::worktree::store_file_object(&store, b"old\n").unwrap();
+        let new = kit_core::worktree::hash_file(&snapshot, &path).unwrap();
+        let diff = Diff {
+            snapshot,
+            entries: vec![modified("file.txt", old, new)],
+        };
+
+        assert!(matches!(
+            diff.patch_body(&diff.entries[0], 3, WhitespaceMode::Exact)
+                .unwrap(),
+            PatchBody::Hunks(_)
+        ));
+        std::fs::write(&path, b"bad\n").unwrap();
+        let err = diff
+            .patch_body(&diff.entries[0], 3, WhitespaceMode::Exact)
+            .unwrap_err();
+        assert!(err.to_string().contains("file.txt changed"), "got {err}");
     }
 
     #[test]

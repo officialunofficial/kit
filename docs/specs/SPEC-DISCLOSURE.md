@@ -259,9 +259,9 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
     **Header check, after step 1 and before step 2.** The verifier never
     decodes the manifest, so it **MUST** apply the header check of
     SPEC-OBJECTS §7 to `total_size`, `chunk_size` and a chunk count of
-    `leaf_count - 1`, and reject a layout it refuses
-    (`ChunkedBlobTotalSizeInvalid`). `leaf_count` is trusted only once step 1
-    has folded to the id.
+    `leaf_count - 1`. An invalid total gives `ChunkedBlobTotalSizeInvalid`.
+    An unknown profile ID gives `UnknownChunkerProfile`. `leaf_count` is
+    trusted only once step 1 has folded to the id.
 
     2. **Span.** `start < end <= total_size`, else `span outside the file`;
        and `end - start` is at most `MAX_RAW_OBJECT_SIZE - 10`, else `span
@@ -270,8 +270,8 @@ A conformant verifier, given a trusted `commit_id: Hash` and an encoded
        and start 0 disagree`.
     4. **Last chunk.** `index + 1 == leaf_count - 1` exactly when
        `end == total_size`, else `last index and end == total_size disagree`.
-    5. **Fixed layout.** For a fixed-size layout (`chunk_size` other than `0`
-       and `0x8000_0002`), `start == index * chunk_size` and
+    5. **Fixed layout.** For `chunk_size` in `1..=0x7FFF_FFFF`,
+       `start == index * chunk_size` and
        `end == min(start + chunk_size, total_size)`, else reject with
        `FixedChunkLength` (`a fixed-size chunk has the wrong span`). The
        arithmetic MUST be checked. A fixed layout is

@@ -249,11 +249,27 @@ pub fn read_ref(name: &str) -> Option<Body> {
     Some(Body::ReadRef(Box::new(ReadRef::default().with_name(name))))
 }
 
+/// A listing request for the first page, as large as a page may be.
 pub fn list_refs(prefix: Option<&str>) -> Option<Body> {
+    list_refs_page(
+        prefix,
+        Some(u32::try_from(kit_serve::MAX_LIST_PAGE_REFS).unwrap()),
+        None,
+    )
+}
+
+/// A listing request with this page size and page token.
+pub fn list_refs_page(
+    prefix: Option<&str>,
+    page_size: Option<u32>,
+    page_token: Option<&str>,
+) -> Option<Body> {
     let mut req = ListRefs::default();
     if let Some(p) = prefix {
         req = req.with_prefix(p);
     }
+    req.page_size = page_size;
+    req.page_token = page_token.map(str::to_owned);
     Some(Body::ListRefs(Box::new(req)))
 }
 
@@ -314,6 +330,14 @@ pub fn stamp_dirs(dir: &Path, when: std::time::SystemTime) {
         .unwrap()
         .set_modified(when)
         .unwrap();
+}
+
+/// The `next_page_token` of a `ListRefsResponse`.
+pub fn next_token(f: &SshFrame) -> Option<String> {
+    match &f.body {
+        Some(Body::ListRefsResponse(r)) => r.next_page_token.clone(),
+        other => panic!("expected ListRefsResponse, got {other:?}"),
+    }
 }
 
 /// The names of a `ListRefsResponse`.

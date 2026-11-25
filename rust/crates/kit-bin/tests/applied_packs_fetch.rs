@@ -29,15 +29,30 @@ fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
 }
 
-fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
+fn run_result(cwd: &Path, args: &[&str]) -> std::process::Output {
     let xdg = tempfile::tempdir().expect("xdg tempdir");
-    let out = Command::new(kit_bin())
+    Command::new(kit_bin())
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn kit");
-    drop(xdg);
+        .expect("spawn kit")
+}
+
+/// [`run_result`], with the full flushes of the process logged to `log`.
+fn run_logged(cwd: &Path, args: &[&str], log: &Path) -> std::process::Output {
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    Command::new(kit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("KIT_FLUSH_LOG", log)
+        .output()
+        .expect("spawn kit")
+}
+
+fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let out = run_result(cwd, args);
     assert!(
         out.status.success(),
         "kit {args:?} failed: {}",
@@ -54,6 +69,198 @@ fn init_repo(dir: &Path) {
 fn commit_all(dir: &Path, msg: &str) {
     run_in(dir, &["add", "."]);
     run_in(dir, &["commit", "-m", msg]);
+}
+
+#[test]
+fn closure_verify_enables_the_next_fetch_to_repair_a_missing_object() {
+    repair_after(&["closure", "verify", "origin/main", "--history"], true);
+}
+
+#[test]
+fn gc_enables_the_next_fetch_to_repair_a_missing_object() {
+    repair_after(&["gc"], false);
+}
+
+#[test]
+fn restore_enables_the_next_fetch_to_repair_a_missing_object() {
+    repair_after(&["restore", "--force", "dir/large"], false);
+}
+
+#[test]
+fn full_integrity_scan_enables_a_fetch_to_replace_a_bad_packed_copy() {
+    let source = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let client = tempfile::tempdir().unwrap();
+    init_repo(source.path());
+    init_repo(remote.path());
+    let url = format!("kit+file://{}", remote.path().display());
+    run_in(source.path(), &["remote", "add", "origin", &url]);
+    fs::write(source.path().join("file"), b"packed bytes").unwrap();
+    commit_all(source.path(), "packed file");
+    run_in(source.path(), &["push", "origin"]);
+
+    let checkout = client.path().join("checkout");
+    run_in(client.path(), &["clone", "-o", "origin", &url, "checkout"]);
+    let layout = RepoLayout::single(&checkout);
+    let store = ObjectStore::open(&layout).unwrap();
+    let pack_dir = layout.objects_dir().join("pack");
+    let mut packs = fs::read_dir(&pack_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "pack"));
+    let pack = packs.next().unwrap();
+    assert!(packs.next().is_none());
+    let mut bytes = fs::read(&pack).unwrap();
+    let content = b"packed bytes";
+    let offset = bytes
+        .windows(content.len())
+        .position(|window| window == content)
+        .unwrap();
+    bytes[offset] ^= 1;
+    fs::write(&pack, bytes).unwrap();
+
+    let records = layout.applied_packs_dir();
+    let applied = records.join("origin");
+    let non_record = records.join(".sidecar");
+    let directory = records.join("other");
+    fs::write(&non_record, b"sidecar").unwrap();
+    fs::create_dir(&directory).unwrap();
+    let attestation_record = records.join(".cursors/test.attest-fetch");
+    fs::create_dir_all(attestation_record.parent().unwrap()).unwrap();
+    fs::write(&attestation_record, b"attestation record").unwrap();
+    fs::write(records.join(".cursors").join("a".repeat(64)), b"cursor").unwrap();
+
+    let diagnostic = ["closure", "verify", "origin/main", "--show-unreferenced"];
+    let guard = store.prune_guard().unwrap();
+    let blocked = run_result(&checkout, &diagnostic);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("could not clear fetch records"));
+    assert!(applied.is_file());
+    drop(guard);
+
+    let damaged = run_result(&checkout, &diagnostic);
+    assert!(!damaged.status.success());
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("invalid pack trailer"));
+    assert!(!applied.exists());
+    assert!(directory.is_dir());
+    assert_eq!(fs::read(&non_record).unwrap(), b"sidecar");
+    assert!(!records.join(".verified").exists());
+    assert!(!records.join(".heads").exists());
+    assert_eq!(fs::read_dir(records.join(".cursors")).unwrap().count(), 1);
+    assert!(attestation_record.is_file());
+
+    run_in(&checkout, &["fetch", "origin"]);
+    assert!(applied.is_file());
+    run_in(&checkout, &diagnostic);
+}
+
+fn repair_after(diagnostic: &[&str], advance: bool) {
+    let source = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+    let client = client_dir.path().join("client");
+    init_repo(source.path());
+    init_repo(remote.path());
+    let url = format!("kit+file://{}", remote.path().display());
+    run_in(source.path(), &["remote", "add", "origin", &url]);
+    fs::create_dir(source.path().join("dir")).unwrap();
+    // A whole-file blob over the fetch packing limit stays loose in a clone.
+    let len = kit_core::chunker::MAX_SIZE + 1;
+    fs::write(source.path().join("dir/large"), vec![42; len]).unwrap();
+    commit_all(source.path(), "large file");
+    run_in(source.path(), &["push", "origin"]);
+    run_in(
+        client_dir.path(),
+        &["clone", "-o", "origin", &url, "client"],
+    );
+
+    let layout = RepoLayout::single(&client);
+    let store = ObjectStore::open(&layout).unwrap();
+    let chunk = store
+        .iter_object_hashes()
+        .unwrap()
+        .into_iter()
+        .find(|id| {
+            matches!(
+                store.read_object(id).unwrap(),
+                kit_core::object::Object::Blob(blob) if blob.data.len() == len
+            )
+        })
+        .unwrap();
+    store.remove_object(&chunk).unwrap();
+    run_in(&client, &["remote", "add", "other", &url]);
+    let records = layout.applied_packs_dir();
+    let applied = records.join("origin");
+    let anchors = records.join(".verified");
+    let heads = records.join(".heads");
+    let cursors = records.join(".cursors");
+    let attestation_record = cursors.join("test.attest-fetch");
+    assert!(applied.is_file());
+    assert_eq!(fs::read_dir(&anchors).unwrap().count(), 1);
+    // Addressed transports can leave checkpoints and cursors here.
+    // Seed both so their invalidation is tested on every operating system.
+    fs::create_dir_all(&heads).unwrap();
+    fs::write(heads.join("a".repeat(64)), b"checkpoint").unwrap();
+    fs::create_dir_all(&cursors).unwrap();
+    fs::write(cursors.join("b".repeat(64)), b"cursor").unwrap();
+    fs::write(&attestation_record, b"attestation record").unwrap();
+    let other_record = records.join("other");
+    fs::write(&other_record, b"other remote's record").unwrap();
+
+    if diagnostic == ["gc"] {
+        let preview = run_result(&client, &["gc", "--dry-run"]);
+        assert!(!preview.status.success());
+        assert!(applied.is_file());
+    }
+    if advance {
+        let guard = store.prune_guard().unwrap();
+        let busy = run_result(&client, diagnostic);
+        assert!(!busy.status.success());
+        assert!(String::from_utf8_lossy(&busy.stderr).contains("could not clear fetch records"));
+        assert!(applied.is_file());
+        assert_eq!(fs::read_dir(&anchors).unwrap().count(), 1);
+        drop(guard);
+    }
+
+    let flush_log = client_dir.path().join("flush-log");
+    let out = run_logged(&client, diagnostic, &flush_log);
+    assert!(!out.status.success(), "diagnostic {diagnostic:?} succeeded");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(output.contains(&hash::to_hex(&chunk)), "{output}");
+    // The removals are durable before the command returns: the repair flushes
+    // the directory of the verified-tip records and the records directory.
+    let flushed = fs::read_to_string(&flush_log).map_or(0, |log| log.lines().count());
+    // The fetch cursors' directory, the verified-tip records' directory and
+    // the records directory.
+    #[cfg(target_os = "macos")]
+    assert_eq!(flushed, 3);
+    #[cfg(not(target_os = "macos"))]
+    assert!(flushed >= 3, "{flushed}");
+    assert!(!applied.exists());
+    assert!(!heads.exists());
+    assert_eq!(fs::read_dir(&anchors).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&cursors).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(&attestation_record).unwrap(),
+        b"attestation record"
+    );
+    assert_eq!(fs::read(&other_record).unwrap(), b"other remote's record");
+
+    if advance {
+        fs::write(source.path().join("small"), b"new").unwrap();
+        commit_all(source.path(), "small file");
+        run_in(source.path(), &["push", "origin"]);
+    }
+    run_in(&client, &["fetch", "origin"]);
+    assert!(
+        store.contains(&chunk),
+        "fetch must restore the missing object"
+    );
+    run_in(&client, &["closure", "verify", "origin/main", "--history"]);
 }
 
 /// Counts calls to `download_pack` specifically (NOT `download_blob`, which
@@ -81,17 +288,31 @@ impl CountingTransport {
 }
 
 impl Transport for CountingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.pack_downloads.fetch_add(1, Ordering::SeqCst);
-        self.inner.download_pack(key)
+        self.inner.download_pack(key, ref_hint, sink)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
 
     // Explicitly delegated (rather than left to the trait's default, which
@@ -99,12 +320,22 @@ impl Transport for CountingTransport {
     // inflate the pack counter with chain-node blob traffic): the packlist
     // chain walk is unconditional by design and must never count
     // against the pack-download assertions below.
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
 
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
 
     fn update_ref(
@@ -116,6 +347,9 @@ impl Transport for CountingTransport {
         self.inner.update_ref(name, condition, hash)
     }
 
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
     }
@@ -264,7 +498,9 @@ fn packmap_chain_packs(tx: &dyn Transport, branch: &str) -> HashSet<Hash> {
     let mut out = HashSet::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         out.extend(node.packs.iter().copied());
         cursor = node.prev;
@@ -322,7 +558,9 @@ fn multi_branch_fetch_persists_the_union_of_every_branchs_pack_digests() {
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    let n = fetch_all(bob.path(), &tx, "default").expect("single fetch across all branches");
+    let n = fetch_all(bob.path(), &tx, "default")
+        .expect("single fetch across all branches")
+        .branches_fetched;
     assert_eq!(n, 3, "fetch must report all three branches");
 
     let record_path = bob.path().join(".kit/applied-packs/default");
@@ -503,10 +741,22 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         "the failed appends must be reported once; stderr:\n{stderr}"
     );
     assert_eq!(
-        stderr.matches("/.origin.tmp").count(),
+        stderr.matches("/.kit.tmp.").count(),
         0,
         "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );
+    // Verify that the replacement contains the packs from all three branches.
+    let text = fs::read_to_string(&record_path).unwrap();
+    let recorded: HashSet<_> = text
+        .lines()
+        .map(|line| kit_core::refs::parse_lowercase_hash(line.as_bytes()).unwrap())
+        .collect();
+    let transport = FileTransport::new(remote.path());
+    for branch in ["main", "bbb", "ccc"] {
+        let expected = packmap_chain_packs(&transport, branch);
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&recorded));
+    }
     // All three branches were still fetched.
     for branch in ["main", "bbb", "ccc"] {
         assert!(
@@ -595,16 +845,30 @@ struct StaleListing {
 }
 
 impl Transport for StaleListing {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
 
     fn update_ref(
@@ -616,6 +880,9 @@ impl Transport for StaleListing {
         self.inner.update_ref(name, condition, hash)
     }
 
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         if self.head_read_fails && name == format!("refs/heads/{}", self.ghost.name) {
             return Err(kit_core::protocol::TransportError::RemoteError(
@@ -657,7 +924,9 @@ fn stale_listing_skips_a_branch_whose_head_and_packmap_are_gone() {
     let (alice, tx) = stale_remote(false);
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    let fetched = fetch_all(bob.path(), &tx, "default").expect("stale entry is skipped");
+    let fetched = fetch_all(bob.path(), &tx, "default")
+        .expect("stale entry is skipped")
+        .branches_fetched;
     assert_eq!(fetched, 1, "only the live branch counts");
     let bob_layout = RepoLayout::single(bob.path());
     let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")

@@ -127,6 +127,24 @@ fn end(out: &mut Vec<u8>) {
     out.extend_from_slice(&2_u32.to_be_bytes());
     out.extend_from_slice(b"{}");
 }
+/// `download_pack` into memory, then the key check a spool makes: the
+/// client streams into the sink and leaves the key to the sink's owner.
+macro_rules! download {
+    ($client:expr, $key:expr, $hint:expr, $max:expr) => {{
+        let key: &Hash = $key;
+        let mut sink = kit_core::protocol::MemorySink::new($max);
+        block_on($client.download_pack(key, $hint, $max, &mut sink, None)).and_then(|reply| {
+            let bytes = sink.into_bytes().unwrap();
+            assert_eq!(reply.value, bytes.len() as u64);
+            if pack_key(&bytes) == *key {
+                Ok(bytes)
+            } else {
+                Err(Error::Invalid("pack content commitment"))
+            }
+        })
+    }};
+}
+
 fn download_reply(
     key: &Hash,
     declared: u64,
@@ -246,6 +264,56 @@ fn a_402_without_a_connect_body_still_parses_from_headers() {
     assert!(required.challenges.is_empty());
     assert_eq!(required.www_authenticate, ["Admission id=\"p\""]);
     assert_eq!(required.admission_required, ["abc"]);
+}
+
+/// An intermediary's error page is not Connect JSON: 5xx and 429 carry their
+/// status, every other status stays a malformed remote.
+#[test]
+fn a_non_connect_error_body_is_transient_only_for_5xx_and_429() {
+    for (status, content_type, body) in [
+        (503, "text/html", "<html>bad gateway</html>"),
+        (502, "text/html", "<html>bad gateway</html>"),
+        (500, "application/json", "not json"),
+        (429, "text/plain", "slow down"),
+    ] {
+        let script = Script::new(move |_| {
+            Ok(Response::builder()
+                .status(status)
+                .header("content-type", content_type)
+                .body(body.as_bytes().to_vec())
+                .unwrap())
+        });
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(
+            matches!(error, Error::ServerStatus { status: seen } if seen == status),
+            "{status}: {error:?}"
+        );
+        assert_eq!(script.seen.borrow().len(), 1, "no client retry");
+    }
+    for status in [400, 403, 404, 409, 413, 418, 499] {
+        let script = Script::new(move |_| {
+            Ok(Response::builder()
+                .status(status)
+                .header("content-type", "text/html")
+                .body(b"<html>nope</html>".to_vec())
+                .unwrap())
+        });
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{status}: {error:?}");
+    }
+}
+
+/// A Connect JSON body keeps its Connect code whatever the status.
+#[test]
+fn a_connect_error_body_keeps_its_code_on_a_5xx_and_a_429() {
+    for status in [500, 503, 429] {
+        let script = Script::new(move |_| json(status, &[], r#"{"code":"unavailable"}"#));
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(
+            matches!(&error, Error::Remote(remote) if remote.code == "unavailable" && remote.status == status),
+            "{status}: {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -523,8 +591,8 @@ fn download_pack_is_bounded_by_the_callers_cap() {
         Script::new(move |_| download_reply(&key, size, &pack, 16))
     };
     let client = anonymous(&honest);
-    let got = block_on(client.download_pack(&key, None, size, None)).unwrap();
-    assert_eq!(got.value, pack);
+    let got = download!(client, &key, None, size).unwrap();
+    assert_eq!(got, pack);
     let limit = honest.seen.borrow()[0].1;
     assert!(
         limit >= pack.len() && limit < pack.len() + 64 * 1024,
@@ -533,7 +601,7 @@ fn download_pack_is_bounded_by_the_callers_cap() {
 
     // A declared size over the cap fails before any chunk is trusted.
     assert!(matches!(
-        block_on(client.download_pack(&key, None, size - 1, None)),
+        download!(client, &key, None, size - 1),
         Err(Error::Limit(_))
     ));
 
@@ -542,14 +610,14 @@ fn download_pack_is_bounded_by_the_callers_cap() {
         let pack = pack.clone();
         Script::new(move |_| download_reply(&key, size - 1, &pack, 16))
     };
-    assert!(block_on(anonymous(&liar).download_pack(&key, None, 1 << 20, None)).is_err());
+    assert!(download!(anonymous(&liar), &key, None, 1 << 20).is_err());
     let (_, other) = sample_pack(2);
     let swapped = {
         let other = other.clone();
         Script::new(move |_| download_reply(&key, other.len() as u64, &other, 16))
     };
     assert!(matches!(
-        block_on(anonymous(&swapped).download_pack(&key, None, 1 << 20, None)),
+        download!(anonymous(&swapped), &key, None, 1 << 20),
         Err(Error::Invalid(_))
     ));
 }
@@ -702,7 +770,7 @@ fn a_stream_end_frame_challenge_is_a_typed_admission_required() {
             .body(body)
             .unwrap())
     });
-    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    let error = download!(anonymous(&script), &key, None, 1 << 20).unwrap_err();
     let Error::AdmissionRequired(required) = error else {
         panic!("expected admission challenge");
     };
@@ -722,7 +790,7 @@ fn a_flood_of_empty_frames_is_rejected_without_collecting_them() {
         end(&mut body);
         proto_reply("application/connect+proto", body)
     });
-    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    let error = download!(anonymous(&script), &key, None, 1 << 20).unwrap_err();
     assert!(matches!(error, Error::Invalid(_)), "{error:?}");
 }
 
@@ -837,7 +905,7 @@ fn streamed_challenge_headers_keep_the_admission_bounds() {
             .body(body)
             .unwrap())
     });
-    let error = block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)).unwrap_err();
+    let error = download!(anonymous(&script), &key, None, 1 << 20).unwrap_err();
     assert!(matches!(error, Error::Invalid("admission header")));
 }
 
@@ -857,7 +925,7 @@ fn streamed_terminal_errors_must_be_complete() {
             Ok(response)
         });
         assert!(matches!(
-            block_on(anonymous(&script).download_pack(&key, None, 1 << 20, None)),
+            download!(anonymous(&script), &key, None, 1 << 20),
             Err(Error::Invalid("Connect end error"))
         ));
     }
@@ -897,16 +965,20 @@ impl HttpTransport for LocationScript {
     async fn fetch_pack_location(
         &self,
         url: &str,
-        limit: usize,
+        limit: u64,
         _timeout: Option<std::time::Duration>,
-    ) -> Result<Vec<u8>, String> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), String> {
         assert_eq!(Some(url), self.location.url.as_deref());
-        assert_eq!(
-            limit,
-            usize::try_from(self.location.total_bytes.unwrap()).unwrap()
-        );
+        assert_eq!(limit, self.location.total_bytes.unwrap());
         self.fetches.set(self.fetches.get() + 1);
-        self.fetched.clone()
+        let bytes = self.fetched.clone()?;
+        // An undeclared length, as a chunked response sends it.
+        sink.begin(None).map_err(|error| error.to_string())?;
+        for piece in bytes.chunks(3) {
+            sink.write(piece).map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
     async fn send(&self, request: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
         if request.uri().path().ends_with("GetServerInfo") {
@@ -955,9 +1027,7 @@ fn pack_locations_verify_before_return_and_cache_discovery() {
     let client = Client::anonymous(&script, destination());
     for _ in 0..2 {
         assert_eq!(
-            block_on(client.download_pack(&pack_key(b"pack"), None, 4, None))
-                .unwrap()
-                .value,
+            download!(client, &pack_key(b"pack"), None, 4).unwrap(),
             b"pack"
         );
     }
@@ -986,9 +1056,7 @@ fn pack_location_failure_falls_back_once_without_opt_in() {
         let clock = clock();
         let client = Client::signed(&script, destination(), &TestSigner, &clock);
         assert_eq!(
-            block_on(client.download_pack(&pack_key(b"pack"), Some("refs/heads/main"), 4, None))
-                .unwrap()
-                .value,
+            download!(client, &pack_key(b"pack"), Some("refs/heads/main"), 4).unwrap(),
             b"pack"
         );
         assert_eq!(*script.opt_ins.borrow(), [Some(true), None], "case {case}");
@@ -1003,9 +1071,7 @@ fn pack_locations_require_server_advertisement_and_client_configuration() {
         script.advertised = disabled;
         let client = Client::anonymous(&script, destination()).with_pack_locations(!disabled);
         assert_eq!(
-            block_on(client.download_pack(&pack_key(b"pack"), None, 4, None))
-                .unwrap()
-                .value,
+            download!(client, &pack_key(b"pack"), None, 4).unwrap(),
             b"pack"
         );
         assert_eq!(*script.opt_ins.borrow(), [None]);
@@ -1020,7 +1086,7 @@ fn pack_location_fallback_still_verifies_the_stream_hash() {
     script.fetched = Ok(b"fake".to_vec());
     script.streamed = b"fake".to_vec();
     let client = Client::anonymous(&script, destination());
-    assert!(block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).is_err());
+    assert!(download!(client, &pack_key(b"pack"), None, 4).is_err());
     assert_eq!(*script.opt_ins.borrow(), [Some(true), None]);
 }
 
@@ -1086,13 +1152,16 @@ impl HttpTransport for LocationBudget {
     async fn fetch_pack_location(
         &self,
         url: &str,
-        limit: usize,
+        limit: u64,
         timeout: Option<std::time::Duration>,
-    ) -> Result<Vec<u8>, String> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), String> {
         std::thread::sleep(self.fetch_delay);
         self.fetch_timeout.set(timeout);
         self.remaining.set(self.after_fetch);
-        self.script.fetch_pack_location(url, limit, timeout).await
+        self.script
+            .fetch_pack_location(url, limit, timeout, sink)
+            .await
     }
 }
 
@@ -1101,7 +1170,7 @@ fn pack_location_fetch_receives_remaining_local_budget() {
     use std::time::Duration;
     let script = LocationBudget::new(Duration::from_millis(25), Duration::from_millis(20));
     let client = Client::anonymous(&script, destination()).with_request_policy(&script);
-    block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).unwrap();
+    download!(client, &pack_key(b"pack"), None, 4).unwrap();
     let timeout = script.fetch_timeout.get().expect("local location budget");
     assert!(!timeout.is_zero() && timeout <= Duration::from_millis(25));
 }
@@ -1112,7 +1181,7 @@ fn exhausted_pack_location_budget_prevents_fetch_dispatch() {
     let script = LocationBudget::new(Duration::ZERO, Duration::ZERO);
     let client = Client::anonymous(&script, destination()).with_request_policy(&script);
     assert!(matches!(
-        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        download!(client, &pack_key(b"pack"), None, 4),
         Err(Error::Deadline)
     ));
     assert_eq!(script.script.fetches.get(), 0);
@@ -1126,7 +1195,7 @@ fn exhausted_pack_location_budget_prevents_streaming_fallback() {
     script.script.fetched = Err("stalled location".into());
     let client = Client::anonymous(&script, destination()).with_request_policy(&script);
     assert!(matches!(
-        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        download!(client, &pack_key(b"pack"), None, 4),
         Err(Error::Deadline)
     ));
     assert_eq!(*script.script.opt_ins.borrow(), [Some(true)]);
@@ -1138,7 +1207,7 @@ fn pack_location_fallback_rechecks_remaining_local_budget() {
     let mut script = LocationBudget::new(Duration::from_millis(25), Duration::from_millis(10));
     script.script.fetched = Err("location failed".into());
     let client = Client::anonymous(&script, destination()).with_request_policy(&script);
-    block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)).unwrap();
+    download!(client, &pack_key(b"pack"), None, 4).unwrap();
     let timeout = script
         .fallback_timeout
         .get()
@@ -1157,7 +1226,7 @@ fn pack_location_fallback_does_not_reset_a_fixed_host_budget() {
     script.script.fetched = Err("stalled location".into());
     let client = Client::anonymous(&script, destination()).with_request_policy(&script);
     assert!(matches!(
-        block_on(client.download_pack(&pack_key(b"pack"), None, 4, None)),
+        download!(client, &pack_key(b"pack"), None, 4),
         Err(Error::Deadline)
     ));
     assert_eq!(*script.script.opt_ins.borrow(), [Some(true)]);

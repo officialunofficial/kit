@@ -104,9 +104,10 @@ kit defends:
   a cloned repo's own `.kit/config` &mdash; see §4).
   A tracking ref that an opt-out fetch published stays unverified until a
   signed fetch of that remote publishes the branch again; if that check fails,
-  the fetch stops and the ref keeps the unverified tip. Commands that read a
-  tracking ref directly, such as `kit merge default/main`, `kit pull --rebase`
-  and `kit pull --no-ff`, use whatever the last fetch published.
+  the fetch stops and the ref keeps the unverified tip. Every pull mode checks
+  the history of the tracking tip before using it, including when the remote
+  no longer lists that branch. A direct
+  `kit merge default/main` uses whatever the last fetch published.
 
 kit does NOT defend:
 

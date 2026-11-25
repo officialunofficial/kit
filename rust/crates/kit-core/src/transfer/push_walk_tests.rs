@@ -92,7 +92,7 @@ fn assert_applies(src: &ObjectStore, plan: &PackPlan, seed: &[(Hash, Vec<u8>)], 
         w.push_raw(*h, &src.read(h).unwrap()).unwrap();
     }
     for d in &plan.deltas {
-        w.push_delta(&d.base, &d.stream).unwrap();
+        w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
     }
     let pack = w.finish().unwrap();
     let (_d, dst) = store();
@@ -121,6 +121,25 @@ fn sequential(
         .iter()
         .map(|&c| encode_delta_candidate(s, c))
         .collect()
+}
+
+fn assert_matches_full_walk(s: &ObjectStore, tips: &[Hash], remote: Option<Hash>) -> PackPlan {
+    let limits = WalkLimits::default();
+    let held = HeldCommits::collect(s, remote, limits.objects).unwrap();
+    let expected = plan_with_held(s, tips, &held, sequential, limits).unwrap();
+    let plan = plan_tips_capped(s, tips, remote, sequential, limits).unwrap();
+    assert_eq!(plan.raw, expected.raw);
+    assert_eq!(plan.self_contained, expected.self_contained);
+    assert_eq!(plan.deltas.len(), expected.deltas.len());
+    for (actual, expected) in plan.deltas.iter().zip(&expected.deltas) {
+        assert_eq!(actual.base, expected.base);
+        assert_eq!(actual.target, expected.target);
+        assert_eq!(
+            actual.stream.bytes().unwrap(),
+            expected.stream.bytes().unwrap()
+        );
+    }
+    plan
 }
 
 /// A manifest whose chunk holds another number of bytes than its span is
@@ -846,31 +865,165 @@ fn the_cap_counts_objects_but_no_chunk() {
 }
 
 #[test]
-fn the_cap_counts_held_commits_too_and_every_path_fails() {
+fn a_linear_push_counts_only_the_remote_head_and_new_objects() {
     let (_d, s) = store();
-    let b = put_blob(&s, b"x".to_vec());
-    let t0 = tree_of(&s, &[("f", b)]);
-    let c1 = commit(&s, t0, &[], "1");
-    let c2 = commit(&s, t0, &[c1], "22");
-    let c3 = commit(&s, t0, &[c2], "333");
-    let b2 = put_blob(&s, b"y".to_vec());
-    let t1 = tree_of(&s, &[("f", b2)]);
-    let new = commit(&s, t1, &[c3], "new");
-    // Three held commits, then the new commit, its tree and its blob.
-    plan_pack_capped(&s, new, Some(c3), sequential, limits(6)).unwrap();
-    for cap in [5, 3, 2, 0] {
-        assert!(
-            matches!(
-                plan_pack_capped(&s, new, Some(c3), sequential, limits(cap)),
-                Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
-            ),
-            "cap {cap}"
-        );
+    let tree = tree_of(&s, &[("f", put_blob(&s, b"old".to_vec()))]);
+    let mut remote = commit(&s, tree, &[], "root");
+    for index in 0..128 {
+        remote = commit(&s, tree, &[remote], &format!("old-{index}"));
     }
-    // The held set alone passes at three and fails at two.
-    HeldCommits::collect(&s, Some(c3), 3).unwrap();
-    assert!(HeldCommits::collect(&s, Some(c3), 2).is_err());
-    assert!(HeldCommits::collect(&s, Some(c3), 0).is_err());
+    let blob = put_blob(&s, b"new".to_vec());
+    let changed = tree_of(&s, &[("f", blob)]);
+    let tip = commit(&s, changed, &[remote], "new");
+
+    // The boundary, new commit, changed tree and new blob fit a cap of four.
+    let plan = plan_pack_capped(&s, tip, Some(remote), sequential, limits(4)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([tip, changed, blob]));
+    for cap in [3, 2, 1, 0] {
+        assert!(matches!(
+            plan_pack_capped(&s, tip, Some(remote), sequential, limits(cap)),
+            Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+        ));
+    }
+}
+
+#[test]
+fn a_tip_at_the_remote_head_still_requires_one_slot_in_the_cap() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let remote = commit(&s, tree, &[], "remote");
+
+    let held = HeldCommits::for_tips(&s, &[remote], Some(remote), 1).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+    assert!(matches!(
+        HeldCommits::for_tips(&s, &[remote], Some(remote), 0),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn the_probe_shares_its_read_budget_across_tips() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let left = commit(&s, tree, &[remote], "left");
+    let right = commit(&s, tree, &[remote], "right");
+
+    let held = HeldCommits::for_tips(&s, &[remote, left], Some(remote), 1).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+    assert!(matches!(
+        HeldCommits::for_tips(&s, &[left, right], Some(remote), 1),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn the_probe_uses_the_full_walk_after_sixty_four_local_reads() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let mut tip = remote;
+    for index in 0..64 {
+        tip = commit(&s, tree, &[tip], &format!("advance-{index}"));
+    }
+
+    let held = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+
+    let tip = commit(&s, tree, &[tip], "advance past probe budget");
+    let held = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    assert_eq!(held.len(), 2);
+    assert!(held.contains(&root));
+}
+
+#[test]
+fn a_diverged_push_counts_every_held_commit_against_the_cap() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let shared = commit(&s, tree, &[root], "shared");
+    let remote = commit(&s, tree, &[shared], "remote");
+    let tip = commit(&s, tree, &[shared], "different tip");
+
+    let plan = plan_pack_capped(&s, tip, Some(remote), sequential, limits(4)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([tip]));
+    assert!(matches!(
+        plan_pack_capped(&s, tip, Some(remote), sequential, limits(3)),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn force_push_remote_ahead_and_unrelated_tips_match_the_full_walk() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let diverged = commit(&s, tree, &[root], "diverged");
+    let unrelated = commit(&s, tree, &[], "unrelated");
+    assert_eq!(
+        assert_matches_full_walk(&s, &[diverged], Some(remote)).raw,
+        vec![diverged]
+    );
+    assert!(assert_matches_full_walk(&s, &[root], Some(remote)).is_empty());
+    assert_eq!(
+        ids(&assert_matches_full_walk(&s, &[unrelated], Some(remote))),
+        BTreeSet::from([unrelated])
+    );
+}
+
+#[test]
+fn a_linear_push_with_tree_edges_to_held_history_loads_it_once() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let middle = commit(&s, tree, &[root], "middle");
+    let remote = commit(&s, tree, &[middle], "remote");
+    let changed = tree_of(&s, &[("root", root), ("middle", middle)]);
+    let tip = commit(&s, changed, &[remote], "new");
+
+    let full = HeldCommits::collect(&s, Some(remote), MAX_PUSH_WALK).unwrap();
+    let boundary = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    let reads = |tip, held: &HeldCommits| {
+        let before = s.read_call_count();
+        let walk = PushWalk::run(&s, tip, held, limits(5), None).unwrap();
+        assert_eq!(walk.objects(), &BTreeSet::from([tip, changed]));
+        s.read_call_count() - before
+    };
+    let full_reads = reads(tip, &full);
+    assert_eq!(reads(tip, &boundary), full_reads + 3);
+
+    // With the held set already complete, the extra ancestor adds no reads.
+    let shorter_tip = commit(&s, changed, &[middle], "new on a shorter history");
+    let shorter_full = HeldCommits::collect(&s, Some(middle), MAX_PUSH_WALK).unwrap();
+    assert_eq!(reads(shorter_tip, &shorter_full), full_reads);
+    assert_matches_full_walk(&s, &[tip], Some(remote));
+
+    // The three held commits and both new objects must fit together.
+    assert!(matches!(
+        PushWalk::run(&s, tip, &boundary, limits(4), None),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn a_push_of_several_linear_tips_stops_at_the_same_boundary() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let left = commit(&s, tree, &[remote], "left");
+    let right = commit(&s, tree, &[remote], "right");
+    let tips = [left, right, remote];
+
+    let plan = plan_tips_capped(&s, &tips, Some(remote), sequential, limits(3)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([left, right]));
+    assert_matches_full_walk(&s, &tips, Some(remote));
 }
 
 #[test]
@@ -933,7 +1086,6 @@ fn a_parent_that_is_not_a_commit_is_its_own_root() {
         &s,
         c,
         &HeldCommits::default(),
-        &HashSet::new(),
         WalkLimits::default(),
         Some(&mut |root, id| {
             brought.push((*root, *id));
@@ -946,18 +1098,11 @@ fn a_parent_that_is_not_a_commit_is_its_own_root() {
     assert!(brought.contains(&(second, second)));
 }
 
-fn one(s: &ObjectStore, id: Hash, shallow: &[Hash]) -> BTreeSet<Hash> {
-    let shallow: HashSet<Hash> = shallow.iter().copied().collect();
-    PushWalk::run_one(
-        s,
-        id,
-        &HeldCommits::default(),
-        &shallow,
-        WalkLimits::default(),
-    )
-    .unwrap()
-    .objects()
-    .clone()
+fn one(s: &ObjectStore, id: Hash) -> BTreeSet<Hash> {
+    PushWalk::run_one(s, id, &HeldCommits::default(), WalkLimits::default())
+        .unwrap()
+        .objects()
+        .clone()
 }
 
 #[test]
@@ -973,14 +1118,12 @@ fn one_commit_is_sized_on_its_own_and_an_object_two_commits_bring_counts_for_bot
     // The same tree as the first commit, so only the commit itself differs.
     let c3 = commit(&s, t3, &[c2], "333");
     // Against its parent alone, the second commit brings its tree and one blob.
-    assert_eq!(one(&s, c2, &[]), BTreeSet::from([c2, t2, other]));
+    assert_eq!(one(&s, c2), BTreeSet::from([c2, t2, other]));
     // The third brings the returning blob again, though the first brought it.
-    assert_eq!(one(&s, c3, &[]), BTreeSet::from([c3, t3, back]));
-    assert!(one(&s, c1, &[]).contains(&back));
-    // A shallow commit has no parent to compare with.
-    assert_eq!(one(&s, c3, &[c3]), BTreeSet::from([c3, t3, back, first]));
+    assert_eq!(one(&s, c3), BTreeSet::from([c3, t3, back]));
+    assert!(one(&s, c1).contains(&back));
     // An object that is not a commit brings its closure.
-    assert_eq!(one(&s, t3, &[]), BTreeSet::from([t3, back, first]));
+    assert_eq!(one(&s, t3), BTreeSet::from([t3, back, first]));
 }
 
 #[test]
@@ -1173,7 +1316,6 @@ fn an_entry_equal_to_any_parents_entry_is_skipped() {
         &s,
         m,
         &HeldCommits::collect(&s, Some(p1), 100).unwrap(),
-        &HashSet::new(),
         WalkLimits::default(),
         None,
     )
@@ -1235,6 +1377,33 @@ fn a_tree_tip_drops_what_the_remote_snapshot_holds_at_another_path() {
 }
 
 #[test]
+fn snapshot_probes_keep_only_fresh_objects_in_the_sorted_plan() {
+    let (_d, s) = store();
+    let old = put_blob(&s, b"already present".to_vec());
+    let fresh = put_blob(&s, b"fresh".to_vec());
+    let nested = tree_of(&s, &[("old", old)]);
+    let remote = commit(&s, tree_of(&s, &[("dir", nested)]), &[], "remote");
+    let tip = tree_of(&s, &[("dir-moved", nested), ("fresh", fresh), ("old", old)]);
+    let held = HeldCommits::collect(&s, Some(remote), 100).unwrap();
+    let mut reported = Vec::new();
+    let walk = PushWalk::run(
+        &s,
+        tip,
+        &held,
+        WalkLimits::default(),
+        Some(&mut |owner, object| {
+            assert_eq!(*owner, tip);
+            reported.push(*object);
+            Ok(())
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(walk.objects(), &BTreeSet::from([tip, fresh]));
+    assert_eq!(reported, vec![tip, fresh]);
+}
+
+#[test]
 fn a_tree_equal_to_a_parents_tree_keeps_only_the_commit() {
     let (_d, s) = store();
     let a = put_blob(&s, b"a".to_vec());
@@ -1242,7 +1411,7 @@ fn a_tree_equal_to_a_parents_tree_keeps_only_the_commit() {
     let c1 = commit(&s, t, &[], "1");
     let c2 = commit(&s, t, &[c1], "22");
     let held = HeldCommits::collect(&s, Some(c1), 100).unwrap();
-    let walk = PushWalk::run(&s, c2, &held, &HashSet::new(), WalkLimits::default(), None).unwrap();
+    let walk = PushWalk::run(&s, c2, &held, WalkLimits::default(), None).unwrap();
     assert_eq!(walk.objects(), &BTreeSet::from([c2]));
     assert!(walk.manifests().is_empty());
 }
@@ -1261,8 +1430,7 @@ fn a_wide_tree_keeps_only_the_entries_that_changed() {
         let t = tree_of(&s, &after);
         let c2 = commit(&s, t, &[c1], &format!("edit {index}"));
         let held = HeldCommits::collect(&s, Some(c1), 100).unwrap();
-        let walk =
-            PushWalk::run(&s, c2, &held, &HashSet::new(), WalkLimits::default(), None).unwrap();
+        let walk = PushWalk::run(&s, c2, &held, WalkLimits::default(), None).unwrap();
         assert_eq!(walk.objects(), &BTreeSet::from([c2, t, edited]), "{index}");
     }
 }
@@ -1278,15 +1446,7 @@ fn a_manifest_is_paired_with_the_manifest_at_its_path_in_a_parent() {
     let t = tree_of(&s, &[("f", m2)]);
     let merge = commit(&s, t, &[p1, p2], "merge");
     let held = HeldCommits::collect(&s, Some(p1), 100).unwrap();
-    let walk = PushWalk::run(
-        &s,
-        merge,
-        &held,
-        &HashSet::new(),
-        WalkLimits::default(),
-        None,
-    )
-    .unwrap();
+    let walk = PushWalk::run(&s, merge, &held, WalkLimits::default(), None).unwrap();
     let paired: Vec<_> = walk
         .manifests()
         .iter()
@@ -1348,7 +1508,6 @@ fn new_commits_are_walked_parents_first_and_once() {
         &s,
         merge,
         &HeldCommits::default(),
-        &HashSet::new(),
         WalkLimits::default(),
         Some(&mut |commit, id| {
             if commit == id {
@@ -1362,36 +1521,6 @@ fn new_commits_are_walked_parents_first_and_once() {
     let at = |h: &Hash| brought.iter().position(|x| x == h).unwrap();
     assert!(at(&root) < at(&left) && at(&root) < at(&right));
     assert!(at(&left) < at(&merge) && at(&right) < at(&merge));
-}
-
-#[test]
-fn a_shallow_commit_is_a_root() {
-    let (_d, s) = store();
-    let t = tree_of(&s, &[("f", put_blob(&s, b"x".to_vec()))]);
-    let old = commit(&s, t, &[], "old");
-    let boundary = commit(&s, t, &[old], "boundary");
-    remove(&s, &old);
-    let walk = PushWalk::run(
-        &s,
-        boundary,
-        &HeldCommits::default(),
-        &HashSet::from([boundary]),
-        WalkLimits::default(),
-        None,
-    )
-    .unwrap();
-    assert!(walk.objects().contains(&boundary));
-    assert!(matches!(
-        PushWalk::run(
-            &s,
-            boundary,
-            &HeldCommits::default(),
-            &HashSet::new(),
-            WalkLimits::default(),
-            None,
-        ),
-        Err(StoreError::ObjectNotFound(_))
-    ));
 }
 
 #[test]
@@ -1586,7 +1715,15 @@ proptest! {
             None => new_closure.clone(),
         };
 
-        let plan = plan_pack(&s, new, remote_tip).unwrap();
+        let plan = assert_matches_full_walk(&s, &[new], remote_tip);
+        if let Some(remote) = remote_tip {
+            // Exercise the bounded walk even when the random tips diverge.
+            let Object::Commit(new_commit) = s.read_object(&new).unwrap() else {
+                unreachable!();
+            };
+            let next = commit(&s, new_commit.tree_hash, &[remote], "linear advance");
+            assert_matches_full_walk(&s, &[next], Some(remote));
+        }
         let sent = ids(&plan);
         prop_assert!(
             old_answer.is_subset(&sent),
@@ -1822,7 +1959,7 @@ mod random_histories {
             w.push_raw(*h, &src.read(h).unwrap()).unwrap();
         }
         for d in &plan.deltas {
-            w.push_delta(&d.base, &d.stream).unwrap();
+            w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
         }
         PackReader::read(&w.finish().unwrap(), dst).unwrap();
     }
@@ -1946,6 +2083,81 @@ mod random_histories {
             }
         }
         Ok(())
+    }
+
+    /// Several tips, some behind annotated tags, planned at once: the plan
+    /// sends nothing the single-tip plans would not, each object once, and
+    /// it rebuilds every tip.
+    fn run_tips(seed: u64) -> Result<(), String> {
+        let mut rng = Rng(seed);
+        let (_d, s) = store();
+        let count = 2 + rng.below(13);
+        let history = build(&s, &mut rng, count, "main");
+        let tips: Vec<Hash> = (0..=rng.below(4))
+            .map(|n| {
+                let commit = history.commits[rng.below(history.commits.len())];
+                if rng.below(2) == 0 {
+                    return commit;
+                }
+                put(
+                    &s,
+                    &Object::Tag(Tag {
+                        target: commit,
+                        target_type: ObjectType::Commit,
+                        name: format!("t{n}").into_bytes(),
+                        tagger: Identity::ed25519([7; 32]),
+                        signer: [0; 32],
+                        message: Vec::new(),
+                        timestamp: seed,
+                        signature: [0; 64],
+                    }),
+                )
+            })
+            .collect();
+        let remote_tip = match rng.below(3) {
+            0 => None,
+            _ => Some(history.commits[rng.below(history.commits.len())]),
+        };
+        let multi = plan_pack_tips(&s, &tips, remote_tip, sequential)
+            .map_err(|e| format!("plan failed: {e}"))?;
+        let mut union = BTreeSet::new();
+        for tip in &tips {
+            let single = plan_pack_with(&s, *tip, remote_tip, sequential)
+                .map_err(|e| format!("single plan failed: {e}"))?;
+            union.extend(ids(&single));
+        }
+        let sent = ids(&multi);
+        if !sent.is_subset(&union) {
+            return Err(format!(
+                "the plan sends {} objects no single plan sends",
+                sent.difference(&union).count()
+            ));
+        }
+        if multi.raw.len() + multi.deltas.len() != sent.len() {
+            return Err("the plan lists an object twice".into());
+        }
+        let (_r, remote) = store();
+        if let Some(head) = remote_tip {
+            for h in reachable_objects(&s, &head).unwrap() {
+                remote.write(&s.read(&h).unwrap()).unwrap();
+            }
+        }
+        apply(&s, &multi, &remote);
+        if !tips.iter().all(|tip| complete(&remote, tip)) {
+            return Err("the plan leaves a tip incomplete".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn random_tips_plan_within_the_single_tip_plans() {
+        let mut failures = Vec::new();
+        for seed in 0..40 {
+            if let Err(why) = run_tips(seed) {
+                failures.push((seed, why));
+            }
+        }
+        assert!(failures.is_empty(), "failing seeds: {failures:?}");
     }
 
     /// Run `default_cases` histories, or `HISTORY_CASES` of them from seed

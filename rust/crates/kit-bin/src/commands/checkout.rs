@@ -18,7 +18,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_observed};
+use kit_core::ops::restore::RestoreOptions;
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
@@ -98,10 +98,19 @@ const RESTORE_USAGE: &str = "usage: kit checkout [-f] [<rev>] -- <path>...";
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
+    run_inner(args, None)
+}
+
+pub(super) fn run_bisect(args: &[String], state: &kit_core::ops::bisect::BisectState) -> u8 {
+    run_inner(args, Some(state))
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState>) -> u8 {
     if let Some(split) = args.iter().position(|a| a == "--") {
         return restore_paths(&args[..split], &args[split + 1..]);
     }
-    let opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
+    let mut opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -129,7 +138,58 @@ pub fn run(args: &[String]) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
+    if bisect.is_some_and(|state| {
+        kit_core::ops::bisect::read_state(&layout).as_ref().ok() != Some(state)
+    }) {
+        return emit_err(
+            "bisect state changed while the command ran; stopping",
+            exit::GENERAL_ERROR,
+        );
+    }
 
+    let old_head = match refs::read_head(&layout) {
+        Ok(h) => h,
+        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
+    };
+    // Preserve the remembered type: a branch may itself be named like a hash.
+    let previous_head = if matches!(opts.target.as_deref(), Some("-" | "@{-1}")) {
+        match refs::read_previous_head(&layout) {
+            Ok(head) => Some(head),
+            Err(_) => return emit_err("no previous branch", exit::GENERAL_ERROR),
+        }
+    } else {
+        None
+    };
+    let previous_commit = match previous_head.as_ref() {
+        Some(refs::Head::Branch(b)) => match refs::read_ref(&layout, b) {
+            Ok(Some(h)) => Some(h),
+            _ => return emit_err("no previous branch", exit::GENERAL_ERROR),
+        },
+        Some(refs::Head::Detached(h)) => {
+            // An older kit's gc does not know PREVIOUS_HEAD and may have
+            // pruned the commit it names.
+            if !store.contains(h) {
+                return emit_err(
+                    &format!(
+                        "previous HEAD {} was pruned; nothing to switch back to",
+                        format::short_hash(h, 8)
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Some(*h)
+        }
+        None => None,
+    };
+    if let Some(head) = &previous_head {
+        opts.target = Some(match head {
+            refs::Head::Branch(b) => b.clone(),
+            refs::Head::Detached(h) => kit_core::hash::to_hex(h),
+        });
+    }
+    let previous_is_branch = previous_head
+        .as_ref()
+        .map(|h| matches!(h, refs::Head::Branch(_)));
     // `-b`/`-B`: plan a branch create (or reset, for `-B`) at the
     // start-point (the optional positional, default HEAD). The ref is NOT
     // written here — only AFTER the destructive-restore gate passes — so a
@@ -139,8 +199,16 @@ pub fn run(args: &[String]) -> u8 {
     let create_new = opts.create.as_deref().or(opts.create_force.as_deref());
     let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
         if let Some(new) = create_new {
+            // The branch is written after the files, so its name is checked
+            // before anything is.
+            if let Err(e) = refs::check_new_name(new, refs::RefNameKind::Branch) {
+                return output_failure(&format!("create branch {new}: {e}"));
+            }
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
-            let start = match libkit::revspec::resolve_revision(&store, &layout, start_spec) {
+            let start = match previous_commit.map_or_else(
+                || libkit::revspec::resolve_revision(&store, &layout, start_spec),
+                Ok,
+            ) {
                 Ok(h) => h,
                 Err(e) => {
                     return emit_err(
@@ -194,7 +262,9 @@ pub fn run(args: &[String]) -> u8 {
     // refuse when a sibling tree already has it checked out — branch
     // moves flow through the history-MMB ref path, which assumes one
     // writer per branch. Applies to `--force` too, like git.
-    let ends_on_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
+    let ends_on_branch = created
+        || previous_is_branch
+            .unwrap_or_else(|| matches!(refs::read_ref(&layout, name), Ok(Some(_))));
     if ends_on_branch {
         match libkit::worktrees::checked_out_elsewhere(&layout, name) {
             Ok(Some(at)) => {
@@ -215,7 +285,10 @@ pub fn run(args: &[String]) -> u8 {
     // otherwise resolve `<name>` via the shared revspec resolver.
     let commit_hash: Hash = match &create_plan {
         Some((_, start, ..)) => *start,
-        None => match libkit::revspec::resolve_revision(&store, &layout, name) {
+        None => match previous_commit.map_or_else(
+            || libkit::revspec::resolve_revision(&store, &layout, name),
+            Ok,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 return emit_err(
@@ -275,11 +348,18 @@ pub fn run(args: &[String]) -> u8 {
     // identical between it and the target are skipped rather than
     // re-read and rewritten. `--force` discards local edits, so it must
     // rewrite everything.
-    let base_tree = if opts.force {
+    // A repository with no index file, as `kit clone --no-checkout` leaves
+    // it, has nothing checked out: the first checkout writes every entry and
+    // owes no local change to the tree of HEAD (git's initial checkout).
+    let initial_checkout = !layout.index_file().exists();
+    let base_tree = if opts.force || initial_checkout {
         None
     } else {
         super::current_head_tree(&layout, &store).ok().flatten()
     };
+    // The safety checks skip the entries the restore skips: none when the
+    // restore is sparse, which rewrites every entry in the cone.
+    let checked_base = base_tree.filter(|_| sparse_opts.sparse_patterns.is_none());
 
     // Run the destructive-restore safety gate BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
@@ -288,54 +368,49 @@ pub fn run(args: &[String]) -> u8 {
     // collide with the target are preserved (git branch-switch
     // semantics), so they no longer block the checkout.
     // `--force` (git checkout -f) skips the gate, discarding local edits.
-    if !opts.force
-        && let Err(e) =
-            super::ensure_restore_safe_with_options(&layout, &store, tree_hash, &sparse_opts)
-    {
-        return emit_err(&e, exit::GENERAL_ERROR);
+    if !opts.force {
+        let safe = if initial_checkout {
+            super::ensure_initial_checkout_safe(&layout, &store, tree_hash, &sparse_opts)
+        } else {
+            super::ensure_restore_safe_from(&layout, &store, tree_hash, &sparse_opts, checked_base)
+        };
+        if let Err(e) = safe {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
     }
 
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
     // first if any of them carries local edits (unless `--force`).
-    let dropped = match dropped_paths_guarded(&layout, &store, tree_hash, &sparse_opts, opts.force)
-    {
-        Ok(d) => d,
-        Err(code) => return code,
-    };
-
-    // Safety gate passed — NOW create the `-b`/`-B` branch ref. Deferring
-    // it to here means a refused switch above leaves no orphan branch
-    // behind (git creates nothing when it refuses the operation).
-    if let Some((new, start, cond, _)) = &create_plan {
-        match super::write_ref_recording_history(&layout, new, *cond, start) {
-            Ok(()) => {}
-            Err(refs::RefError::Conflict(_)) => {
-                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
-            }
-            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
-        }
-    }
-
-    // Update HEAD FIRST, before mutating the worktree/index. The
-    // failure modes are asymmetric: if we materialised the new tree and
-    // *then* HEAD failed to advance, the worktree would hold the new
-    // branch's files while HEAD still pointed at the old branch — a
-    // silent, hard-to-diagnose split. Writing HEAD first inverts the
-    // hazard: a subsequent worktree/index failure leaves HEAD on the new
-    // branch with a stale worktree, which `kit status` surfaces as
-    // ordinary local changes and a re-run of `kit checkout` repairs.
-    // The `ensure_restore_safe` gate above already guaranteed no real
-    // user work is at risk, so the stale-worktree window is benign.
-    let is_branch = matches!(refs::read_ref(&layout, name), Ok(Some(_)));
-    let head_err = if is_branch {
-        refs::write_head_branch(&layout, name)
+    let dropped = if initial_checkout {
+        Vec::new()
     } else {
-        refs::write_head_detached(&layout, &commit_hash)
+        match dropped_paths_guarded(
+            &layout,
+            &store,
+            tree_hash,
+            checked_base,
+            &sparse_opts,
+            opts.force,
+        ) {
+            Ok(d) => d,
+            Err(code) => return code,
+        }
     };
-    if let Err(e) = head_err {
-        return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
+
+    if let Err(e) = kit_core::ops::restore::check_nested_repositories(
+        &store,
+        tree_hash,
+        &cwd,
+        &sparse_opts,
+        checked_base,
+    ) {
+        return restore_failure(&e);
     }
+
+    // Finish restoring files and publishing the branch ref, HEAD, and
+    // index after a first signal. A second signal can stop the switch.
+    crate::signal::install();
 
     // Materialise the tree with `clean = false`: tracked entries are
     // written/overwritten, untracked files are preserved. Then delete
@@ -347,24 +422,85 @@ pub fn run(args: &[String]) -> u8 {
     // the index can carry a stat cache for it and the next command does
     // not re-hash it. Observation paths are relative to the restore root,
     // so they are used only when that root is the worktree root.
+    let is_branch = created
+        || previous_is_branch
+            .unwrap_or_else(|| matches!(refs::read_ref(&layout, name), Ok(Some(_))));
+    let dropped_before: Vec<_> = dropped
+        .iter()
+        .map(|(path, _, _)| dropped_file_identity(&cwd.join(path)))
+        .collect();
     let mut observed = Vec::new();
-    let report = match restore_tree_to_worktree_observed(
-        &store,
-        &tree_hash,
-        base_tree,
-        &cwd,
-        &sparse_opts,
-        &crate::restore_fanout::read_chunks_fanout,
-        (cwd == layout.worktree_root()).then_some(&mut observed),
-    ) {
-        Ok(r) => r,
-        Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
+    let progress = crate::progress::start(
+        "restore",
+        None,
+        crate::progress::should_report(false),
+        false,
+    );
+    let restored = if crate::progress::should_report(false) {
+        kit_core::ops::restore::restore_tree_to_worktree_progress(
+            &store,
+            &tree_hash,
+            base_tree,
+            &cwd,
+            &sparse_opts,
+            &crate::restore_fanout::read_chunks_fanout,
+            (cwd == layout.worktree_root()).then_some(&mut observed),
+            &mut |done, total| {
+                kit_sync::Observer::event(
+                    progress.terminal().as_ref(),
+                    &kit_sync::SyncEvent::RestoreProgress { done, total },
+                );
+            },
+        )
+    } else {
+        kit_core::ops::restore::restore_tree_to_worktree_observed(
+            &store,
+            &tree_hash,
+            base_tree,
+            &cwd,
+            &sparse_opts,
+            &crate::restore_fanout::read_chunks_fanout,
+            (cwd == layout.worktree_root()).then_some(&mut observed),
+        )
     };
-    if let Err(code) = remove_dropped(&cwd, &dropped) {
+    drop(progress);
+    let report = match restored {
+        Ok(report) => report,
+        Err(e) => return restore_failure(&e),
+    };
+    if let Err(code) = remove_dropped(&cwd, &dropped, &dropped_before) {
         return code;
     }
-    if let Err(e) = super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed) {
-        return emit_err(&e, exit::CANTCREAT);
+    let published = crate::signal::defer(|| {
+        if let Some((new, start, cond, _)) = &create_plan {
+            match super::write_ref_recording_history(&layout, new, *cond, start) {
+                Ok(()) => {}
+                Err(refs::RefError::Conflict(_)) => {
+                    return Err(format!("branch '{new}' already exists"));
+                }
+                Err(e) => return Err(format!("create branch {new}: {e}")),
+            }
+        }
+        let new_head = if is_branch {
+            refs::Head::Branch(name.to_owned())
+        } else {
+            refs::Head::Detached(commit_hash)
+        };
+        if is_branch {
+            refs::write_head_branch(&layout, name)
+        } else {
+            refs::write_head_detached(&layout, &commit_hash)
+        }
+        .map_err(|e| format!("update HEAD: {e}"))?;
+        super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)?;
+        if old_head != new_head {
+            refs::write_previous_head(&layout, &old_head)
+                .map_err(|e| format!("save previous HEAD: {e}"))?;
+        }
+        Ok(())
+    });
+    if let Err(e) = published {
+        return output_failure(&e);
     }
 
     // git-shaped switch confirmation (drop kit's non-git restored-count
@@ -409,11 +545,12 @@ fn dropped_paths_guarded(
     layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
+    base_tree: Option<Hash>,
     opts: &RestoreOptions,
     force: bool,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, u8> {
     let dropped: Vec<(String, EntryStatus, Hash)> =
-        match super::dropped_tracked_paths(layout, store, tree_hash) {
+        match super::dropped_tracked_paths(layout, store, tree_hash, base_tree) {
             Ok(all) => all
                 .into_iter()
                 .filter(|(path, _, _)| super::restore_affects_path(opts, path))
@@ -427,7 +564,8 @@ fn dropped_paths_guarded(
     match super::locally_modified_dropped_path(layout.worktree_root(), store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(
-                "restore would overwrite local changes; commit, stash, or reset '{path}' first"
+                "restore would overwrite local changes; commit, stash, or reset '{}' first",
+                super::display_path(&path)
             ),
             exit::GENERAL_ERROR,
         )),
@@ -436,18 +574,42 @@ fn dropped_paths_guarded(
     }
 }
 
-/// Delete the dropped tracked paths from the worktree and prune any
-/// parent directories that became empty.
+type DroppedFileIdentity = std::io::Result<Option<(u64, u64)>>;
+
+#[cfg(unix)]
+fn dropped_file_identity(path: &std::path::Path) -> DroppedFileIdentity {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::MetadataExt as _;
+
+    match path.symlink_metadata() {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+fn dropped_file_identity(_: &std::path::Path) -> DroppedFileIdentity {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+/// Delete the dropped tracked paths and prune parent directories that became
+/// empty. An insensitive lookup may reach a new inode after restore.
+/// Leave that replacement in place.
 fn remove_dropped(
     cwd: &std::path::Path,
     dropped: &[(String, EntryStatus, Hash)],
+    originals: &[DroppedFileIdentity],
 ) -> Result<(), u8> {
-    for (path, _, _) in dropped {
-        if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
-            return Err(emit_err(
-                &format!("restore: remove {path}: {e}"),
-                exit::CANTCREAT,
-            ));
+    for ((path, _, _), original) in dropped.iter().zip(originals) {
+        let file = cwd.join(path);
+        if let Ok(original) = original
+            && dropped_file_identity(&file).is_ok_and(|now| now.is_some() && now != *original)
+        {
+            continue;
+        }
+        if let Err(e) = super::remove_dropped_path(&file) {
+            return Err(output_failure(&format!("restore: remove {path}: {e}")));
         }
         prune_empty_parents(cwd, path);
     }
@@ -532,4 +694,83 @@ fn prepare_sparse_restore(
         clean: false,
         sparse_patterns: Some(parsed),
     })
+}
+
+fn restore_failure(error: &kit_core::ops::restore::RestoreError) -> u8 {
+    if crate::exit_map::is_full_disk(error) {
+        emit_err(
+            &format!("out of space: free disk space and retry: {error}"),
+            exit::IOERR,
+        )
+    } else {
+        output_failure(&format!("restore: {error}"))
+    }
+}
+
+// Some shared metadata writers return text. Match the standard library's
+// full-disk rendering at this boundary, including its platform OS code.
+fn output_code(message: &str) -> u8 {
+    if crate::exit_map::full_disk_text(message) {
+        exit::IOERR
+    } else {
+        exit::CANTCREAT
+    }
+}
+
+fn output_failure(message: &str) -> u8 {
+    let code = output_code(message);
+    if code == exit::IOERR {
+        emit_err(
+            &format!("out of space: free disk space and retry: {message}"),
+            code,
+        )
+    } else {
+        emit_err(message, code)
+    }
+}
+
+#[cfg(test)]
+mod full_disk_tests {
+    #[test]
+    fn full_disk_during_metadata_writes_has_an_io_exit() {
+        let error = std::io::Error::from_raw_os_error(if cfg!(windows) { 112 } else { 28 });
+        assert_eq!(super::output_code(&format!("write index: {error}")), 74);
+        assert_eq!(super::output_code("branch 'exists' already exists"), 73);
+    }
+
+    #[test]
+    fn full_disk_during_restore_has_an_io_exit() {
+        let error = kit_core::ops::restore::RestoreError::File {
+            path: "readme".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+        assert_eq!(super::restore_failure(&error), 74);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod dropped_file_tests {
+    #[test]
+    fn dropped_file_identity_distinguishes_missing_and_denied_lookups() {
+        use std::fs;
+        use std::io::ErrorKind;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert_eq!(super::dropped_file_identity(&path).unwrap(), None);
+        fs::write(&path, b"file").unwrap();
+        let perms = dir.path().metadata().unwrap().permissions();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o600)).unwrap();
+        let lookup = path.symlink_metadata();
+        let identity = super::dropped_file_identity(&path);
+        fs::set_permissions(dir.path(), perms).unwrap();
+
+        // A privileged test process can still read the entry.
+        if let Err(error) = lookup {
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+            assert_eq!(identity.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        }
+    }
 }

@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use common::Repo;
+use common::{Repo, push_branch_with_limits};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -23,7 +23,7 @@ use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
 use libkit::transfer::{
     Error as TransferError, PushControl, RetryReason, StepAuthority, plan_push_steps,
-    push_all_with, push_branch_steps, push_branch_with_limits,
+    push_all_with, push_branch_steps,
 };
 
 #[derive(Clone, Copy)]
@@ -92,24 +92,49 @@ impl TicketTransport {
 }
 
 impl Transport for TicketTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.uploads.fetch_add(1, Ordering::SeqCst);
-        self.largest_upload.fetch_max(bytes.len(), Ordering::SeqCst);
-        self.upload_lengths.lock().unwrap().push(bytes.len());
+        let len = usize::try_from(bytes.len()).unwrap();
+        self.largest_upload.fetch_max(len, Ordering::SeqCst);
+        self.upload_lengths.lock().unwrap().push(len);
         self.upload_keys.lock().unwrap().push(*key);
-        self.inner.upload_pack(bytes, key)
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
     fn update_ref(
         &self,
@@ -118,6 +143,9 @@ impl Transport for TicketTransport {
         hash: &Hash,
     ) -> TransportResult<()> {
         self.inner.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
@@ -372,8 +400,11 @@ fn compressible_push_is_not_refused_by_an_uncompressed_estimate() {
 fn a_re_baseline_over_many_packs_uploads_only_its_own_pack() {
     let node_at = |tx: &TicketTransport| {
         let newest = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
-        kit_core::transfer::decode_packlist(&tx.download_blob(&PackKey::new(newest)).unwrap())
-            .unwrap()
+        kit_core::transfer::decode_packlist(
+            &tx.download_blob(&PackKey::new(newest), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap()
     };
     for threshold in [0, u64::MAX] {
         let repo = Repo::new();

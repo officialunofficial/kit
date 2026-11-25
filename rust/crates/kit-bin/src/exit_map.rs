@@ -15,12 +15,65 @@ use libkit::{
 
 use crate::exit;
 
+/// Find a full-disk I/O error through the typed operation wrappers.
+pub(crate) fn is_full_disk(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::StorageFull)
+        {
+            return true;
+        }
+        let io = if let Some(StoreError::Io(io)) = error.downcast_ref::<StoreError>() {
+            Some(io)
+        } else if let Some(WorktreeError::Io(io)) = error.downcast_ref::<WorktreeError>() {
+            Some(io)
+        } else if let Some(kit_core::index::IndexError::Io(io)) =
+            error.downcast_ref::<kit_core::index::IndexError>()
+        {
+            Some(io)
+        } else if let Some(kit_core::ops::restore::RestoreError::Io(io)) =
+            error.downcast_ref::<kit_core::ops::restore::RestoreError>()
+        {
+            Some(io)
+        } else {
+            None
+        };
+        if io.is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull) {
+            return true;
+        }
+        if let Some(WorktreeError::Store(inner)) = error.downcast_ref::<WorktreeError>() {
+            return is_full_disk(inner);
+        }
+        if let Some(kit_core::ops::restore::RestoreError::Store(inner)) =
+            error.downcast_ref::<kit_core::ops::restore::RestoreError>()
+        {
+            return is_full_disk(inner);
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
+// Metadata helpers and tracked-file refresh return text. Compare the platform
+// I/O rendering at those boundaries.
+pub(crate) fn full_disk_text(message: &str) -> bool {
+    let errno = if cfg!(windows) { 112 } else { 28 };
+    message.contains(&std::io::Error::from_raw_os_error(errno).to_string())
+        || message.contains(&std::io::Error::from(std::io::ErrorKind::StorageFull).to_string())
+}
+
 /// The exit code for `error`.
 ///
 /// An error variant that this table does not list yet fails closed with
 /// [`exit::GENERAL_ERROR`].
 #[must_use]
 pub fn exit_code(error: &libkit::Error) -> u8 {
+    if is_full_disk(error) || full_disk_text(&error.to_string()) {
+        return exit::IOERR;
+    }
     match error {
         libkit::Error::Repo(inner) => repo_exit_code(inner),
         libkit::Error::Revspec(inner) => revspec_exit_code(inner),
@@ -104,8 +157,10 @@ fn rebase_exit_code(error: &rebase::Error) -> u8 {
     match error {
         // The key has its own code.
         rebase::Error::Signing(inner) => signing_exit_code(inner),
-        // The todo list contradicts the rules of the command.
+        // The todo list contradicts the rules of the command, or a step
+        // needs the default editor and there is no terminal for it.
         rebase::Error::Todo(_) => exit::USAGE,
+        rebase::Error::Editor(e) if crate::editor::is_no_terminal(e) => exit::USAGE,
         // An object of the wrong kind, a commit that cannot be encoded, or
         // a `HEAD` that the rebase lost.
         rebase::Error::NotACommit
@@ -448,7 +503,10 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::AmendDuringMerge
         | commit::Error::NothingToAmend
         | commit::Error::NothingStaged
-        | commit::Error::MergeDiscarded => exit::USAGE,
+        | commit::Error::MergeDiscarded
+        | commit::Error::PullUnfinished(_)
+        | commit::Error::MergeStateIncomplete
+        | commit::Error::OperationStateIncomplete(_) => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged
@@ -458,6 +516,7 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::ReadHead(_)
         | commit::Error::AmendNotACommit(_)
         | commit::Error::ReadAmendTarget { .. }
+        | commit::Error::ReadPullState(_)
         | commit::Error::Serialize(_) => exit::DATAERR,
         // The commit, its log or the index cannot be written.
         commit::Error::Store(_) | commit::Error::Recovery(_) | commit::Error::SyncIndex(_) => {
@@ -601,7 +660,9 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
         | remote::Error::InvalidName(_)
         | remote::Error::RenameDefault => exit::PROTOCOL_ERROR,
         // The config cannot take the remote.
-        remote::Error::AlreadyExists(_) | remote::Error::Write(_) => exit::CANTCREAT,
+        remote::Error::AlreadyExists(_)
+        | remote::Error::OverlappingName { .. }
+        | remote::Error::Write(_) => exit::CANTCREAT,
         remote::Error::NoDefault | remote::Error::NotFound(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
@@ -611,8 +672,10 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
 fn push_exit_code(error: &push::Error) -> u8 {
     match error {
         // The two force switches contradict each other.
-        push::Error::ConflictingForce | push::Error::Refspec(_) => exit::USAGE,
-        push::Error::NoSuchBranch(_) => exit::DATAERR,
+        push::Error::ConflictingForce | push::Error::Refspec(_) | push::Error::AmbiguousName(_) => {
+            exit::USAGE
+        }
+        push::Error::NoSuchBranch(_) | push::Error::NoSuchTag(_) => exit::DATAERR,
         // The branch, the upstream or the remote is missing from the config.
         push::Error::DetachedHead
         | push::Error::ReadHead(_)
@@ -653,6 +716,9 @@ fn repo_exit_code(error: &repo::Error) -> u8 {
 /// The text that follows `error: ` on stderr for `error`.
 #[must_use]
 pub fn message(error: &libkit::Error) -> String {
+    if is_full_disk(error) || full_disk_text(&error.to_string()) {
+        return format!("out of space: free disk space and retry: {error}");
+    }
     match error {
         libkit::Error::Repo(repo::Error::Discover(inner)) => {
             format!("worktree discovery: {inner}")
@@ -895,6 +961,14 @@ mod tests {
                 remote::Error::AlreadyExists("x".to_owned()).into(),
                 exit::CANTCREAT,
             ),
+            (
+                remote::Error::OverlappingName {
+                    name: "x/y".to_owned(),
+                    other: "x".to_owned(),
+                }
+                .into(),
+                exit::CANTCREAT,
+            ),
             (remote::Error::NoDefault.into(), exit::GENERAL_ERROR),
             (
                 remote::Error::NotFound("x".to_owned()).into(),
@@ -968,6 +1042,10 @@ mod tests {
             (commit::Error::AmendDuringMerge.into(), exit::USAGE),
             (commit::Error::NothingToAmend.into(), exit::USAGE),
             (commit::Error::NothingStaged.into(), exit::USAGE),
+            (
+                commit::Error::OperationStateIncomplete("revert").into(),
+                exit::USAGE,
+            ),
             (commit::Error::MergeChanged.into(), exit::TEMPFAIL),
             (commit::Error::HeadMoved.into(), exit::TEMPFAIL),
             (
@@ -1093,6 +1171,17 @@ mod tests {
             (keys::Error::SecretHexLength.into(), exit::DATAERR),
             (keys::Error::SecretHexDigit.into(), exit::DATAERR),
         ]
+    }
+
+    #[test]
+    fn full_disk_has_an_io_exit_and_an_actionable_message() {
+        let error = libkit::Error::from(libkit::add::Error::StoreFile(
+            kit_core::worktree::WorktreeError::Io(std::io::Error::from(
+                std::io::ErrorKind::StorageFull,
+            )),
+        ));
+        assert_eq!(super::exit_code(&error), 74);
+        assert!(super::message(&error).contains("out of space"));
     }
 
     #[cfg(feature = "git-bridge")]

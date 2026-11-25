@@ -6,13 +6,23 @@
 #   cp kit.bash /etc/bash_completion.d/              (most Linux)
 # or `source kit.bash` from your ~/.bashrc.
 #
-# Scope: subcommand completion + top-level flags. Completing sub-options
-# (branch names, remote URLs, etc.) is deferred so this file stays small
-# and easy to verify by eye.
+# Argument names come from the private, local-only kit __complete helper.
 
 _kit_complete() {
     local cur prev words cword
     _init_completion || return 0
+
+    if [[ $cword -gt 1 && $cur != -* ]]; then
+        local names
+        names=$(kit __complete "${words[@]:1:$((cword - 1))}" 2>/dev/null)
+        if [[ -n $names ]]; then
+            if [[ $cword -eq 2 && ( ${words[1]} == switch || ${words[1]} == checkout ) ]]; then
+                names+=$'\n-\n@{-1}'
+            fi
+            COMPREPLY=( $(compgen -W "$names" -- "$cur") )
+            return 0
+        fi
+    fi
 
     local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
@@ -99,16 +109,16 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
             ;;
         pull)
-            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         fetch)
-            COMPREPLY=( $(compgen -W "--all -p --prune --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all -p --prune --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         push)
-            COMPREPLY=( $(compgen -W "--all -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all --tags --delete -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
             ;;
         clone)
-            COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--sparse --tags --no-tags --help" -- "$cur") )
             ;;
         branch)
             COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -u --set-upstream-to --unset-upstream -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
@@ -168,7 +178,7 @@ _kit_complete() {
             fi
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show -u --include-untracked -m --message" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
@@ -187,7 +197,7 @@ _kit_complete() {
             ;;
         closure)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "export verify" -- "$cur") )
+                COMPREPLY=( $(compgen -W "export verify repair-indexes" -- "$cur") )
             else
                 case "${words[2]}" in
                     export)
@@ -196,8 +206,11 @@ _kit_complete() {
                     verify)
                         COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )
                         ;;
+                    repair-indexes)
+                        COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+                        ;;
                     *)
-                        COMPREPLY=( $(compgen -W "export verify --help" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "export verify repair-indexes --help" -- "$cur") )
                         ;;
                 esac
             fi
@@ -221,10 +234,10 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
             ;;
         switch)
-            COMPREPLY=( $(compgen -W "-c -C --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-c -C - @{-1} --help" -- "$cur") )
             ;;
         checkout)
-            COMPREPLY=( $(compgen -W "-b -B -f --force --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-b -B -f --force - @{-1} --help" -- "$cur") )
             ;;
         merge-base)
             COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )

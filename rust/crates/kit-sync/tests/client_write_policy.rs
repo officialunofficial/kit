@@ -538,13 +538,21 @@ fn ticketed_upload_402_never_runs_admission_helper_on_either_backend() {
             .with_request_policy(host.as_ref());
             ClientSource::new(&client, &http)
                 .with_write_recovery(host.as_ref())
-                .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(&bytes),
+                    &key,
+                    "refs/heads/main",
+                )
                 .unwrap_err()
         } else {
             let tx = transport(&server.origin, "default", WRITER_SEED)
                 .with_admission(AdmissionPolicy::new(host.clone()));
             TransportSource::new(&tx)
-                .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(&bytes),
+                    &key,
+                    "refs/heads/main",
+                )
                 .unwrap_err()
         };
         assert!(matches!(error, SourceError::AdmissionRequired { .. }));
@@ -636,4 +644,34 @@ fn unsigned_admission_recovery_matches_both_backends_without_synthetic_signer() 
         bodies.push(requests[0].body.clone());
     }
     assert_eq!(bodies[0], bodies[1]);
+}
+
+/// A hosted remote admits full manifests only, so no Connect source says it
+/// takes a manifest delta, and a push to one plans every manifest in full.
+#[test]
+fn no_connect_source_takes_a_manifest_delta() {
+    for backend in 0..3 {
+        let server = FaultServer::new(0, |_, _| unreachable!("the check sends no request"));
+        let check = |source: &dyn RemoteSource| assert!(!source.accepts_manifest_deltas());
+        if backend == 0 {
+            let http = NativeHttp::new().unwrap();
+            let signer = Dalek::new(WRITER_SEED);
+            let client = kit_client::Client::signed(
+                &http,
+                destination(&server.origin, "default"),
+                &signer,
+                &NativeClock,
+            );
+            check(&ClientSource::new(&client, &http));
+        } else {
+            let tx = transport(&server.origin, "default", WRITER_SEED);
+            assert!(!kit_core::protocol::Transport::accepts_manifest_deltas(&tx));
+            if backend == 1 {
+                check(&TransportSource::new(&tx));
+            } else {
+                tx.with_source(check).unwrap();
+            }
+        }
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
 }

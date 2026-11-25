@@ -450,3 +450,17 @@ fn a_rollover_node_of_the_most_packs_is_far_under_the_node_download_limit() {
     );
     assert_eq!(node.bytes.len(), 8 + 32 * ROLLOVER_MAX_PACKS);
 }
+
+/// A graft creates the ref and links its node to another chain's head node.
+#[test]
+fn a_graft_creates_the_ref_on_another_chains_node() {
+    let tail = kit_core::hash::hash(b"a branch's packmap node");
+    let keys = [kit_core::hash::hash(b"tag pack")];
+    let node = plan_advance(ChainState::Graft { tail }, &keys, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(node.condition, RefWriteCondition::Missing);
+    let decoded = kit_core::transfer::decode_packlist(&node.bytes).unwrap();
+    assert_eq!(decoded.prev, Some(tail));
+    assert_eq!(decoded.packs, keys);
+}

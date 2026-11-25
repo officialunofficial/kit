@@ -543,6 +543,34 @@ fn closure_local_hides_unreferenced_unless_flag() {
 }
 
 #[test]
+fn closure_local_checks_the_trailer_of_an_unreferenced_pack() {
+    let repo = fixture_repo();
+    let layout = RepoLayout::single(repo.path());
+    let pack = include_bytes!("../../../tests/golden/local_pack_mixed/mixed.pack");
+    let index = include_bytes!("../../../tests/golden/local_pack_mixed/mixed.idx");
+    let marker = include_bytes!("../../../tests/golden/local_pack_mixed/marker.bin");
+    let key = kit_core::to_hex(&kit_core::pack_key(pack));
+    let directory = layout.objects_dir().join("pack");
+    fs::create_dir(&directory).unwrap();
+    fs::write(layout.format_file(), marker).unwrap();
+    let pack_path = directory.join(format!("{key}.pack"));
+    fs::write(&pack_path, pack).unwrap();
+    fs::write(directory.join(format!("{key}.idx")), index).unwrap();
+
+    let args = ["closure", "verify", "HEAD", "--show-unreferenced"];
+    assert!(stdout(&repo.ok(&args)).contains("ok: closure complete"));
+
+    let mut corrupt = pack.to_vec();
+    *corrupt.last_mut().unwrap() ^= 1;
+    fs::write(&pack_path, corrupt).unwrap();
+    repo.ok(&args[..3]);
+
+    let out = repo.run(&args);
+    assert_eq!(out.status.code(), Some(65), "stderr={}", stderr(&out));
+    assert!(stderr(&out).contains("trailer"), "stderr={}", stderr(&out));
+}
+
+#[test]
 fn closure_json_keys() {
     let repo = fixture_repo();
     let commit = head(&repo);

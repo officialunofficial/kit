@@ -22,10 +22,10 @@
 // `deny(unsafe_code)` rather than `forbid` so a small, justified set of
 // `#[allow(unsafe_code)]` callsites can call into libc. There are two
 // today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
-// and `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
-// on macOS/iOS. Every other module remains under the same prohibition; a
-// code-review gate (CONTRIBUTING) requires SAFETY notes on any new
-// `unsafe` block.
+// and `batch::soft_open_file_limit` uses
+// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Unix. Every other module
+// remains under the same prohibition; a code-review gate (CONTRIBUTING)
+// requires SAFETY notes on any new `unsafe` block.
 #![deny(unsafe_code)]
 // `ed25519-dalek` v2.2 still pulls in older sha2/cpufeatures (and
 // rand_core 0.6 which transitively wants getrandom 0.2). These are
@@ -70,8 +70,9 @@ pub mod write_auth;
 pub mod layout;
 
 // Refs, index, worktree, ignore, and repo_lock.
-pub(crate) mod atomic;
 pub mod bounded_read;
+#[doc(hidden)]
+pub mod durable;
 pub mod ignore;
 pub mod index;
 pub mod ref_listing;
@@ -84,6 +85,9 @@ pub mod worktree;
 
 // Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
+
+#[cfg(feature = "fault-injection")]
+pub mod fault;
 
 // Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the
@@ -126,7 +130,8 @@ pub use sign::{
     verify_object_signature, verify_remix, verify_tag,
 };
 pub use store::{
-    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, OBJECTS_DIR, ObjectStore, StoreError, StoreResult,
+    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MAX_TREE_LEAVES, OBJECTS_DIR, ObjectStore,
+    StoreError, StoreResult, check_tree_leaves,
 };
 
 /// The name of the implicit flat remote, spelled `remote_endpoint` /
@@ -170,9 +175,10 @@ pub use layout::RepoLayout;
 pub use refs::{
     ATTESTATIONS_REF, BRANCH_REF_PREFIX, HEAD_FILE, HEADS_DIR, Head, MAX_BRANCH_NAME_BYTES,
     MAX_REF_NAME_BYTES, MAX_TAG_NAME_BYTES, PACKMAP_REF_PREFIX, REFS_DIR, Ref, RefError,
-    RefNameKind, RefResult, RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGS_DIR,
-    check_new_name, check_new_ref_name, check_pushable_branch, decode_ref_wire, encode_ref_wire,
-    validate_ref_name, validate_ref_name_grammar, validate_ref_prefix,
+    RefNameKind, RefResult, RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGMAP_REF_PREFIX,
+    TAGS_DIR, check_new_name, check_new_ref_name, check_pushable_branch, check_pushable_tag,
+    decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_name_grammar,
+    validate_ref_prefix,
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{
@@ -185,8 +191,8 @@ pub use worktree::{
 // directly.
 pub use protocol::{
     AdvanceOutcome, BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator,
-    CommitOutcome, PackKey, Transport, TransportError, TransportResult, UploadLimits, is_retryable,
-    pack_key_from_hex,
+    CommitOutcome, PackBody, PackKey, PackSink, SliceBody, Transport, TransportError,
+    TransportResult, UploadLimits, is_retryable, pack_key_from_hex,
 };
 
 // Ops re-exports (OPS1: diff/graph/merge/cherry_pick).
@@ -200,3 +206,6 @@ pub use ops::{
     diff_trees, find_merge_base, find_merge_base_strict, is_ancestor, is_ancestor_strict,
     merge_trees, reachable_objects, reachable_snapshot, status_diff,
 };
+
+#[cfg(test)]
+mod test_support;

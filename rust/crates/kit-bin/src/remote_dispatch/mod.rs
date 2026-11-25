@@ -24,6 +24,7 @@ mod packmap;
 
 mod upload_receipts;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -358,6 +359,8 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, Error> {
 struct PushObserver<'a> {
     terminal: &'a Terminal,
     warning: Option<String>,
+    attestations: std::sync::atomic::AtomicUsize,
+    published_tags: Option<&'a RefCell<Vec<kit_sync::push::TagPushResult>>>,
 }
 
 impl Observer<SyncEvent> for PushObserver<'_> {
@@ -366,6 +369,21 @@ impl Observer<SyncEvent> for PushObserver<'_> {
             && let Some(warning) = &self.warning
         {
             eprintln!("{warning}");
+        }
+        if let SyncEvent::AttestationWarning { message } = event {
+            eprintln!("warning: {message}");
+        }
+        if let SyncEvent::AttestationsPushed { count } = event {
+            self.attestations
+                .store(*count, std::sync::atomic::Ordering::Relaxed);
+            if *count > 0 {
+                eprintln!("Published {count} attestations");
+            }
+        }
+        if let SyncEvent::TagPublished(tag) = event
+            && let Some(published) = self.published_tags
+        {
+            published.borrow_mut().push(tag.clone());
         }
         self.terminal.event(event);
     }
@@ -389,10 +407,13 @@ pub(crate) fn push_all_with_source(
     remote: Option<&str>,
     force: bool,
     authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
     terminal: &Terminal,
 ) -> Result<transfer::Pushed, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
     transfer::push_all_with_source(
         cwd,
         source,
@@ -401,6 +422,40 @@ pub(crate) fn push_all_with_source(
         &settings,
         &observer,
     )
+}
+
+/// Push local tags to the remote; see [`transfer::push_tags_with_source`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_tags_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    selection: kit_sync::push::TagSelection,
+    force: bool,
+    authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
+    terminal: &Terminal,
+    published: &RefCell<Vec<kit_sync::push::TagPushResult>>,
+) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (mut settings, mut observer) = push_inputs(&layout, authority, terminal);
+    observer.published_tags = Some(published);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
+    transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
+}
+
+/// Delete one remote branch or tag; see [`transfer::push_delete_with_source`].
+pub(crate) fn push_delete_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    target: kit_sync::push::DeleteTarget,
+    terminal: &Terminal,
+) -> Result<kit_sync::push::DeletedRef, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (settings, observer) = push_inputs(&layout, None, terminal);
+    transfer::push_delete_with_source(cwd, source, remote, target, &settings, &observer)
 }
 
 /// Push one branch to the remote; see [`transfer::push_branch_tracked_with_source`].
@@ -413,11 +468,14 @@ pub(crate) fn push_branch_tracked_source(
     remote_branch: &str,
     lease: PushLease,
     authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
     terminal: &Terminal,
-) -> Result<(Hash, usize), Error> {
+) -> Result<(Hash, usize, usize), Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (settings, observer) = push_inputs(&layout, authority, terminal);
-    transfer::push_branch_tracked_with_source(
+    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
+    let result = transfer::push_branch_tracked_with_source(
         cwd,
         source,
         remote,
@@ -426,7 +484,16 @@ pub(crate) fn push_branch_tracked_source(
         lease,
         &settings,
         &observer,
-    )
+    );
+    result.map(|(tip, steps)| {
+        (
+            tip,
+            steps,
+            observer
+                .attestations
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    })
 }
 
 /// The settings of a push from the config and the environment, and the observer
@@ -442,48 +509,69 @@ fn push_inputs<'a>(
             sync_policy: sync_policy(layout),
             rebaseline_threshold,
             authority,
+            ..transfer::PushSettings::default()
         },
-        PushObserver { terminal, warning },
+        PushObserver {
+            terminal,
+            warning,
+            attestations: std::sync::atomic::AtomicUsize::new(0),
+            published_tags: None,
+        },
     )
 }
 
 /// Fetch the remote and fast-forward the current branch; see
-/// [`transfer::pull_with_source`].
+/// [`transfer::pull_with_options`]. `tags` takes the remote's tags too.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pull_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     target_branch: Option<&str>,
+    checkout: bool,
     require_signed: bool,
+    tags: bool,
+    cfg: &crate::config::Config,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
-    let options = kit_sync::SyncOptions::default()
+    let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
+        .with_checkout(checkout)
         .with_verify_signatures(require_signed)
-        .with_sync_policy(sync_policy(&layout));
+        .with_tags(tags)
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
-/// Fetch the remote; see [`transfer::fetch_with_source`].
+/// Fetch the remote; see [`transfer::fetch_with_options`]. `tags` takes the
+/// remote's tags too, and the report names each tag published or refused.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     require_signed: bool,
     prune: bool,
+    tags: bool,
+    cfg: &crate::config::Config,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
-) -> Result<usize, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
-    transfer::fetch_with_source(
-        cwd,
-        source,
-        remote,
-        require_signed,
-        prune,
-        sync_policy(&layout),
-        terminal,
-    )
+) -> Result<kit_sync::FetchReport, Error> {
+    let mut options = kit_sync::SyncOptions::default()
+        .with_verify_signatures(require_signed)
+        .with_prune(prune)
+        .with_tags(tags)
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    attestations.2.clone_into(&mut options.remote_url);
+    Ok(kit_sync::fetch(cwd, source, remote, &options, terminal)?)
 }
 
 #[cfg(test)]

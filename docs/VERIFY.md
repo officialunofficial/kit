@@ -406,15 +406,15 @@ assert!(disclosed.signature_valid);
 
 kit's Binary Merkle Tree proofs (`kit_core::merkle::Proof`) are,
 deliberately, **byte-identical** to `commonware_storage::bmt::Proof` at the
-release train kit pins (`2026.10.0`, `rust/Cargo.toml`): same wire framing
+release train kit pins (`2026.11.0`, `rust/Cargo.toml`): same wire framing
 (`be32(leaf_count) || varint(n) || n * 32-byte digest`), same sibling
 selection algorithm, for single, range, and multi-leaf proofs alike. A verifier already built against the upstream
 `commonware-storage` crate can decode a kit
 proof directly with the upstream type and run upstream's own
 `verify_*_inclusion` **unchanged** &mdash; no kit-specific decoder, and no
 kit dependency, needed for the proof-checking step itself. One thing sits
-outside that byte-identity, though: `Proof::verify_element_inclusion(leaf,
-position, root)` checks against an already-known *bare* inner root, not a
+outside that byte-identity, though: `Proof::verify_element_inclusion(position,
+leaf, root)` checks against an already-known *bare* inner root, not a
 kit id (it doesn't recover or return the folded value, only accept/reject
 against a `root` the caller supplies), and a kit repository never
 publishes a bare inner root anywhere &mdash; only the domain-wrapped id. A
@@ -466,8 +466,8 @@ assert_eq!(
 let mut r = Copying(proof_bytes);
 let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
 proof.verify_element_inclusion::<Blake3>(
-    &Digest(leaf),
     position,
+    &Digest(leaf),
     &Digest(prover_inner_root),
 )?;
 ```
@@ -493,8 +493,8 @@ let proof_bytes = step.proof.encode();
 let mut r = Copying(&proof_bytes[..]);
 let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
 proof.verify_element_inclusion::<Blake3>(
-    &Digest(leaf),
     step.position,
+    &Digest(leaf),
     &Digest(step.inner_root),
 )?;
 ```

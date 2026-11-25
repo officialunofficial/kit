@@ -14,10 +14,7 @@ fn probe_chain(
     head: Hash,
 ) -> Result<(usize, Vec<Hash>), PushError> {
     let source = TransportSource::new(tx);
-    let context = PushContext {
-        source: &source,
-        observer: &NoopObserver,
-    };
+    let context = PushContext::unspooled(&source, &NoopObserver);
     packmap::probe_chain(&context, branch, head)
 }
 
@@ -40,10 +37,7 @@ fn advance_packmap(
     tip: Hash,
 ) -> Result<(), PushError> {
     let source = TransportSource::new(tx);
-    let context = PushContext {
-        source: &source,
-        observer: &NoopObserver,
-    };
+    let context = PushContext::unspooled(&source, &NoopObserver);
     packmap::advance_packmap(
         &context,
         branch,
@@ -63,10 +57,7 @@ fn commit_head(
     branch: &str,
 ) -> Result<(), PushError> {
     let source = TransportSource::new(tx);
-    let context = PushContext {
-        source: &source,
-        observer: &NoopObserver,
-    };
+    let context = PushContext::unspooled(&source, &NoopObserver);
     packmap::commit_head(&context, name, condition, tip, branch)
 }
 
@@ -82,7 +73,8 @@ fn h(seed: &str) -> Hash {
 fn put_node(tx: &MemoryTransport, prev: Option<Hash>, packs: &[Hash]) -> Hash {
     let bytes = transfer::encode_packlist(prev, packs).unwrap();
     let key = hash::hash(&bytes);
-    tx.upload_blob(&bytes, &PackKey::from_hash(key)).unwrap();
+    tx.upload_blob(&bytes, &PackKey::from_hash(key), None)
+        .unwrap();
     key
 }
 
@@ -114,8 +106,10 @@ fn probe_chain_errors_on_a_cycle() {
     // nodes, exercising the shared cycle guard in `walk_pack_chain`.
     let a_bytes = transfer::encode_packlist(Some(b), &[h("pack-a")]).unwrap();
     let b_bytes = transfer::encode_packlist(Some(a), &[h("pack-b")]).unwrap();
-    tx.upload_blob(&a_bytes, &PackKey::from_hash(a)).unwrap();
-    tx.upload_blob(&b_bytes, &PackKey::from_hash(b)).unwrap();
+    tx.upload_blob(&a_bytes, &PackKey::from_hash(a), None)
+        .unwrap();
+    tx.upload_blob(&b_bytes, &PackKey::from_hash(b), None)
+        .unwrap();
 
     assert!(matches!(
         probe_chain(&tx, "main", a).unwrap_err(),
@@ -136,7 +130,9 @@ fn probe_chain_errors_on_an_undownloadable_node() {
 // ---- advance_packmap — multi-key -------------------
 
 fn decode_node_at(tx: &MemoryTransport, key: Hash) -> transfer::PackListNode {
-    let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+    let bytes = tx
+        .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+        .unwrap();
     transfer::decode_packlist(&bytes).unwrap()
 }
 
@@ -196,7 +192,7 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
     // A retried push (e.g. a lost head-CAS race after the packmap
     // already landed) must not append a redundant node when the
     // prior chain already carries every key this attempt would add
-    // — only the head still needs to move.
+    // and the branch exists.
     let tx = MemoryTransport::new();
     let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
     let prior_head = put_node(&tx, None, &[k1, k2, k3]);
@@ -206,6 +202,9 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
         &prior_head,
     )
     .unwrap();
+    let before = h("before");
+    tx.update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &before)
+        .unwrap();
     let tip = h("tip");
 
     advance_packmap(
@@ -214,7 +213,7 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
         &[k1, k2, k3],
         true,
         0,
-        refs::RefWriteCondition::Missing,
+        refs::RefWriteCondition::Match(before),
         tip,
     )
     .unwrap();
@@ -332,20 +331,44 @@ impl LostResponseTransport {
 }
 
 impl Transport for LostResponseTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> Result<(), TransportError> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> Result<Vec<u8>, TransportError> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> Result<bool, TransportError> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> Result<(), TransportError> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
-    fn download_blob(&self, key: &PackKey) -> Result<Vec<u8>, TransportError> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
     fn update_ref(
         &self,
@@ -358,6 +381,9 @@ impl Transport for LostResponseTransport {
             let _ = self.inner.update_ref(name, condition, hash);
         }
         self.inner.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> Result<(), TransportError> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
         self.inner.read_ref(name)
@@ -490,7 +516,9 @@ fn packmap_driver_capture_matrix() {
         assert_eq!(moves.len(), if conflict { 2 } else { 1 });
         for (attempt, (head_condition, head, condition, key)) in moves.iter().enumerate() {
             let current = if attempt == 0 { prior } else { retry };
-            let bytes = tx.download_blob(&PackKey::from_hash(*key)).unwrap();
+            let bytes = tx
+                .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+                .unwrap();
             let expected = if rollover {
                 // The chain's packs, oldest first, then each new pack it lacks.
                 let mut listed = held.clone().unwrap();
@@ -713,11 +741,18 @@ fn advance_packmap_genuine_head_conflict_stays_non_fast_forward() {
 #[test]
 fn commit_head_reissued_write_is_success() {
     let tx = LostResponseTransport::new(Reissue::HeadUpdate);
+    let map = put_node(&tx.inner, None, &[h("pack")]);
+    tx.update_ref(&packmap_ref("main"), refs::RefWriteCondition::Missing, &map)
+        .unwrap();
+    let old = h("old");
+    tx.inner
+        .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &old)
+        .unwrap();
     let tip = h("tip");
     commit_head(
         &tx,
         "refs/heads/main",
-        refs::RefWriteCondition::Missing,
+        refs::RefWriteCondition::Match(old),
         &tip,
         "main",
     )

@@ -95,7 +95,10 @@ fn push_then_pull_roundtrips_refs_via_memory_transport() {
     assert!(pushed >= 1, "expected at least one ref pushed");
 
     // Pull remote -> bob.
-    let pulled = pull_all(bob.path(), tx.as_ref(), "default", None).expect("pull");
+    let pulled = pull_all(bob.path(), tx.as_ref(), "default", None)
+        .expect("pull")
+        .fetch
+        .branches_fetched;
     assert_eq!(pulled, pushed, "push/pull ref count mismatch");
 
     // Bob now has `refs/heads/main` pointing at alice's commit.

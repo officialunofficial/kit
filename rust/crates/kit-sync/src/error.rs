@@ -15,6 +15,7 @@ use kit_core::transfer::PackListError;
 /// Display text is part of the contract the `kit` command line relies on:
 /// it prints these messages verbatim.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SyncError {
     /// The caller's [`Observer::cancelled`](crate::Observer::cancelled)
     /// returned `true` at a checkpoint. The transfer is half-finished, but no
@@ -49,7 +50,7 @@ pub enum SyncError {
     #[error("store: {0}")]
     Store(#[from] StoreError),
     #[error("pack: {0}")]
-    Pack(#[from] PackError),
+    Pack(PackError),
     #[error("packlist: {0}")]
     PackList(#[from] PackListError),
     /// A pull needs HEAD to name a branch.
@@ -79,7 +80,7 @@ pub enum SyncError {
     #[error("remote advertised branch '{0}' but no pack map to reconstruct it")]
     PackmapMissing(String),
     /// The packmap names a pack the remote does not hold.
-    #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
+    #[error("remote advertised pack {pack} for '{branch}' but does not hold it")]
     AdvertisedPackMissing {
         branch: String,
         pack: String,
@@ -107,8 +108,67 @@ pub enum SyncError {
     /// signature verification. Never retried as local staleness.
     #[error("object {hash} failed signature verification: {reason}")]
     UnsignedOrInvalidObject { hash: String, reason: String },
+    /// The tip a remote branch names is a tree, a blob or another object that
+    /// is not a commit or a remix, so the branch cannot be a tracking ref.
+    /// Nothing was published for the branch, and the fetch stops there.
+    #[error("remote branch '{branch}' points at a {found}, not a commit")]
+    BranchTipNotCommit {
+        branch: String,
+        /// The type the tip has, such as `tree`.
+        found: &'static str,
+    },
     /// A remote name is not a legal ref name, so it cannot name a record
     /// under `.kit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+}
+
+/// A local disk error while a pack is spooled, read back or unpacked is
+/// [`SyncError::Io`]: [`PackError::Io`], and a store write's
+/// [`StoreError::Io`] (out of space, say). Every other pack error is about
+/// the pack. Damage in a local pack is the local store's fault, not the
+/// pack's: [`SyncError::Store`].
+impl From<PackError> for SyncError {
+    fn from(error: PackError) -> Self {
+        match error {
+            PackError::Io(error) | PackError::Store(StoreError::Io(error)) => Self::Io(error),
+            PackError::Store(error @ StoreError::LocalPackDamaged { .. }) => Self::Store(error),
+            error => Self::Pack(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_disk_error_in_a_pack_is_an_io_error() {
+        let full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
+        for error in [
+            PackError::Io(full()),
+            PackError::Store(StoreError::Io(full())),
+        ] {
+            let SyncError::Io(io) = SyncError::from(error) else {
+                panic!("not an I/O error");
+            };
+            assert_eq!(io.kind(), std::io::ErrorKind::StorageFull);
+        }
+        assert!(matches!(
+            SyncError::from(PackError::KeyMismatch),
+            SyncError::Pack(PackError::KeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn damage_in_a_local_pack_is_a_store_error_not_a_pack_fault() {
+        let damaged = StoreError::LocalPackDamaged {
+            pack: "a.pack".into(),
+            reason: "bad trailer".into(),
+        };
+        assert!(matches!(
+            SyncError::from(PackError::Store(damaged)),
+            SyncError::Store(StoreError::LocalPackDamaged { .. })
+        ));
+    }
 }

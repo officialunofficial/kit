@@ -78,7 +78,15 @@ drops the success line and never an error.
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
-.Pa .kitignore .
+.Pa .kitignore
+in each directory; deeper rules win. Patterns are relative to their file.
+Per-directory rules override
+.Pa .kit/info/exclude
+and the global
+.Pa $XDG_CONFIG_HOME/git/ignore
+(default
+.Pa ~/.config/git/ignore ) .
+An excluded directory cannot be re-included from below.
 Multiple pathspecs may be given;
 .Ql .
 stages every non-ignored file under the current directory.
@@ -871,12 +879,20 @@ a branch at
 .Ar start
 .Pq default HEAD
 and switch to it.
-.It Cm switch Ar branch
+.It Cm switch Ar branch | - | @{-1}
 Switch branches (git
 .Cm switch ) .
 A thin front-end over
 .Cm checkout
 with the same clobber guard and output.
+Use
+.Cm switch - , checkout - ,
+or
+.Cm switch @{-1}
+to return to the previous HEAD, detached if it was detached.
+Only one previous HEAD is stored, atomically, in the per-worktree
+.Pa PREVIOUS_HEAD
+file. Older selections are not supported.
 .It Cm switch Oo Fl c | Fl C Oc Ar new Op Ar start
 Create
 .Pq Fl c , or create-or-reset Fl C
@@ -975,7 +991,8 @@ Accepts
 and
 .Fl Fl abort
 after a conflict.
-.It Cm push Oo Fl Fl dry-run Oc Op Ar remote Op Ar src Ns : Ns Ar dst | Ar branch
+.It Cm push Oo Fl Fl dry-run Oc Oo Fl Fl tags Oc Op Ar remote Op Ar src Ns : Ns Ar dst | Ar branch | Ar tag
+.It Cm push Oo Fl Fl dry-run Oc Fl Fl delete Ar remote Ar branch | Ar tag
 Push HEAD's commit chain to the configured remote. With
 .Ar remote
 and
@@ -997,9 +1014,38 @@ an empty
 and refs outside
 .Pa refs/heads/
 are errors.
-.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Op Ar remote
-.It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Op Ar remote
+A lone
+.Ar tag
+pushes that tag, and
+.Fl Fl tags
+pushes every local tag, each with its tag map; a name that is both a
+branch and a tag is an error. A remote tag with another value is refused
+unless
+.Fl Fl force ,
+and an unsigned annotated tag is refused.
+.Fl Fl delete
+deletes one remote branch or tag with its packmap or tag map.
+A branch is deleted only while it holds its remote-tracking ref's value,
+and that ref goes too; a tag only while it holds the value just read.
+A name the remote holds as both a branch and a tag needs
+.Pa refs/heads/
+or
+.Pa refs/tags/ .
+An S3 remote refuses every delete.
+.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
+.It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 Download or download-and-merge from the remote.
+Both take every remote tag after the branches unless
+.Fl Fl no-tags
+is given;
+.Fl Fl tags
+says so explicitly, and the last of the two wins.
+A tag publishes only once its closure is local, its tag object carries its
+name and its history verifies.
+A refused tag prints
+.Ql ! [rejected]
+with its reason, never moves a local tag and never stops the branches; the
+command then exits 1.
 .Cm pull Fl Fl rebase
 replays the current branch onto the fetched branch, as
 .Cm rebase
@@ -1015,8 +1061,10 @@ or
 .Cm fetch Fl Fl prune
 then deletes the remote-tracking refs whose branch is gone from the remote;
 it deletes no local branch and no tag.
-.It Cm clone Op Fl Fl sparse ... Ar url
-Clone a remote into a new working directory.
+.It Cm clone Oo Fl Fl sparse ... Oc Oo Fl Fl tags | Fl Fl no-tags Oc Ar url
+Clone a remote into a new working directory, with its tags unless
+.Fl Fl no-tags
+is given.
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
 Show or configure remotes. With no subcommand, lists the configured
 remotes.
@@ -1098,7 +1146,15 @@ older than the grace window
 .Pq default 14 days .
 .Fl n
 .Pq Fl Fl dry-run
-previews without deleting.
+previews without deleting, and reports packed garbage.
+Local packs are handled too: gc retires packs that are wholly dead past the
+grace window, rewrites packs that hold a quarter or more garbage, merges small
+packs and retires duplicate packs, copying what must survive into new packs
+before it retires the old ones.
+A damaged pack or a failed copy is kept and
+reported as a warning on standard error, and so is a retirement that stopped
+because a fetch, push or add held the store lock; the exit code does not
+change.
 .Fl Fl grace-secs Ar 0
 prunes every unreachable object, but bypasses the grace window — that window is
 gc's concurrency-safety net (some root publishers such as
@@ -1153,6 +1209,19 @@ renames a tree to a path that does not exist and updates its links.
 fixes the links of a tree that was moved by hand. On-disk format:
 .Pa docs/specs/SPEC-WORKTREE.md .
 .It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
+.Cm stash push Fl u
+or
+.Fl Fl include-untracked
+includes non-ignored untracked files (also included by default).
+.Fl a
+and
+.Fl Fl all
+are not supported.
+.Cm stash push Op Fl Fl Ar path ...
+saves only matching files or directory prefixes relative to the current directory.
+Other worktree files and staged entries stay unchanged.
+Pop and apply refuse existing untracked destinations before writing files.
+
 Save or restore a snapshot of working-tree changes.
 .Cm pop
 applies an entry and removes it;
@@ -1168,11 +1237,11 @@ also restores the staged state recorded when the stash was created (like
 .Cm stash pop Fl Fl index ) ,
 not just the worktree changes.
 .Cm save
-records that staged snapshot as the stash commit's second parent, so it
-needs no on-disk format change; stashes created before this feature carry
-no index snapshot and
-.Fl Fl index
-is a no-op for them.
+records that staged snapshot as the stash commit's second parent.
+Its local wrapper also records scope: one byte, 0 for a full stash or 1
+for selected paths. Full stashes retain the whole-worktree dirty guard;
+selected stashes check only saved paths.
+Entries without this marker cannot be applied; there is no compatibility reader.
 .Cm clear
 removes every stash entry.
 .Cm pop , Cm apply , Cm drop ,
@@ -1393,6 +1462,12 @@ list is checked only when
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
 emits the closure report as JSON.
+.It Cm closure Cm repair-indexes
+Rebuild damaged local pack indexes beside verified packs.
+Run it from any
+worktree, even if no revision resolves.
+A pack that fails verification is kept; fetch again from the remote that
+supplied it.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple
@@ -1500,8 +1575,18 @@ pair, sets it. On the show forms,
 emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
+.Cm ssh.identity_file ,
 and
-.Cm ssh.identity_file .
+.Cm gc.auto .
+Setting
+.Cm gc.auto
+to
+.Cm false
+turns off the automatic local pack maintenance step that
+.Cm commit , fetch
+and
+.Cm pull
+run.
 .It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm kit+ssh://
@@ -1657,11 +1742,18 @@ nor
 .Fl F
 is supplied, tried in that order. If none is set it falls back to
 .Xr vi 1 ,
-matching git. In a headless or non-interactive context, pass
+matching git.
+.Cm kit tag -a
+and
+.Cm kit rebase -i
+use the same editor. An editor that is set always runs, terminal or not.
+When none is set and stdin is not a terminal, these commands start no
+.Xr vi 1
+and fail at once: pass
 .Fl m
 or
-.Fl F
-so the commit never blocks on an editor.
+.Fl F ,
+or set an editor.
 .It Ev NO_COLOR
 If set to any value (including empty),
 .Nm
@@ -1779,7 +1871,48 @@ exit cleanly without a "Broken pipe" message.
 .Dv SIGINT
 and
 .Dv SIGTERM
-set a flag that long-running operations honor at the next checkpoint.
+usually stop a local command at once.
+In
+.Cm push ,
+.Cm pull ,
+.Cm fetch ,
+.Cm clone ,
+.Cm log ,
+.Cm reflog ,
+.Cm grant ,
+.Cm epoch
+and
+.Cm visibility
+the first one sets a flag that the command honors at its next checkpoint.
+.Cm merge ,
+.Cm rebase ,
+.Cm cherry-pick ,
+.Cm revert ,
+.Cm stash ,
+.Cm bisect ,
+.Cm worktree ,
+.Cm remote
+and
+.Cm git pull
+let the first one pass, so a multi-step operation is not cut between two
+writes.
+In all of them a second one stops the command at once.
+While an editor runs,
+.Nm
+ignores
+.Dv SIGINT
+and
+.Dv SIGQUIT
+and waits for the editor to exit;
+.Dv SIGTERM
+still ends it.
+When
+.Cm checkout
+or
+.Cm switch
+starts restoring files for a branch or detached HEAD, the first signal
+lets it finish updating the worktree, HEAD, and index.
+A second signal stops it immediately.
 .Sh SEE ALSO
 .Xr git 1 ,
 .Xr ssh 1 ,
@@ -1811,3 +1944,20 @@ is authoritative for subcommand synopses.
 .El
 .Sh COPYRIGHT
 Licensed under MIT OR Apache-2.0.
+
+.Sh SHELL COMPLETION
+The shipped bash, zsh, and fish completions suggest local branch, remote,
+and tag names for commands that take them.
+Push suggests a remote, then a local branch.
+Fetch and pull suggest a remote; they accept no branch argument.
+Completion reads local metadata only and stays silent outside a repository.
+
+.Sh S3 CERTIFICATE TRUST
+Set
+.Ev KIT_SSL_CA_FILE
+to a PEM CA bundle to add trust roots for S3 metadata requests and pack uploads.
+Certificate-chain and hostname verification remain enabled.
+An unreadable, empty, or malformed bundle fails the connection.
+S3 does not read the Connect-only
+.Cm http.sslCAInfo
+configuration key.
