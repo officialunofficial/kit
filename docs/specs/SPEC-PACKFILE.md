@@ -906,8 +906,8 @@ plain number and not a ratio of the wire bytes, since a delta of a large
 manifest and a hostile delta both expand by more than any fixed ratio that an
 honest pack stays under. Each pack still obeys its own cap, and the bytes it
 decodes, a pack that fails included, come off what the fetch has left for the
-next pack. A retry of a chain starts from the budget its first try started
-from. A delta base read from the store counts as decoded bytes each time it is
+next pack. A retry of a chain decodes its packs again and is charged again, so
+a fetch that retries has about half the limit. A delta base read from the store counts as decoded bytes each time it is
 read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no

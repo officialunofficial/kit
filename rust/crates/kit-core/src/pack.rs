@@ -169,10 +169,10 @@ const MAX_FETCH_DECODED: u64 = 1 << 40;
 /// Each pack of the fetch obeys its own cap and also what is left here, and
 /// the bytes it decodes, a failed pack's included, come off what is left.
 ///
-/// It is `Copy` so that a retry of a chain can start from the budget the first
-/// try started from.
+/// A retry of a chain decodes its packs again and is charged again, so a fetch
+/// that retries has about half the limit.
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct FetchDecodeBudget {
     remaining: u64,
 }
@@ -191,7 +191,7 @@ impl FetchDecodeBudget {
     }
 
     /// The cap on what a pack of `pack_len` bytes may decode.
-    fn admit(self, pack_len: u64) -> u64 {
+    fn admit(&self, pack_len: u64) -> u64 {
         self.remaining.min(decoded_bytes_cap(
             usize::try_from(pack_len).unwrap_or(usize::MAX),
         ))
