@@ -474,6 +474,17 @@ pub enum DiscoverError {
     CommonDirUnreadable(PathBuf, std::io::Error),
     #[error("worktree common dir {0} is missing or not a directory")]
     CommonDirMissing(PathBuf),
+    #[error(
+        "worktree state dir {0} is not a registered worktree of the repository at {1}: a state \
+         dir must be `<repository>/.kit/worktrees/<id>`"
+    )]
+    NotRegistered(PathBuf, PathBuf),
+    #[error(
+        "worktree pointer {0} does not match its state dir: the back-pointer is missing or names \
+         another tree. If the tree was moved by hand, run `kit worktree repair <path>` from the \
+         main repository"
+    )]
+    BackpointerMismatch(PathBuf),
 }
 
 /// Validate a linked-worktree id (the `worktrees/<id>` directory name).
@@ -621,13 +632,55 @@ pub fn remove_lock(state_dir: &Path) -> std::io::Result<()> {
 ///   per-tree state dir must exist, and the common dir is resolved via
 ///   the state dir's `commondir` file (defaulting to `../..` when the
 ///   file is absent, matching what `worktree add` writes) and must
-///   exist. Every failure along that chain is a typed, fail-closed
-///   [`DiscoverError`] — a broken linked tree must never silently
-///   degrade into "operate on some other directory".
+///   exist. The state dir must then be a registry entry of that common
+///   dir (`<common>/worktrees/<id>`), and its back-pointer must name this
+///   tree's `.kit`, so a pointer file cannot send kit into a repository
+///   that did not register the tree. Every
+///   failure along that chain is a typed, fail-closed [`DiscoverError`]
+///   — a broken linked tree must never silently degrade into "operate on
+///   some other directory".
 ///
 /// # Errors
 /// See [`DiscoverError`].
 pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
+    let layout = discover_unverified(worktree_root)?;
+    if !layout.is_single() {
+        verify_registered(&layout, &worktree_root.join(KIT_DIR))?;
+    }
+    Ok(layout)
+}
+
+/// The registry check of [`discover`]: the state dir sits directly under
+/// `<common>/worktrees/` and its back-pointer names `dot_kit`.
+fn verify_registered(layout: &RepoLayout, dot_kit: &Path) -> Result<(), DiscoverError> {
+    let state = layout.worktree_state_dir();
+    let registry = layout.worktrees_dir().canonicalize().ok();
+    let registered = registry.is_some()
+        && state.parent() == registry.as_deref()
+        && state
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(validate_worktree_id);
+    if !registered {
+        return Err(DiscoverError::NotRegistered(
+            state.to_path_buf(),
+            layout.common_dir().to_path_buf(),
+        ));
+    }
+    match read_capped_line(&state.join(BACKPOINTER_FILE_NAME)) {
+        Ok(Some(back)) if paths_refer_to_same(Path::new(&back), dot_kit) => Ok(()),
+        _ => Err(DiscoverError::BackpointerMismatch(dot_kit.to_path_buf())),
+    }
+}
+
+/// [`discover`] without the registry check. It is for `worktree repair`,
+/// which has to read a linked tree whose back-pointer went stale when the
+/// tree was moved by hand. Nothing else may use it: it follows any pointer
+/// file to any state dir.
+///
+/// # Errors
+/// See [`DiscoverError`].
+pub fn discover_unverified(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
     let dot_kit = worktree_root.join(KIT_DIR);
     let Ok(meta) = std::fs::symlink_metadata(&dot_kit) else {
         return Ok(RepoLayout::single(worktree_root));
@@ -1107,6 +1160,7 @@ mod tests {
         std::fs::create_dir_all(main.join(".kit/objects")).unwrap();
         std::fs::create_dir_all(&state).unwrap();
         std::fs::create_dir_all(&tree).unwrap();
+        write_backpointer(&state, &tree).unwrap();
         write_pointer_file(&tree, &state).unwrap();
         (main, tree, state)
     }
@@ -1266,6 +1320,73 @@ mod tests {
             Err(DiscoverError::CommonDirMissing(_))
         ));
         let _ = main;
+    }
+
+    /// A pointer file can name any state dir and any commondir. Discovery
+    /// follows it only into a registry entry of the repository, and only when
+    /// that entry names this tree.
+    #[test]
+    fn discover_refuses_a_state_dir_outside_the_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main, _tree, _state) = scaffold_linked(tmp.path());
+        let outside = tmp.path().join("outside");
+        let outside_state = outside.join("state");
+        std::fs::create_dir_all(&outside_state).unwrap();
+        // The state dir is consistent in itself, down to a back-pointer, and
+        // its commondir is the repository above.
+        std::fs::write(
+            outside_state.join(COMMONDIR_FILE_NAME),
+            format!("{}\n", main.join(".kit").display()),
+        )
+        .unwrap();
+        write_backpointer(&outside_state, &outside).unwrap();
+        write_pointer_file(&outside, &outside_state).unwrap();
+        assert!(matches!(
+            discover(&outside),
+            Err(DiscoverError::NotRegistered(..))
+        ));
+        // Repair reads it without the registry check.
+        assert!(discover_unverified(&outside).is_ok());
+    }
+
+    #[test]
+    fn discover_refuses_the_state_dir_of_another_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        write_pointer_file(&other, &state).unwrap();
+        assert!(matches!(
+            discover(&other),
+            Err(DiscoverError::BackpointerMismatch(_))
+        ));
+        // The tree the entry belongs to still resolves.
+        assert!(discover(&tree).is_ok());
+    }
+
+    #[test]
+    fn discover_refuses_a_state_dir_without_a_backpointer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        std::fs::remove_file(state.join(BACKPOINTER_FILE_NAME)).unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::BackpointerMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn discover_refuses_a_tree_that_moved_without_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&tree, &moved).unwrap();
+        assert!(matches!(
+            discover(&moved),
+            Err(DiscoverError::BackpointerMismatch(_))
+        ));
+        write_backpointer(&state, &moved).unwrap();
+        assert!(discover(&moved).is_ok());
     }
 
     /// The pointer file has exactly one writer and one reader; pin the
