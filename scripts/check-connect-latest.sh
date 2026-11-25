@@ -41,7 +41,7 @@ for package in lock['package']:
         print(f"{package['name']} {package['version']}")
 VERSIONS
 
-crates=(-p kit-rpc -p kit-transport-connect -p kit-client)
+crates=(-p kit-rpc -p kit-rpc-codegen -p kit-transport-connect -p kit-client)
 features='kit-rpc/transport,kit-rpc/transport-messages'
 "${cargo_cmd[@]}" build --locked "${crates[@]}" --features "$features"
 "${cargo_cmd[@]}" nextest run --locked "${crates[@]}" --features "$features" -j 3
