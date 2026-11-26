@@ -624,3 +624,99 @@ fn unreachable_remote_dest_does_not_burn_the_state_name() {
     let mirror = mroot.path().join("retry-mirror");
     r.ok(&["git", "export", mirror.to_str().unwrap()]);
 }
+
+/// The attestation names the destination only in a redacted form. The
+/// staging mirror's own config is refused, so the credentialed destinations
+/// are rewritten to a local mirror in the user's git config, like a real one.
+#[test]
+fn exported_attestations_publish_only_a_redacted_mirror() {
+    if !git_available() {
+        return;
+    }
+    for (dest, expected) in [
+        (
+            "https://user:token@example.com/repo.git",
+            "https://example.com/repo",
+        ),
+        (
+            "https://us%65r:tok%65n@example.com/repo.git?key=secret#private",
+            "https://example.com/repo",
+        ),
+        (
+            "ssh://user@example.com:22/repo.git?key=secret#private",
+            "ssh://example.com/repo",
+        ),
+        ("user@example.com:repo.git", "ssh://example.com/repo"),
+        (
+            "s3://access:secret@bucket/repo.git?key=secret#private",
+            "s3://bucket/repo",
+        ),
+        ("file:///private/mirror.git", "local"),
+        ("FILE://localhost/private/mirror.git", "local"),
+        ("gcrypt::/private/mirror.git", "local"),
+        ("hg::/private/mirror.git", "local"),
+        ("https://user:p?ss@host/r", "local"),
+        ("https://u:ab/cd@host/r", "local"),
+        ("https://u:secret%40host/r", "local"),
+        ("deploy:s3c#x@host:r", "local"),
+        ("https://tok#en@host/r", "local"),
+        ("https://user:1234?x@host/r", "local"),
+        ("tok#en@host:r", "local"),
+        ("https://user:1234?x/y@host/r", "local"),
+        ("https://tok#x/y@host/r", "local"),
+        ("user:1234?x/y@host:r", "local"),
+        ("deploy:s3c#x/y@host:r", "local"),
+        (
+            "user@example.com:repo.git?key=secret#private",
+            "ssh://example.com/repo",
+        ),
+    ] {
+        let r = Repo::new();
+        r.commit_file("a.txt", b"one\n", "first");
+        let mroot = mirror_root();
+        let mirror = mroot.path().join("mirror");
+        std::fs::create_dir(&mirror).unwrap();
+        git_ok(&mirror, &["init", "--bare", "--quiet", "."]);
+        let config = mroot.path().join("gitconfig");
+        git_ok(
+            mroot.path(),
+            &[
+                "config",
+                "--file",
+                config.to_str().unwrap(),
+                &format!("url.{}.insteadOf", mirror.display()),
+                dest,
+            ],
+        );
+        r.ok_env(
+            &["git", "export", dest, "--remote-name", "mirror"],
+            &[
+                ("GIT_CONFIG_GLOBAL", config.to_str().unwrap()),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ],
+        );
+        let layout = kit_core::layout::RepoLayout::single(r.path());
+        let head = kit_core::refs::read_ref(&layout, "main").unwrap().unwrap();
+        let paths = libkit::attest::store::list(&layout, &head).unwrap();
+        assert_eq!(paths.len(), 1);
+        let envelope = libkit::attest::store::load(&paths[0]).unwrap();
+        let payload = String::from_utf8(envelope.payload).unwrap();
+        // Check the actual blob in the pushed ref as well as the local copy.
+        let entries = git_ok(
+            &mirror,
+            &["ls-tree", "--name-only", "refs/kit/attestations"],
+        );
+        let published = git_ok(
+            &mirror,
+            &["show", &format!("refs/kit/attestations:{}", entries.trim())],
+        );
+        assert_eq!(
+            published.trim(),
+            std::fs::read_to_string(&paths[0]).unwrap().trim()
+        );
+        assert!(
+            payload.contains(&format!("\"mirror\":\"{expected}\"")),
+            "{payload}"
+        );
+    }
+}

@@ -349,6 +349,9 @@ pub fn start(
 /// The final tree comes from the resolved index. The files are not rewritten,
 /// so an edit that the user made after staging stays.
 ///
+/// When `HEAD` already is the merge commit, a stop left the state behind, and
+/// the continue only clears it.
+///
 /// # Errors
 /// [`Error::NoMergeInProgress`] when no merge is recorded.
 /// [`Error::UnresolvedMarkers`] or [`conflict::Error::NotStaged`] when a
@@ -359,6 +362,19 @@ pub fn resume(
     signing: &dyn Signing,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
+    // A stop after the merge commit and before the state was cleared leaves
+    // the state over a finished merge. A second commit would take the branch
+    // from the first, which no other ref holds.
+    if let Some(commit) = committed_merge(layout, store, &state) {
+        let tree = commit_tree(store, commit)?;
+        conflict_state::clear_merge_state(layout).map_err(Error::ClearState)?;
+        return Ok(Merged {
+            commit,
+            ours: state.orig_head,
+            theirs: state.merge_head,
+            tree,
+        });
+    }
     conflict_state::ensure_conflict_list(layout).map_err(Error::ReadConflicts)?;
     if let Some(path) = conflict::first_unresolved_marker(layout.worktree_root(), &records)? {
         return Err(Error::UnresolvedMarkers(path));
@@ -419,7 +435,7 @@ pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
         .ok()
         .flatten();
     // Refuse before the reset. The reset destroys the material of the merge.
-    conflict::ensure_abort_safe(layout, store, &records, target_tree, op_result)?;
+    conflict::ensure_operation_abort_safe(layout, store, &records, target_tree, op_result)?;
     conflict::reset_paths(layout, store, &records, target_tree, op_result)?;
     ensure_restore_safe(layout, store, target_tree).map_err(Error::Worktree)?;
     restore_worktree_and_index(layout, store, target_tree).map_err(Error::Worktree)?;
@@ -429,14 +445,9 @@ pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
 }
 
 /// `HEAD`, when it is the commit of the recorded merge: its parents are the
-/// commit before the merge and the merged commit, in that order. A `HEAD` or a
-/// commit that cannot be read is not, so the abort can still repair it.
+/// commit before the merge and the merged commit, in that order.
 fn committed_merge(layout: &RepoLayout, store: &ObjectStore, state: &MergeState) -> Option<Hash> {
-    let head = refs::resolve_head(layout).ok().flatten()?;
-    match store.read_object(&head) {
-        Ok(Object::Commit(c)) if c.parents == [state.orig_head, state.merge_head] => Some(head),
-        _ => None,
-    }
+    conflict_state::result_commit(layout, store, &[state.orig_head, state.merge_head])
 }
 
 fn read_state(layout: &RepoLayout) -> Result<(MergeState, Vec<ConflictRecord>), Error> {

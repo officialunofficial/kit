@@ -21,7 +21,7 @@ workspace = true
 [dependencies]
 # Inter-workspace dep needs an explicit `version = ...` alongside the
 # path so `cargo publish` accepts it.
-kit-core = { version = "=0.10.0", path = "../kit-core" }
+kit-core = { version = "=0.11.0", path = "../kit-core" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "blocking"] }
 # A pack `PUT` runs on the async client, on a runtime of its own, so a
 # stalled upload can be ended (the blocking client bounds a request with a

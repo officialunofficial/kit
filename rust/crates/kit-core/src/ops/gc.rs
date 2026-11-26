@@ -644,17 +644,17 @@ fn mark_live_checked(
     for window in chunks.chunks(16 * 1024) {
         checkpoint()?;
         let checked = super::chunk_heads::try_each_in_order(window, |chunk| {
-            probe().map_err(|error| (*chunk, Some(error)))?;
+            probe().map_err(|error| (*chunk, Some(Box::new(error))))?;
             match store.gc_chunk_type(chunk) {
                 Ok(ObjectType::Blob) => Ok(()),
                 Ok(_) => Err((*chunk, None)),
-                Err(error) => Err((*chunk, Some(error.into()))),
+                Err(error) => Err((*chunk, Some(Box::new(error.into())))),
             }
         });
         checkpoint()?;
         if let Err((chunk, error)) = checked {
             return Err(match error {
-                Some(error) => error,
+                Some(error) => *error,
                 None => GcRootsError::ChunkNotBlob {
                     manifest: manifest_listing(store, &objects, &chunk, checkpoint)?,
                     chunk,

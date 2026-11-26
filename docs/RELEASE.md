@@ -390,7 +390,7 @@ Review the file list of a crate with `cargo package --list -p <crate>`.
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| In publish (dependency) order: `kit-core`, `kit-rpc`, `kit-attest`, `kit-keystore`, `kit-transport-file`, `kit-serve`, `kit-client`, `kit-sync`, `kit-transport-memory`, `kit-transport-connect`, `kit-transport-s3`, `kit-transport-ssh`, `kit-git-bridge`, `libkit`, and `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`, and `kit-wasm`, which `release.yml` publishes to npm. |
+| In publish (dependency) order: `kit-core`, `kit-rpc`, `kit-attest`, `kit-keystore`, `kit-transport-file`, `kit-serve`, `kit-client`, `kit-sync`, `kit-transport-memory`, `kit-transport-connect`, `kit-transport-s3`, `kit-transport-ssh`, `kit-git-bridge`, `libkit`, and `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `kit-rpc-codegen`, `fuzz`, `benches`, and `kit-wasm`, which `release.yml` publishes to npm. |
 
 The published crates depend only on each other, forming a closed,
 dependency-ordered set. The table lists them in that order.

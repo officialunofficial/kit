@@ -15,25 +15,35 @@ include!("grpc.health.v1.health.rs");
 pub mod __buffa {
     #[allow(unused_imports)]
     use super::*;
+    #[cfg(feature = "transport-messages")]
     pub mod view {
         #[allow(unused_imports)]
         use super::*;
         include!("grpc.health.v1.health.__view.rs");
     }
+    #[cfg(feature = "json")]
     /// Register this package's `Any` type entries and extension entries.
+    #[allow(unused_variables)]
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__HEALTH_CHECK_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__HEALTH_CHECK_RESPONSE_JSON_ANY);
     }
 }
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::HealthCheckRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::HealthCheckRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::HealthCheckResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::HealthCheckResponseOwnedView;
+#[cfg(feature = "json")]
 #[doc(inline)]
 pub use self::__buffa::register_types;
 #[cfg(feature = "transport")]

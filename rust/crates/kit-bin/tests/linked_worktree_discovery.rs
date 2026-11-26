@@ -220,3 +220,74 @@ fn single_worktree_repos_are_untouched_by_discovery() {
     assert_eq!(discovered, layout);
     assert!(discovered.is_single());
 }
+
+/// A pointer file whose state dir is not a registry entry of the repository
+/// that its commondir names is refused, and nothing in that repository
+/// changes.
+#[test]
+fn a_state_dir_outside_the_registry_is_refused() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "seed");
+    let head_before = std::fs::read(repo.kit_dir().join("refs/heads/main")).unwrap();
+
+    let host = tempfile::tempdir().expect("host dir");
+    let outside = host.path().join("outside");
+    let state = outside.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("commondir"),
+        format!("{}\n", repo.kit_dir().display()),
+    )
+    .unwrap();
+    std::fs::write(state.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        state.join("kitdir"),
+        format!("{}\n", outside.join(".kit").display()),
+    )
+    .unwrap();
+    kit_core::layout::write_pointer_file(&outside, &state).unwrap();
+    std::fs::write(outside.join("extra.txt"), b"extra\n").unwrap();
+
+    for args in [&["log"][..], &["add", "extra.txt"], &["commit", "-m", "x"]] {
+        let out = kit(&outside, repo.xdg(), args);
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("not a registered worktree"), "{args:?}: {err}");
+    }
+    assert_eq!(
+        std::fs::read(repo.kit_dir().join("refs/heads/main")).unwrap(),
+        head_before
+    );
+}
+
+/// A tree that `kit worktree add` made is found again however its path was
+/// spelled: relative to the working directory, or through a link.
+#[test]
+#[cfg(unix)]
+fn a_tree_added_by_a_relative_or_linked_path_is_found() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "seed");
+    repo.ok(&["branch", "one"]);
+    repo.ok(&["branch", "two"]);
+    let host = tempfile::tempdir().expect("host dir");
+    let host_name = host.path().file_name().unwrap().to_str().unwrap();
+    let relative = format!("../{host_name}/relative");
+    repo.ok(&["worktree", "add", &relative, "one"]);
+
+    let real = host.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = host.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let linked = link.join("tree");
+    repo.ok(&["worktree", "add", linked.to_str().unwrap(), "two"]);
+
+    for tree in [host.path().join("relative"), linked, real.join("tree")] {
+        let out = kit(&tree, repo.xdg(), &["log", "--oneline"]);
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            tree.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

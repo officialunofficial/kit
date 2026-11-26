@@ -17,6 +17,7 @@
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::ObjectType;
+use kit_core::pack::FetchDecodeBudget;
 use kit_core::refs;
 use kit_core::store::{ClosureSource, ObjectStore, PruneGuard};
 
@@ -233,6 +234,7 @@ pub(crate) fn apply_and_verify_chain(
     anchors: &Anchors,
     guard: &PruneGuard,
     verified: &mut VerifiedHistory,
+    decoded: &mut FetchDecodeBudget,
 ) -> Result<Applied, SyncError> {
     let ResolvedChain {
         mut chain,
@@ -252,6 +254,7 @@ pub(crate) fn apply_and_verify_chain(
         require_signed,
         &mut done,
         guard,
+        decoded,
         |view| check_tip(view, observer, &tip, anchors, require_signed, verified),
     );
     let skipped = done.skipped + prefix_packs;
@@ -299,6 +302,7 @@ pub(crate) fn apply_and_verify_chain(
         require_signed,
         &mut retry,
         guard,
+        decoded,
         |view| {
             check_tip(
                 view,
@@ -614,6 +618,8 @@ fn fetch_objects_inner(
     let mut anchors = Anchors::load(store, layout, remote, require_signed)?;
     // The nodes of the chains this fetch applied and checked.
     let mut stop = StopSet::default();
+    // What every pack of this fetch, tags included, may decode in total.
+    let mut decoded = FetchDecodeBudget::new();
     let result: Result<(), SyncError> = (|| {
         for r in remote_refs {
             if observer.cancelled() {
@@ -678,6 +684,7 @@ fn fetch_objects_inner(
                 &anchors,
                 guard,
                 &mut verified,
+                &mut decoded,
             ) {
                 Ok(stats) => (completed, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -712,6 +719,7 @@ fn fetch_objects_inner(
                         &anchors,
                         guard,
                         &mut verified,
+                        &mut decoded,
                     )?;
                     (completed, stats)
                 }
@@ -782,6 +790,7 @@ fn fetch_objects_inner(
             guard,
             applied: &mut *applied,
             verified: &mut verified,
+            decoded: &mut decoded,
             stop,
             report: &mut *report,
             published: &mut matched_tags,

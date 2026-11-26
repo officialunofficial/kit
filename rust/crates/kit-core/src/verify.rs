@@ -3054,6 +3054,7 @@ mod tests {
             verify_object_id(bytes, h).map_err(|_| StoreError::HashMismatch {
                 expected: crate::hash::to_hex(h),
                 actual: String::from("<mismatch>"),
+                pack: None,
             })?;
             Ok(bytes.clone())
         }

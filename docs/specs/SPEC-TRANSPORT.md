@@ -741,11 +741,11 @@ stale cursor can only leave the client at a state the server once offered.
 
 | Field | Message | Meaning |
 |---|---|---|
-| `page_size = 2` | `ListRefs` | The most refs the reply may hold. Required: an absent or zero value is refused. |
+| `page_size = 2` | `ListRefs` | The most refs a page may hold. Omit it for an unpaged listing. Zero is refused. |
 | `page_token = 3` | `ListRefs` | The `next_page_token` of the page before. Empty starts the listing. |
 | `next_page_token = 2` | `ListRefsResponse` | Empty ends the listing. Any other value is the `page_token` of the next request. |
 
-The server answers with the refs after `page_token`, at most `page_size`
+For a paged request, the server answers with the refs after `page_token`, at most `page_size`
 and at most 1,000 (`MAX_LIST_PAGE_REFS`). Its `next_page_token` is the last
 name of the page, and it is set only when more refs follow. A page of 1,000
 names of the longest length (512 bytes) is about 560,000 bytes, so a page
@@ -767,12 +767,11 @@ is a request frame and a response frame of the per-connection budget (§4.4).
 fields and sends the listing in one frame with no `next_page_token`, which
 the client takes as a listing of one page. It still fails, as before, when
 the listing does not fit one frame. A client that predates paging sends no
-`page_size`. A new server refuses it with `Error { ERROR_CODE_INVALID_REQUEST,
-"list refs needs a page_size; upgrade the client" }` and keeps the session
-open. It does not answer with a first page, because that client would take
-the page for the whole listing and could prune against it. Every listing of
-such a client fails, so the client has to be upgraded: kit keeps no fallback
-for it. A client of this version that pushes tags to a server that predates
+`page_size`. The server sends the whole listing in one frame with no
+`next_page_token`. If the listing exceeds the single-frame budget, the
+server sends `Error { ERROR_CODE_INTERNAL, "list refs failed" }` and keeps
+the session open. A nonempty `page_token` requires a `page_size`.
+A client of this version that pushes tags to a server that predates
 paging no longer bounds the remote's tag listing to one frame, so a listing
 that grows past one frame fails for every client of that server until the
 server is upgraded.
