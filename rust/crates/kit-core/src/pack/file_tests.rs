@@ -877,7 +877,7 @@ fn a_base_used_in_two_windows_is_read_back_and_nothing_outlives_its_window() {
 /// fetch has left, as it counts a result: a pack of three windows over one
 /// large stored base is refused when the third read passes what is left.
 #[test]
-fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap() {
+fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_fetch_budget() {
     const BASE_LEN: usize = 3 << 20;
     let (_d, store) = fresh_store();
     let (base_id, base) = blob(&blob_data(9, BASE_LEN, false));

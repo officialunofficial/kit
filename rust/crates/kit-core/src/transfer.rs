@@ -402,8 +402,15 @@ fn pair_entry(
         // natural delta base for the new one. Never overwrite an
         // existing pairing for `new_hash`, mirroring `pair_chunks`'
         // determinism guarantee.
-        (Ok(Object::Blob(_)), Ok(Object::Blob(_))) => {
-            out.chunks.entry(new_hash).or_insert(old_hash);
+        //
+        // A blob over [`MAX_PAIRED_BLOB`] (a merged file, which is stored in
+        // one piece) is sent whole: a delta over it takes a few dozen bytes
+        // and makes a reader of the pack decode that much, which the limit a
+        // fetch sets by the length of the pack does not allow for.
+        (Ok(Object::Blob(new_blob)), Ok(Object::Blob(old_blob))) => {
+            if new_blob.data.len() <= MAX_PAIRED_BLOB && old_blob.data.len() <= MAX_PAIRED_BLOB {
+                out.chunks.entry(new_hash).or_insert(old_hash);
+            }
             Ok(())
         }
         // A file that grew past `CHUNK_THRESHOLD`: its old inline blob is the
@@ -432,6 +439,10 @@ fn pair_entry(
         _ => Ok(()),
     }
 }
+
+/// The most a blob may hold, new or old, for a changed same-path blob to be
+/// sent as a delta over its old version: 16 MiB, as a manifest.
+const MAX_PAIRED_BLOB: usize = 16 << 20;
 
 /// Window size for content-similarity sketching. Matches the delta
 /// encoder's match-block size, so a shared 16-byte run is a shared feature.
@@ -3868,6 +3879,29 @@ mod tests {
             ),
             "expected DeltaBatchLengthMismatch, got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_same_path_blob_over_the_pairing_limit_is_not_paired() {
+        let (_d, s) = store();
+        let edit = |len: usize, last: u8| {
+            let mut data = vec![b'x'; len];
+            data[len - 1] = last;
+            data
+        };
+        // At the limit a blob pairs; one byte over, on either side, it does not.
+        for (old_len, new_len, paired) in [
+            (MAX_PAIRED_BLOB, MAX_PAIRED_BLOB, true),
+            (MAX_PAIRED_BLOB + 1, MAX_PAIRED_BLOB, false),
+            (MAX_PAIRED_BLOB, MAX_PAIRED_BLOB + 1, false),
+        ] {
+            let old = put_blob(&s, edit(old_len, b'a'));
+            let new = put_blob(&s, edit(new_len, b'b'));
+            let c1 = commit_with_named_file(&s, b"big.txt", old, vec![], "v1");
+            let c2 = commit_with_named_file(&s, b"big.txt", new, vec![c1], "v2");
+            let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
+            assert_eq!(bases.get(&new).is_some(), paired, "{old_len} {new_len}");
+        }
     }
 
     #[test]

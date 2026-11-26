@@ -829,7 +829,7 @@ window at a time, so its memory does not grow with the pack's length.
   whose base an earlier window stored reads it back from the store, so a base
   shared across windows is read once per window that uses it. Each such read
   is charged to the decoded share while the base is held. It also counts
-  toward what a fetch decodes (§11.1), where a pack has one, and not toward
+  toward what a fetch decodes (§12), where a pack has one, and not toward
   the cap of the pack, since a writer counts only the longest base. A window
   closes when the next frame would take it past 64 MiB,
   so two windows in a row hold more than 64 MiB of frames: there are at most

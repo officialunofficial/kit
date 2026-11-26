@@ -169,8 +169,8 @@ const FETCH_DECODED_FLOOR: u64 = MAX_TOTAL_DECODED;
 /// The bound on what a writer makes: a zstd entry expands at most 32,768
 /// times, since a 128 KiB block of one byte takes 4 bytes. A delta stream
 /// expands at most 9,362 times, since a COPY of 65,535 bytes takes 7 (SPEC-DELTA §7),
-/// and the planner deltas results of at most 16 MiB (`ManifestBudget::each`)
-/// against bases of at most 16 MiB. The most a pack counts per wire byte is
+/// and the planner deltas results of at most 16 MiB (`ManifestBudget::each`,
+/// `MAX_PAIRED_BLOB`) against bases of at most 16 MiB. The most a pack counts per wire byte is
 /// then a zstd delta entry of 256 COPYs of one 64 KiB block, whose stream
 /// zstd packs into a few dozen bytes, with the result and the base read from
 /// the store counted: about 33 MiB of decoded bytes for about 70 bytes of
