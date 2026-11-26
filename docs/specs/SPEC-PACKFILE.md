@@ -899,17 +899,19 @@ uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
 
-A fetch also bounds what all its packs decode together: 16 GiB, and 2 Mi
+A fetch also bounds what all its packs decode together: 1 TiB, and 2 Mi
 decoded bytes more for each wire byte of each pack it reads. A kit writer stays
 under that ratio. A zstd entry expands at most 32,768 times (a 128 KiB block of
 one byte takes 4 bytes). A delta stream expands at most 9,362 times (a COPY of
 65,535 bytes takes 7, SPEC-DELTA §7). The most a pack counts per wire byte is a
 zstd delta entry whose stream is 256 COPYs of one block: a result of 16 MiB,
 the most the planner deltas, with a base of 16 MiB read from the store, about
-33 MiB counted for about 70 bytes of pack, or 470,000 times, which is under
-half of 2 Mi. A fetch of packs a writer made is never refused, however much it
-holds. A hostile pack that claims 2 GiB from a hundred bytes is 21 million
-times, and a fetch of nine of them runs out. Each pack still obeys its
+32 MiB counted for about 70 bytes of pack, or 480,000 times, which is under
+half of 2 Mi. A fetch of packs a writer makes is never refused, however much it
+holds. Packs of older writers, which paired a changed same-path blob of any
+size as a delta, can pass the ratio, and the 1 TiB absorbs them: one drains a
+gigabyte at most. A hostile pack that claims 2 GiB from a hundred bytes is 21
+million times, and a fetch of about 570 of them runs out. Each pack still obeys its
 own cap, and the bytes it decodes, a pack that fails included, come off what
 the fetch has left for the next pack. A retry of a chain decodes its packs
 again, is charged again and adds their lengths again. A delta base read from

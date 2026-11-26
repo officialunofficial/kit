@@ -153,18 +153,21 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
 }
 
-/// What a fetch may decode before its packs add to it: 16 GiB, the most one
-/// pack decodes ([`MAX_TOTAL_DECODED`]).
+/// What a fetch may decode before its packs add to it: 1 TiB.
 ///
 /// A pack's own cap ([`decoded_bytes_cap`]) never falls under
 /// [`MIN_TOTAL_DECODED`], so a fetch of a million tiny packs could decode
 /// that much from each. Each pack the fetch reads adds
 /// [`FETCH_DECODED_PER_WIRE_BYTE`] times its length to this, so a fetch of
-/// tiny packs that claim more than that ratio runs out after a few of them.
-const FETCH_DECODED_FLOOR: u64 = MAX_TOTAL_DECODED;
+/// tiny packs that claim more than that ratio runs out after about 570 of
+/// them. The floor is high so that the packs of older writers, which paired a
+/// changed same-path blob of any size as a delta, do not run an honest fetch
+/// out: such a pack drains a gigabyte at most, and a fetch holds a few hundred
+/// of them at the very most.
+const FETCH_DECODED_FLOOR: u64 = 1 << 40;
 
 /// What each wire byte of a pack adds to the budget of its fetch: 2 Mi
-/// decoded bytes. A fetch of packs that a kit writer made stays under it.
+/// decoded bytes. A fetch of packs that a kit writer makes stays under it.
 ///
 /// The bound on what a writer makes: a zstd entry expands at most 32,768
 /// times, since a 128 KiB block of one byte takes 4 bytes. A delta stream
@@ -173,8 +176,8 @@ const FETCH_DECODED_FLOOR: u64 = MAX_TOTAL_DECODED;
 /// `MAX_PAIRED_BLOB`) against bases of at most 16 MiB. The most a pack counts per wire byte is
 /// then a zstd delta entry of 256 COPYs of one 64 KiB block, whose stream
 /// zstd packs into a few dozen bytes, with the result and the base read from
-/// the store counted: about 33 MiB of decoded bytes for about 70 bytes of
-/// pack, or 470,000 times. The test `a_pack_a_kit_writer_makes_fits_the_fetch_ratio` builds
+/// the store counted: about 32 MiB of decoded bytes for about 70 bytes of
+/// pack, or 480,000 times. The test `a_pack_a_kit_writer_makes_fits_the_fetch_ratio` builds
 /// that pack and keeps this at least twice that. A hostile pack that claims
 /// 2 GiB from a hundred bytes is 21 million times and runs the budget out.
 const FETCH_DECODED_PER_WIRE_BYTE: u64 = 2 << 20;
@@ -197,7 +200,7 @@ impl FetchDecodeBudget {
     /// What each wire byte of a pack adds to the budget (see the limit's doc).
     pub const PER_WIRE_BYTE: u64 = FETCH_DECODED_PER_WIRE_BYTE;
 
-    /// The budget of a fetch that has applied no pack: 16 GiB, the most one pack decodes.
+    /// The budget of a fetch that has applied no pack: 1 TiB.
     #[must_use]
     pub const fn new() -> Self {
         Self::with_limit(FETCH_DECODED_FLOOR)
@@ -3938,6 +3941,23 @@ mod tests {
             assert!(cap >= 100 * FETCH_DECODED_PER_WIRE_BYTE.min(MIN_TOTAL_DECODED));
             fetch.settle(100 * (FETCH_DECODED_PER_WIRE_BYTE - 1));
         }
+    }
+
+    #[test]
+    fn a_fetch_of_tiny_packs_that_claim_the_most_runs_out_after_a_few_hundred() {
+        // Each pack is a hundred bytes that claim the whole floor of its own
+        // cap, 21 million bytes decoded for each wire byte.
+        let mut fetch = FetchDecodeBudget::new();
+        let mut packs = 0u32;
+        loop {
+            let cap = fetch.admit(100).0;
+            if cap < MIN_TOTAL_DECODED {
+                break;
+            }
+            fetch.settle(MIN_TOTAL_DECODED);
+            packs += 1;
+        }
+        assert!((560..=580).contains(&packs), "{packs} packs");
     }
 
     #[test]
