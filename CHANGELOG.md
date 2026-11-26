@@ -11,23 +11,28 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
-- SSH ref listings now require paging. Upgrade SSH clients before the server.
-  `ListRefs` and `ListRefsView` gain `page_size` and `page_token`; their
+- SSH clients now page ref listings. A 0.11 client can still list branches
+  from a 0.10 server within the original one-frame limit.
+  `ListRefs` and `ListRefsView` gain `page_size` and `page_token`. Their
   responses and response views gain `next_page_token`. `RefListing::OneFrame`,
   `MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are gone, and the
   numeric discriminant of `RefListing::Eventual` changes from 2 to 1.
 - Enable `kit-rpc/json` for proto3 JSON or when another dependency enables
   `connectrpc/json`. Enabling `transport` or `transport-messages` alone now
   gives you the binary protobuf API.
-- `kit_core::durable` replaces the internal `atomic` and `flush` helpers.
-  Fault-injection matches on `SyncStep` must handle `Writeout` and `Flush`.
-- `SyncOptions` literals need the new `checkout` field. It defaults to true.
-  `kit clone --no-checkout` leaves no index, and the first checkout in
-  a repository without an index treats existing files as untracked.
+- Fault-injection matches on `SyncStep` must handle `Writeout` and `Flush`.
+  The new `kit_core::durable` module replaces the internal `atomic` and
+  `flush` helpers.
+- `kit clone --no-checkout` leaves no index. The first checkout in a
+  repository without an index treats existing files as untracked.
+  `SyncOptions::with_checkout(false)` opts library callers into this mode.
 - `StoreError::HashMismatch` now includes `pack`. New error variants cover
-  oversized trees, non-commit branch tips, transient HTTP status responses,
-  overlapping remote names, config lock failures, and interrupted operations.
-  Update exhaustive matches and callers that branch on these errors.
+  oversized trees (`TreeTooLarge`), non-commit branch tips
+  (`BranchTipNotCommit`), transient HTTP responses (`ServerStatus`),
+  overlapping remote names (`OverlappingName`), and config lock failures
+  (`ConfigError::Lock`). Commit and conflict handling can now return
+  `MergeStateIncomplete`, `OperationStateIncomplete`, `ReadPullState`,
+  `PullUnfinished`, or `AbortWithoutList`.
 - Linked worktrees need a registered state directory and matching backpointer.
   Run `kit worktree repair <path>` after moving a worktree by hand. Discovery can
   return `NotRegistered` or `BackpointerMismatch`.
@@ -44,8 +49,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state. Commit checks unfinished operations, and abort or continue preserves
   a commit the operation already made.
 - On case-insensitive filesystems, ref lock names change for upper-case refs.
-  Use one version of kit when writing to the same repository. Worktree
-  removals and writes also check every parent directory.
+  Use one version of kit when writing to the same repository.
+- Worktree removals and writes now check each parent directory and reject
+  paths that pass through a symlink or a non-directory ancestor.
 
 ### Added
 
