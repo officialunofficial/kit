@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-25 (Wed): main green (macOS run in progress). Called update_pull_request_branch on 262, 220, 309, 233, 195, 152 (stale bases; failures were timed_out kit-ci-pr, mutants, semver, generated-code on old bases). Drafts 310 and 93 skipped. Next run: merge any that are green and MERGEABLE.",
+  "last_findings": "2026-11-26 (Thu): main green incl. release 0.11.0. Updated branches of 309, 262, 233, 220, 195, 152 (stale bases). Commented on 324: kit-ci-pr needs maintainer /gcbrun, semver-checks fails, mutants cancelled. Next run: merge any that are green and MERGEABLE.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -19,6 +19,7 @@
     "gh pr view fails with a GraphQL 403 here; use gh api repos/OWNER/REPO/pulls/N and commits/SHA/check-runs for mergeable state and failed checks.",
     "An open PR with a stale base shows mergeable unknown and old failures; call update_pull_request_branch first and judge the rerun, since CI takes over 10 minutes and cannot be polled in-session.",
     "The fmt job also runs check-dependency-versions.py; a stale PR base fails it with Cargo.lock mismatches, and cargo fmt shows no diff. Update the branch, do not reformat.",
-    "PRs still show mergeable unknown after update_pull_request_branch for many minutes; one run cannot both update and merge, so merge on the next run."
+    "PRs still show mergeable unknown after update_pull_request_branch for many minutes; one run cannot both update and merge, so merge on the next run.",
+    "kit-ci-pr and kit-connect-pr start only on a maintainer /gcbrun comment (action_required until then); do not post it, and do not treat it as a failure to fix."
   ]
 }
