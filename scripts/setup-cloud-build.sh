@@ -87,7 +87,10 @@ echo "== triggers =="
 # The main suite. No path filter: the writing and path checks read the
 # documents too, so a change to a document can fail them.
 mk_pr   kit-ci-pr   --build-config=cloudbuild/ci.yaml --comment-control="$COL"
-mk_push kit-ci-main --build-config=cloudbuild/ci.yaml
+# A push to main starts nothing: the sentinel path never changes. Run it by
+# hand: gcloud builds triggers run kit-ci-main --branch=main
+mk_push kit-ci-main --build-config=cloudbuild/ci.yaml \
+        --included-files=cloudbuild/scheduled-main.sentinel
 
 # Third-party notices and the release artifact check. They run only when an
 # input that can change the result changes.
