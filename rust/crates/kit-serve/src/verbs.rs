@@ -13,8 +13,8 @@
 //! | `UpdateRef` | a CAS conflict, a delete's included | [`cas_conflict_body`] |
 //! | `UpdateRef` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
-//! | `ListRefs` | no `page_size`, or a `page_size` of 0 | `INVALID_REQUEST`, [`LIST_NEEDS_PAGE_SIZE`] |
-//! | `ListRefs` | a `page_token` over 512 bytes | `INVALID_REQUEST "invalid page token"` |
+//! | `ListRefs` | a `page_size` of 0 | `INVALID_REQUEST`, [`LIST_NEEDS_PAGE_SIZE`] |
+//! | `ListRefs` | a `page_token` over 512 bytes or a nonempty token without `page_size` | `INVALID_REQUEST "invalid page token"` |
 //! | `ListRefs` | any other | `INTERNAL "list refs failed"` |
 //! | `ReadRepoCursor` | any | a reply with no cursor |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
@@ -63,6 +63,9 @@ const MAX_LISTING_BYTES: usize = kit_rpc::MAX_FRAME_BYTES as usize - 1024;
 /// the tags and the lengths.
 const LISTING_ENTRY_OVERHEAD: usize = 48;
 
+/// Nonempty names make a listing of this many refs exceed the byte budget.
+const UNPAGED_LIST_LIMIT: usize = MAX_LISTING_BYTES.div_ceil(LISTING_ENTRY_OVERHEAD);
+
 /// The most refs in one `ListRefs` reply. A request for more gets this many.
 /// Even 1,000 names of the longest length fit one frame, as the check below
 /// proves, so a page never needs a byte count.
@@ -72,9 +75,7 @@ const _: () = assert!(
     MAX_LIST_PAGE_REFS * (MAX_REF_NAME_BYTES + LISTING_ENTRY_OVERHEAD) <= MAX_LISTING_BYTES
 );
 
-/// The reply to a `ListRefs` that names no page size. A client from before
-/// listings paged sends none: it is refused, not given a first page that it
-/// would take for the whole listing and prune against.
+/// The reply to a `ListRefs` with an explicit page size of zero.
 pub const LIST_NEEDS_PAGE_SIZE: &str = "list refs needs a page_size; upgrade the client";
 
 /// The reply to a `ListRefs` page token that no listing could have returned.
@@ -277,24 +278,39 @@ impl<'r> Verbs<'r> {
         }
     }
 
-    /// `ListRefs` (SPEC-TRANSPORT §4.2): one page of the listing, in name
-    /// order. The page token is the last name of the page before, so the
+    /// `ListRefs` (SPEC-TRANSPORT §4.2): one page in name order, or the
+    /// whole listing in one frame when the request omits the page size.
+    /// The page token is the last name of the page before, so the
     /// listing carries on across a reconnect. A name that was listed and has
     /// since gone is as good a token as one that is still there.
     fn list_refs(&self, req: &ListRefs) -> Result<Body, VerbError> {
         let failed = (ErrorCode::Internal, "list refs failed");
-        let page_size = match req.page_size {
-            Some(size) if size > 0 => (size as usize).min(MAX_LIST_PAGE_REFS),
-            _ => return Err((ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE)),
-        };
         let token = req.page_token.as_deref().unwrap_or_default();
+        let limit = match req.page_size {
+            Some(0) => return Err((ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE)),
+            Some(size) => (size as usize).min(MAX_LIST_PAGE_REFS),
+            None if !token.is_empty() => {
+                return Err((ErrorCode::InvalidRequest, INVALID_PAGE_TOKEN));
+            }
+            None => UNPAGED_LIST_LIMIT,
+        };
         if token.len() > MAX_REF_NAME_BYTES {
             return Err((ErrorCode::InvalidRequest, INVALID_PAGE_TOKEN));
         }
         let page = self
             .repo
-            .list_refs_page(req.prefix.as_deref().unwrap_or_default(), token, page_size)
+            .list_refs_page(req.prefix.as_deref().unwrap_or_default(), token, limit)
             .map_err(|_| failed)?;
+        if req.page_size.is_none()
+            && page
+                .refs
+                .iter()
+                .map(|(name, _)| name.len() + LISTING_ENTRY_OVERHEAD)
+                .sum::<usize>()
+                > MAX_LISTING_BYTES
+        {
+            return Err(failed);
+        }
         Ok(Body::ListRefsResponse(Box::new(ListRefsResponse {
             refs: page
                 .refs

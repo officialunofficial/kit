@@ -336,6 +336,19 @@ non-normative except for the binding semantics below):
   with passthrough export per SPEC-GIT-BRIDGE §14.)
 - `signer`: the pinned importer pubkey (§4).
 - `import-spec-version` (§1.2).
+- The staging mirror (`repo.git`) is kit's own state, and git applies a
+  mirror's own configuration, so every command that runs `git` in it
+  first checks that the directory is a plain directory that git itself
+  uses as its repository (no `.git` entry, a valid `HEAD`), with no
+  link or special file anywhere in it and no `commondir`,
+  `config.worktree`, `gitdir` or alternates file, and that
+  its config holds each key at most once and only the keys `git clone --bare` and `git init --bare` write
+  (`core.*` repository format and sharing keys,
+  `receive.denyNonFastForwards`, `extensions.objectformat`,
+  `extensions.compatobjectformat`, `extensions.refstorage` and
+  `remote.origin.url`). Any other mirror is
+  refused with a message that says to delete it and run the command
+  again; nothing runs in it first.
 - The staging mirror (`repo.git`): for import it is **durable
   state**, not a disposable cache &mdash; it is the byte-perfect original
   archive backing §5.2 and the passthrough object source. Deleting

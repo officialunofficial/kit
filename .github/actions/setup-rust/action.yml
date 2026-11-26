@@ -23,10 +23,11 @@ inputs:
     required: true
   protoc:
     description: >-
-      Install protoc. Required by any job that builds kit-rpc (buffa-build
-      shells out to protoc; the .proto schemas use Edition 2023, needing
-      protoc >= 25, newer than apt's protobuf-compiler). Set "false" for jobs
-      that never compile kit-rpc (e.g. the keystore-only matrix).
+      Install protoc. Required by any job that runs kit-rpc-codegen
+      (buffa-build shells out to protoc; the .proto schemas use Edition 2023,
+      needing protoc >= 25, newer than apt's protobuf-compiler). Building
+      kit-rpc needs no protoc. Set "false" for jobs that never run the
+      generators.
     required: false
     default: "true"
   protoc-version:

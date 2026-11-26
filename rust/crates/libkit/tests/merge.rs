@@ -594,16 +594,34 @@ fn a_paused_merge_is_recorded_before_its_markers_and_its_list_comes_last() {
 }
 
 #[test]
-fn a_merge_without_its_list_is_not_continued() {
+fn a_stale_conflict_list_cannot_continue_an_interrupted_merge() {
+    struct StopAfterMarkers;
+    impl Observer<conflict::Event> for StopAfterMarkers {
+        fn event(&self, _event: &conflict::Event) {
+            std::panic::panic_any(StopAfterMarkers);
+        }
+    }
+
     let f = init();
-    diverged(&f);
-    start(&f, &merge_request("topic")).unwrap();
-    // The stop came after the merge was recorded and before its list was.
-    std::fs::remove_file(f.layout.conflicts_file()).unwrap();
+    let (ours, _) = diverged(&f);
+    conflict_state::write_conflicts(f.layout.worktree_state_dir(), &[]).unwrap();
+
+    let stop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        merge::start(
+            &f.layout,
+            &f.store,
+            &merge_request("topic"),
+            &TestSigning,
+            &StopAfterMarkers,
+        )
+    }));
+    assert!(stop.unwrap_err().is::<StopAfterMarkers>());
+    assert!(f.read("a.txt").starts_with("<<<<<<< ours\n"));
 
     let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
     assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
     assert!(is_merge_in_progress(&f.layout));
+    assert_eq!(refs::read_ref(&f.layout, "main").unwrap(), Some(ours));
 }
 
 #[test]
@@ -631,6 +649,34 @@ fn abort_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
         Some(merged.commit)
     );
     assert_eq!(f.read("a.txt"), "resolved\n");
+}
+
+#[test]
+fn continue_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
+    let f = init();
+    let (ours, theirs) = diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    f.write("a.txt", "resolved\n");
+    f.stage("a.txt");
+    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    // The stop came after the branch moved and before the state was cleared.
+    let state = MergeState {
+        merge_head: theirs,
+        orig_head: ours,
+        message: b"Merge branch 'topic'".to_vec(),
+    };
+    conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
+
+    let again = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    assert_eq!(again.commit, merged.commit);
+    assert_eq!((again.ours, again.theirs), (ours, theirs));
+    assert_eq!(again.tree, merged.tree);
+    assert!(!is_merge_in_progress(&f.layout));
+    // No second merge commit took the branch from the first.
+    assert_eq!(
+        refs::read_ref(&f.layout, "main").unwrap(),
+        Some(merged.commit)
+    );
 }
 
 #[test]

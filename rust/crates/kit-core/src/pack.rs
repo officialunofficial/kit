@@ -153,6 +153,102 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
 }
 
+/// What a fetch may decode before its packs add to it: 1 TiB.
+///
+/// A pack's own cap ([`decoded_bytes_cap`]) never falls under
+/// [`MIN_TOTAL_DECODED`], so a fetch of a million tiny packs could decode
+/// that much from each. Each pack the fetch reads adds
+/// [`FETCH_DECODED_PER_WIRE_BYTE`] times its length to this, so a fetch of
+/// tiny packs that claim more than that ratio runs out after about 570 of
+/// them. The floor is high so that the packs of older writers, which paired a
+/// changed same-path blob of any size as a delta, do not run an honest fetch
+/// out: each such delta over a base of 1 GiB drains about 1 GiB, so a fetch
+/// would need over a thousand of them, over a TiB of stored merged blobs that
+/// were each cut short.
+const FETCH_DECODED_FLOOR: u64 = 1 << 40;
+
+/// What each wire byte of a pack adds to the budget of its fetch: 2 Mi
+/// decoded bytes. A fetch of packs that a kit writer makes stays under it.
+///
+/// The bound on what a writer makes: a zstd entry expands at most 32,768
+/// times, since a 128 KiB block of one byte takes 4 bytes. A delta stream
+/// expands at most 9,362 times, since a COPY of 65,535 bytes takes 7 (SPEC-DELTA §7),
+/// and the planner deltas results of at most 16 MiB (`ManifestBudget::each`,
+/// `MAX_PAIRED_BLOB`) against bases of at most 16 MiB. The most a pack counts per wire byte is
+/// then a zstd delta entry of 256 COPYs of one 64 KiB block of its base, whose stream
+/// zstd packs into a few dozen bytes, with the result and the base read from
+/// the store counted: about 32 MiB of decoded bytes for about 70 bytes of
+/// pack, or 480,000 times. The test `a_pack_a_kit_writer_makes_fits_the_fetch_ratio` builds
+/// that pack and keeps this at least twice that. A hostile pack that claims
+/// 2 GiB from a hundred bytes is 21 million times and runs the budget out.
+const FETCH_DECODED_PER_WIRE_BYTE: u64 = 2 << 20;
+
+/// The decoded bytes the packs of one fetch may still expand to.
+///
+/// Each pack of the fetch obeys its own cap and also what is left here, and
+/// the bytes it decodes, a failed pack's included, come off what is left.
+///
+/// A retry of a chain decodes its packs again and is charged again, and adds
+/// the length of each pack to the budget again.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct FetchDecodeBudget {
+    remaining: u64,
+    per_wire_byte: u64,
+}
+
+impl FetchDecodeBudget {
+    /// What each wire byte of a pack adds to the budget (see the limit's doc).
+    pub const PER_WIRE_BYTE: u64 = FETCH_DECODED_PER_WIRE_BYTE;
+
+    /// The budget of a fetch that has applied no pack: 1 TiB.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_limit(FETCH_DECODED_FLOOR)
+    }
+
+    /// A budget of `bytes`, before the packs add to it.
+    #[must_use]
+    pub const fn with_limit(bytes: u64) -> Self {
+        Self {
+            remaining: bytes,
+            per_wire_byte: FETCH_DECODED_PER_WIRE_BYTE,
+        }
+    }
+
+    /// A budget of `bytes` that the packs add nothing to, so a test can run it
+    /// out with a pack of a few hundred bytes.
+    #[cfg(test)]
+    const fn exact(bytes: u64) -> Self {
+        Self {
+            remaining: bytes,
+            per_wire_byte: 0,
+        }
+    }
+
+    /// Add what a pack of `pack_len` bytes brings, and return the cap on what
+    /// its results may decode and what is left for results and base reads
+    /// together.
+    fn admit(&mut self, pack_len: u64) -> (u64, u64) {
+        self.remaining = self
+            .remaining
+            .saturating_add(pack_len.saturating_mul(self.per_wire_byte));
+        let cap = decoded_bytes_cap(usize::try_from(pack_len).unwrap_or(usize::MAX));
+        (self.remaining.min(cap), self.remaining)
+    }
+
+    /// Take what a pack decoded off what is left.
+    fn settle(&mut self, decoded: u64) {
+        self.remaining = self.remaining.saturating_sub(decoded);
+    }
+}
+
+impl Default for FetchDecodeBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The budget of one [`PackReader::read`] of a pack of `pack_len` bytes.
 fn read_budget(pack_len: usize, owned_bytes: Option<&AtomicU64>) -> ResidentBudget<'_> {
     ResidentBudget::new(resident_bytes_cap(pack_len), owned_bytes)
@@ -559,8 +655,10 @@ pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
 
 /// What a pack under construction holds, as far as the limits a reader
 /// applies are concerned. Every writer that seals packs asks
-/// [`Self::seals_before`] before it adds an entry, so a pack it seals is one
-/// every reader accepts.
+/// [`Self::seals_before`] before it adds an entry, so a pack it seals stays
+/// within the decoded budget of every reader. The file reader also counts each
+/// read of a base from the store toward the budget of its fetch, never toward
+/// the cap of the pack.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PackFill {
     entries: usize,
@@ -2211,7 +2309,11 @@ pub struct DecodeLimits {
     /// [`DeltaBaseSource`] while it is cached. `0x00` payloads are borrowed
     /// from the pack and do not count. An external base is measured once
     /// fetched, so the peak can pass the cap by the one base whose fetch
-    /// trips it.
+    /// trips it. A [`window::WindowReader`] also cumulatively counts the
+    /// `0x03`/`0x04` claims of the entries it has yielded, and no other bytes;
+    /// it still checks every entry alone. A host that streams sealed packs
+    /// through a window reader sets it to at least
+    /// [`Self::DEFAULT_MAX_DECODED_BYTES`], the most a sealed pack decodes.
     pub max_decoded_bytes: u64,
     entry_geometry: Option<(u64, u64)>,
 }
@@ -2901,6 +3003,13 @@ struct ResidentBudget<'a> {
     /// Running total of decoded bytes charged so far, never credited back.
     decoded: AtomicU64,
     decoded_cap: u64,
+    /// Running total of the bytes of delta bases read back from the store,
+    /// never credited back. A pack's own cap does not count them, since a
+    /// writer seals no pack by how many bases it reads; the fetch's budget
+    /// does.
+    base_reads: AtomicU64,
+    /// What the fetch has left for results and base reads together.
+    fetch_left: u64,
     /// Bytes charged per pack entry by [`Self::reserve_entries`]. Zero
     /// charges nothing.
     entry_cost: usize,
@@ -2919,6 +3028,8 @@ impl<'a> ResidentBudget<'a> {
             owned_bytes,
             decoded: AtomicU64::new(0),
             decoded_cap: MAX_TOTAL_DECODED,
+            base_reads: AtomicU64::new(0),
+            fetch_left: u64::MAX,
             entry_cost: 0,
             entries: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -2933,6 +3044,13 @@ impl<'a> ResidentBudget<'a> {
     /// This budget with a cap of `cap` decoded bytes.
     fn with_decoded_cap(mut self, cap: u64) -> Self {
         self.decoded_cap = cap;
+        self
+    }
+
+    /// This budget with `left` bytes of a fetch for results and base reads
+    /// together.
+    fn with_fetch_left(mut self, left: u64) -> Self {
+        self.fetch_left = left;
         self
     }
 
@@ -2957,14 +3075,40 @@ impl<'a> ResidentBudget<'a> {
         Ok(())
     }
 
+    /// The decoded bytes and base reads charged so far.
+    fn decoded_so_far(&self) -> u64 {
+        self.decoded
+            .load(Ordering::Relaxed)
+            .saturating_add(self.base_reads.load(Ordering::Relaxed))
+    }
+
     /// Add `len` to the cumulative decoded total, failing past the cap.
     /// Unlike [`Self::charge`], the amount is never released.
     fn charge_decoded(&self, len: usize) -> Result<(), PackError> {
         let len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
+        let reads = self.base_reads.load(Ordering::Relaxed);
         self.decoded
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(len)
-                    .filter(|&total| total <= self.decoded_cap)
+                used.checked_add(len).filter(|&total| {
+                    total <= self.decoded_cap && total.saturating_add(reads) <= self.fetch_left
+                })
+            })
+            .map(|_| ())
+            .map_err(|_| PackError::PackfileTooLarge)
+    }
+
+    /// Add the `len` bytes of a delta base read from the store, failing past
+    /// what the fetch has left for results and reads together. Reading and
+    /// hashing a base costs as much as decoding it, and a base comes back for
+    /// each window that needs it. A pack's own cap does not count the read.
+    fn charge_base_read(&self, len: usize) -> Result<(), PackError> {
+        let len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
+        let decoded = self.decoded.load(Ordering::Relaxed);
+        self.base_reads
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |reads| {
+                reads
+                    .checked_add(len)
+                    .filter(|&total| total.saturating_add(decoded) <= self.fetch_left)
             })
             .map(|_| ())
             .map_err(|_| PackError::PackfileTooLarge)
@@ -3570,6 +3714,8 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
                 Ok(())
             })?
             .ok_or_else(|| PackError::DeltaBaseMissing(hash::to_hex(&base_hash)))?;
+        // Each read counts toward what the fetch has left, before the hash.
+        budget.charge_base_read(bytes.len())?;
         if !external_base_matches::<B>(&bytes, &base_hash)? {
             return Err(PackError::DeltaBaseMissing(hash::to_hex(&base_hash)));
         }
@@ -3774,6 +3920,48 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_budget_caps_each_pack_and_loses_what_a_pack_decodes() {
+        let mut fetch = FetchDecodeBudget::new();
+        // A fresh budget leaves each pack its own cap.
+        assert_eq!(fetch.admit(100).0, decoded_bytes_cap(100));
+        assert_eq!(fetch.admit(64 << 20).0, MAX_TOTAL_DECODED);
+        // What a pack decodes comes off what is left for the next, and each
+        // pack adds a share of its own length.
+        let share = 100 * FETCH_DECODED_PER_WIRE_BYTE;
+        let mut fetch = FetchDecodeBudget::with_limit(3 << 30);
+        assert_eq!(fetch.admit(100).0, MIN_TOTAL_DECODED);
+        fetch.settle(MIN_TOTAL_DECODED);
+        assert_eq!(fetch.admit(100).0, (1 << 30) + 2 * share);
+        fetch.settle(u64::MAX);
+        assert_eq!(fetch.admit(100).0, share);
+        // A fetch whose packs all stay under the ratio never runs out, however
+        // many there are.
+        let mut fetch = FetchDecodeBudget::with_limit(0);
+        for _ in 0..1000 {
+            let cap = fetch.admit(100).0;
+            assert!(cap >= 100 * FETCH_DECODED_PER_WIRE_BYTE.min(MIN_TOTAL_DECODED));
+            fetch.settle(100 * (FETCH_DECODED_PER_WIRE_BYTE - 1));
+        }
+    }
+
+    #[test]
+    fn a_fetch_of_tiny_packs_that_claim_the_most_runs_out_after_a_few_hundred() {
+        // Each pack is a hundred bytes that claim the whole floor of its own
+        // cap, 21 million bytes decoded for each wire byte.
+        let mut fetch = FetchDecodeBudget::new();
+        let mut packs = 0u32;
+        loop {
+            let cap = fetch.admit(100).0;
+            if cap < MIN_TOTAL_DECODED {
+                break;
+            }
+            fetch.settle(MIN_TOTAL_DECODED);
+            packs += 1;
+        }
+        assert!((560..=580).contains(&packs), "{packs} packs");
+    }
+
+    #[test]
     fn decoded_cap_follows_the_pack_size_between_the_floor_and_the_ceiling() {
         assert_eq!(decoded_bytes_cap(0), MIN_TOTAL_DECODED);
         assert_eq!(decoded_bytes_cap(1 << 10), MIN_TOTAL_DECODED);
@@ -3785,6 +3973,23 @@ mod tests {
         assert!(decoded_bytes_cap(mid) < MAX_TOTAL_DECODED);
         assert_eq!(decoded_bytes_cap(64 << 20), MAX_TOTAL_DECODED);
         assert_eq!(decoded_bytes_cap(usize::MAX), MAX_TOTAL_DECODED);
+    }
+
+    #[test]
+    fn base_reads_count_toward_the_fetch_and_not_toward_the_pack_cap() {
+        // Without a fetch, a pack reads as many bases as it needs.
+        let budget = read_budget(300, None);
+        for _ in 0..3 {
+            assert!(budget.charge_base_read(1 << 30).is_ok());
+        }
+        // With a fetch, reads and results share what it has left.
+        let budget = read_budget(300, None).with_fetch_left(10 << 20);
+        assert!(budget.charge_base_read(6 << 20).is_ok());
+        assert!(budget.charge_decoded(3 << 20).is_ok());
+        assert!(budget.charge_base_read(2 << 20).is_err());
+        assert!(budget.charge_decoded(2 << 20).is_err());
+        assert!(budget.charge_base_read(1 << 20).is_ok());
+        assert_eq!(budget.decoded_so_far(), 10 << 20);
     }
 
     #[test]

@@ -106,14 +106,14 @@ pub enum Error {
     /// The merge is recorded without its conflict list: a write that stopped
     /// part way, or a state from an older version.
     #[error(
-        "the merge in progress has no conflict list (its state was not fully written); run `kit merge --abort` or `kit reset --hard` to drop it"
+        "the merge in progress has no conflict list (its state was not fully written); run `kit merge --abort` or `kit reset --hard -f` to drop it"
     )]
     MergeStateIncomplete,
     /// A cherry-pick or a revert is recorded without its conflict list: a
     /// write that stopped part way, or a state from an older version. The
     /// text names it.
     #[error(
-        "the {0} in progress has no conflict list (its state was not fully written); run `kit {0} --abort` or `kit reset --hard` to drop it"
+        "the {0} in progress has no conflict list (its state was not fully written); run `kit {0} --abort` or `kit reset --hard -f` to drop it"
     )]
     OperationStateIncomplete(&'static str),
     /// The key cannot sign.
@@ -194,7 +194,7 @@ impl Pending {
 /// a merge in progress, or when there is no commit to amend.
 pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pending, Error> {
     refuse_unfinished_pull(layout, store)?;
-    let merge = read_merge(layout)?;
+    let merge = read_merge(layout, store)?;
     if merge.is_some() && amend {
         return Err(Error::AmendDuringMerge);
     }
@@ -379,12 +379,17 @@ fn unreadable(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Er
     Error::ReadPullState(std::io::Error::other(reason))
 }
 
-fn read_merge(layout: &RepoLayout) -> Result<Option<MergeState>, Error> {
-    if conflict_state::is_merge_in_progress(layout) {
-        conflict_state::read_merge_state(layout).map_err(Error::ReadMergeState)
-    } else {
-        Ok(None)
+/// The merge in progress. A state that a stop left over a finished merge, when
+/// `HEAD` already is the merge commit, is no merge: a commit over it would
+/// write a sibling of that commit, and the branch would drop the first.
+fn read_merge(layout: &RepoLayout, store: &ObjectStore) -> Result<Option<MergeState>, Error> {
+    if !conflict_state::is_merge_in_progress(layout) {
+        return Ok(None);
     }
+    let state = conflict_state::read_merge_state(layout).map_err(Error::ReadMergeState)?;
+    Ok(state.filter(|s| {
+        conflict_state::result_commit(layout, store, &[s.orig_head, s.merge_head]).is_none()
+    }))
 }
 
 /// The commit that an amend replaces. Its parents and, with no message of the
@@ -546,7 +551,7 @@ pub fn create(
 
     // The state of [`begin`] could change before the lock. Any change to the
     // merge decides which parents the commit has, so any change is an abort.
-    if read_merge(layout)? != pending.merge {
+    if read_merge(layout, store)? != pending.merge {
         return Err(Error::MergeChanged);
     }
     // The parents and the message of an amend come from the commit that
@@ -659,20 +664,7 @@ pub fn create(
         &commit,
     )?;
 
-    // The merge is recorded, so the repository is no longer merging. This
-    // goes after the ref name is durable: a crash before it leaves the merge
-    // state over the new commit, never a commit that lost its second parent.
-    if pending.merge.is_some() {
-        conflict_state::clear_merge_state_in(layout, &mut group).map_err(Error::ClearMergeState)?;
-        group.finish().map_err(store_io)?;
-    } else if picking {
-        // A cherry-pick or a revert that the commit concludes is over, as in
-        // git. Left behind, a later `--abort` would move the branch back over
-        // this commit.
-        conflict_state::clear_operation_state_in(layout, &mut group)
-            .map_err(Error::ClearMergeState)?;
-        group.finish().map_err(store_io)?;
-    }
+    conclude_operation(layout, group, pending, picking)?;
 
     let branch = match refs::read_head(layout) {
         Ok(Head::Branch(b)) => Some(b),
@@ -690,6 +682,32 @@ pub fn create(
         branch,
         base_tree,
     })
+}
+
+/// The merge, cherry-pick or revert that the commit concludes is over. This
+/// goes after the ref name is durable: a crash before it leaves the state over
+/// the new commit, never a commit that lost its second parent.
+///
+/// A merge state that [`read_merge`] did not count, because `HEAD` already was
+/// its merge commit, goes with the commit that sits on it.
+fn conclude_operation(
+    layout: &RepoLayout,
+    mut group: Group,
+    pending: &Pending,
+    picking: bool,
+) -> Result<(), Error> {
+    if pending.merge.is_some() || conflict_state::is_merge_in_progress(layout) {
+        conflict_state::clear_merge_state_in(layout, &mut group).map_err(Error::ClearMergeState)?;
+    } else if picking {
+        // A cherry-pick or a revert that the commit concludes is over, as in
+        // git. Left behind, a later `--abort` would move the branch back over
+        // this commit.
+        conflict_state::clear_operation_state_in(layout, &mut group)
+            .map_err(Error::ClearMergeState)?;
+    } else {
+        return Ok(());
+    }
+    group.finish().map_err(store_io)
 }
 
 /// Whether a cherry-pick or a revert is in progress, after a check that the
