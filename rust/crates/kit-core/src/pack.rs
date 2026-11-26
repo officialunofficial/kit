@@ -197,7 +197,7 @@ impl FetchDecodeBudget {
     /// What each wire byte of a pack adds to the budget (see the limit's doc).
     pub const PER_WIRE_BYTE: u64 = FETCH_DECODED_PER_WIRE_BYTE;
 
-    /// The budget of a fetch that has applied no pack: [`FETCH_DECODED_FLOOR`].
+    /// The budget of a fetch that has applied no pack: 16 GiB, the most one pack decodes.
     #[must_use]
     pub const fn new() -> Self {
         Self::with_limit(FETCH_DECODED_FLOOR)
