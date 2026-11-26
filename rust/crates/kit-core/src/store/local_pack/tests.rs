@@ -973,6 +973,133 @@ fn a_lone_pack_that_fails_verification_is_not_given_an_index() {
     assert!(!pairs[0].index.exists());
 }
 
+fn flip_middle_byte(path: &std::path::Path) {
+    let mut bytes = fs::read(path).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 1;
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn one_damaged_pair_does_not_stop_repair_of_the_others() {
+    // Directory order is not fixed, so each pair takes a turn as the damaged one.
+    for damaged in 0..3 {
+        let (_dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3]]);
+        let indexes: Vec<_> = pairs
+            .iter()
+            .map(|pair| fs::read(&pair.index).unwrap())
+            .collect();
+        for (n, pair) in pairs.iter().enumerate() {
+            if n != damaged {
+                fs::write(&pair.index, b"damaged").unwrap();
+            }
+        }
+        flip_middle_byte(&pairs[damaged].pack);
+        let broken_pack = fs::read(&pairs[damaged].pack).unwrap();
+
+        let store = ObjectStore::open(&layout).unwrap();
+        let error = store.check_local_packs(true).unwrap_err();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&pairs[damaged].pack.display().to_string()),
+            "{error}"
+        );
+        for (n, pair) in pairs.iter().enumerate() {
+            if n != damaged {
+                assert_eq!(fs::read(&pair.index).unwrap(), indexes[n], "pair {n}");
+            }
+        }
+        assert_eq!(fs::read(&pairs[damaged].pack).unwrap(), broken_pack);
+        assert_eq!(fs::read(&pairs[damaged].index).unwrap(), indexes[damaged]);
+    }
+}
+
+#[test]
+fn a_busy_repair_lock_stays_a_busy_lock_with_several_pairs_to_repair() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3]]);
+    for pair in &pairs {
+        fs::write(&pair.index, b"damaged").unwrap();
+    }
+    let store = ObjectStore::open(&layout).unwrap();
+    let guard = store.prune_guard().unwrap();
+    let error = store.check_local_packs(true).unwrap_err();
+    assert!(
+        matches!(&error, StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "{error:?}"
+    );
+    for pair in &pairs {
+        assert_eq!(fs::read(&pair.index).unwrap(), b"damaged");
+    }
+    drop(guard);
+    assert_eq!(store.check_local_packs(true).unwrap(), 3);
+}
+
+#[test]
+fn a_damaged_live_pair_does_not_hide_a_damaged_lone_pack() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3]]);
+    fs::remove_file(&pairs[0].index).unwrap();
+    flip_middle_byte(&pairs[0].pack);
+    flip_middle_byte(&pairs[1].pack);
+    let healthy = fs::read(&pairs[2].index).unwrap();
+    fs::write(&pairs[2].index, b"damaged").unwrap();
+
+    let store = ObjectStore::open(&layout).unwrap();
+    let error = store.check_local_packs(true).unwrap_err();
+    let text = error.to_string();
+    assert!(
+        matches!(error, StoreError::LocalPackDamaged { .. }),
+        "{text}"
+    );
+    for damaged in &pairs[..2] {
+        assert!(text.contains(&damaged.pack.display().to_string()), "{text}");
+    }
+    assert!(!pairs[0].index.exists());
+    assert_eq!(fs::read(&pairs[2].index).unwrap(), healthy);
+
+    // Without repair, the damaged live pair still shows.
+    let error = store.check_local_packs(false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&pairs[1].pack.display().to_string()),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_flipped_payload_byte_names_the_local_pack() {
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"pack damage");
+    let mut w = writer(&store);
+    let id = w.write(&bytes).unwrap();
+    let (staged, _guard) = w.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    let mut file = fs::OpenOptions::new().write(true).open(&pair.pack).unwrap();
+    file.seek(SeekFrom::Start(12 + 5 + 10)).unwrap();
+    file.write_all(b"x").unwrap();
+
+    let named = pair.pack.display().to_string();
+    for error in [
+        store.read(&id).unwrap_err(),
+        store.read_object(&id).unwrap_err(),
+        store.read_unverified(&id).unwrap_err(),
+    ] {
+        match &error {
+            StoreError::HashMismatch { pack, .. } => {
+                assert_eq!(pack.as_deref(), Some(&pair.pack));
+            }
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+        assert!(error.to_string().contains(&named), "{error}");
+    }
+}
+
 #[test]
 fn a_reader_refreshes_a_rebuilt_index_with_the_same_key() {
     let (_dir, layout, store) = fresh();

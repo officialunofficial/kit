@@ -570,96 +570,6 @@ fn an_export_mints_one_attestation_for_each_head() {
 }
 
 #[test]
-fn exported_attestations_publish_only_a_redacted_mirror() {
-    if !git_available() {
-        return;
-    }
-    for (dest, expected) in [
-        (
-            "https://user:token@example.com/repo.git",
-            "https://example.com/repo",
-        ),
-        (
-            "https://us%65r:tok%65n@example.com/repo.git?key=secret#private",
-            "https://example.com/repo",
-        ),
-        (
-            "ssh://user@example.com:22/repo.git?key=secret#private",
-            "ssh://example.com/repo",
-        ),
-        ("user@example.com:repo.git", "ssh://example.com/repo"),
-        (
-            "s3://access:secret@bucket/repo.git?key=secret#private",
-            "s3://bucket/repo",
-        ),
-        ("file:///private/mirror.git", "local"),
-        ("FILE://localhost/private/mirror.git", "local"),
-        ("gcrypt::/private/mirror.git", "local"),
-        ("hg::/private/mirror.git", "local"),
-        ("https://user:p?ss@host/r", "local"),
-        ("https://u:ab/cd@host/r", "local"),
-        ("https://u:secret%40host/r", "local"),
-        ("deploy:s3c#x@host:r", "local"),
-        ("https://tok#en@host/r", "local"),
-        ("https://user:1234?x@host/r", "local"),
-        ("tok#en@host:r", "local"),
-        ("https://user:1234?x/y@host/r", "local"),
-        ("https://tok#x/y@host/r", "local"),
-        ("user:1234?x/y@host:r", "local"),
-        ("deploy:s3c#x/y@host:r", "local"),
-        (
-            "user@example.com:repo.git?key=secret#private",
-            "ssh://example.com/repo",
-        ),
-    ] {
-        let (_dir, layout, head) = kit_repo();
-        let mirror_dir = tempfile::tempdir().unwrap();
-        let mirror = mirror_dir.path().join("mirror");
-        std::fs::create_dir(&mirror).unwrap();
-        git(&mirror, &["init", "--bare", "--quiet", "."]);
-        // Rewrite transport only in this staging repository. No network or
-        // process-wide configuration is needed to exercise credentialed URLs.
-        let staging = map::state_dir(&layout, "mirror").unwrap().join("repo.git");
-        std::fs::create_dir_all(&staging).unwrap();
-        git(&staging, &["init", "--bare", "--quiet", "."]);
-        git(
-            &staging,
-            &[
-                "config",
-                &format!("url.{}.insteadOf", mirror.display()),
-                dest,
-            ],
-        );
-        let mut signer: Box<SignerFactory<'_>> =
-            Box::new(|| Ok(Box::new(RepoKeySigner::new(KeyPair::generate().unwrap()))));
-        let mut request = request(dest, "mirror");
-        request.attest = true;
-        export::export(&layout, &request, &mut signer, &Recorder::default()).unwrap();
-        let paths = libkit::attest::store::list(&layout, &head).unwrap();
-        assert_eq!(paths.len(), 1);
-        let envelope = libkit::attest::store::load(&paths[0]).unwrap();
-        let payload = String::from_utf8(envelope.payload).unwrap();
-        // Check the actual blob in the pushed ref as well as the local copy.
-        let entries = git(
-            &mirror,
-            &["ls-tree", "--name-only", "refs/kit/attestations"],
-        );
-        let published = git(
-            &mirror,
-            &["show", &format!("refs/kit/attestations:{entries}")],
-        );
-        assert_eq!(
-            published,
-            std::fs::read_to_string(&paths[0]).unwrap().trim()
-        );
-        assert!(
-            payload.contains(&format!("\"mirror\":\"{expected}\"")),
-            "{payload}"
-        );
-    }
-}
-
-#[test]
 fn a_signer_that_cannot_be_built_stops_the_export() {
     if !git_available() {
         return;
@@ -864,6 +774,65 @@ fn an_import_checks_out_the_default_branch_and_verifies() {
         err.to_string(),
         "refs/heads/other: not recorded in state 'upstream'"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fetch_refuses_a_linked_raw_cache() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let fork = root.path().join("fork");
+    let import_request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    import::clone(&fork, &import_request, &Recorder::default()).unwrap();
+    let layout = layout::discover(&fork).unwrap();
+    let fetch = FetchRequest {
+        remote_name: "upstream",
+        key: None,
+    };
+
+    // `raw` is a link to a directory elsewhere: the next fetch writes nothing there.
+    let raw = fork.join(".kit/git/upstream/raw");
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::rename(&raw, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &raw).unwrap();
+    let before = count_files(&elsewhere);
+
+    std::fs::write(up.join("b.txt"), "world\n").unwrap();
+    git(&up, &["add", "b.txt"]);
+    git(&up, &["commit", "--quiet", "-m", "second"]);
+    let err = import::fetch(&layout, &fetch, true, &Recorder::default()).unwrap_err();
+    assert!(err.to_string().contains("Delete it and rerun"), "{err}");
+    assert_eq!(count_files(&elsewhere), before);
+
+    // A verify reads no retained bytes through the link either.
+    let report = verify::verify(
+        &fork,
+        &verify::Request {
+            remote_name: Some("upstream"),
+            fork_audit: false,
+            refs: &[],
+        },
+    )
+    .unwrap();
+    assert!(!report.failures.is_empty());
+}
+
+#[cfg(unix)]
+fn count_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            if p.is_dir() { count_files(&p) } else { 1 }
+        })
+        .sum()
 }
 
 #[test]

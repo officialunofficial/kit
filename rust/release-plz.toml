@@ -108,6 +108,9 @@ release = false
 name = "kit-fuzz"
 release = false
 [[package]]
+name = "kit-rpc-codegen"
+release = false
+[[package]]
 name = "kit-sign-file"
 release = false
 [[package]]

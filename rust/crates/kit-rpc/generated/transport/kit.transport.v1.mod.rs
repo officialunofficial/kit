@@ -15,6 +15,7 @@ include!("kit.transport.v1.transport.rs");
 pub mod __buffa {
     #[allow(unused_imports)]
     use super::*;
+    #[cfg(feature = "transport-messages")]
     pub mod view {
         #[allow(unused_imports)]
         use super::*;
@@ -30,290 +31,454 @@ pub mod __buffa {
         use super::*;
         include!("kit.transport.v1.transport.__oneof.rs");
     }
+    #[cfg(feature = "json")]
     /// Register this package's `Any` type entries and extension entries.
+    #[allow(unused_variables)]
     pub fn register_types(reg: &mut ::buffa::type_registry::TypeRegistry) {
-        reg.register_json_any(super::__REF_ENTRY_JSON_ANY);
-        reg.register_json_any(super::__PACK_CHUNK_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__REF_ENTRY_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__PACK_CHUNK_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__LIST_REPOS_REQUEST_JSON_ANY);
-        reg.register_json_any(super::__REPO_ENTRY_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__REPO_ENTRY_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__LIST_REPOS_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__LIST_REFS_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__LIST_REFS_RESPONSE_JSON_ANY);
-        reg.register_json_any(super::__REF_REDACTION_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__REF_REDACTION_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__READ_REF_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__READ_REF_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPDATE_REF_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPDATE_REF_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ADVANCE_REFS_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ADVANCE_REFS_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_RECEIPT_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ADVANCE_RECEIPT_SELECTOR_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__LEASE_RECEIPT_SELECTOR_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_RECEIPT_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__PACK_EXISTS_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__PACK_EXISTS_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PACK_HEADER_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PACK_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PACK_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__DOWNLOAD_PACK_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__DOWNLOAD_PACK_HEADER_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__DOWNLOAD_PACK_LOCATION_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__DOWNLOAD_PACK_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_SERVER_INFO_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_SERVER_INFO_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__BEGIN_UPLOAD_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__BEGIN_UPLOAD_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ALREADY_PRESENT_JSON_ANY);
-        reg.register_json_any(super::__UPLOAD_TICKET_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__UPLOAD_TICKET_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PART_HEADER_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PART_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__UPLOAD_PART_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__COMPLETE_UPLOAD_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__COMPLETE_UPLOAD_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_GRANT_EPOCH_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_GRANT_EPOCH_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_GRANT_EPOCH_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_GRANT_EPOCH_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_REPO_VISIBILITY_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_REPO_VISIBILITY_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ISSUE_OBJECT_URL_REQUEST_JSON_ANY);
-        reg.register_json_any(super::__REF_PATH_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__REF_PATH_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ISSUE_OBJECT_URL_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__ADMISSION_CHALLENGE_JSON_ANY);
-        reg.register_json_any(super::__CHALLENGE_JSON_ANY);
+        #[cfg(feature = "json")] reg.register_json_any(super::__CHALLENGE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__MEMBERSHIP_NOT_VISIBLE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__REDACTION_NOTICE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_AUTHORITY_GENERATION_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_AUTHORITY_GENERATION_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__SET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY);
     }
 }
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefEntryView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefEntryOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackChunkView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackChunkOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListReposRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListReposRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RepoEntryView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RepoEntryOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListReposResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListReposResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ListRefsResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefRedactionView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefRedactionOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ReadRefResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UpdateRefResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceRefsRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceRefsRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceRefsResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceRefsResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetReceiptRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetReceiptRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceReceiptSelectorView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdvanceReceiptSelectorOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::LeaseReceiptSelectorView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::LeaseReceiptSelectorOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetReceiptResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetReceiptResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PackExistsResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackHeaderView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackHeaderOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPackResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackHeaderView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackHeaderOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackLocationView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackLocationOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetServerInfoRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetServerInfoRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetServerInfoResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetServerInfoResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::BeginUploadRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::BeginUploadRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::BeginUploadResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::BeginUploadResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AlreadyPresentView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AlreadyPresentOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadTicketView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadTicketOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartHeaderView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartHeaderOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::UploadPartResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::CompleteUploadResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetGrantEpochRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetGrantEpochRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetGrantEpochResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetGrantEpochResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetGrantEpochRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetGrantEpochRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetGrantEpochResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetGrantEpochResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetRepoVisibilityRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetRepoVisibilityRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetRepoVisibilityResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetRepoVisibilityResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::IssueObjectUrlRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::IssueObjectUrlRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefPathView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RefPathOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::IssueObjectUrlResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::IssueObjectUrlResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdmissionChallengeView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::AdmissionChallengeOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ChallengeView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ChallengeOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::MembershipNotVisibleView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::MembershipNotVisibleOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RedactionNoticeView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::RedactionNoticeOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetAuthorityGenerationRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetAuthorityGenerationRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetAuthorityGenerationResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetAuthorityGenerationResponseOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetAuthorityGenerationRequestView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetAuthorityGenerationRequestOwnedView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetAuthorityGenerationResponseView;
+#[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::SetAuthorityGenerationResponseOwnedView;
+#[cfg(feature = "json")]
 #[doc(inline)]
 pub use self::__buffa::register_types;
 #[cfg(feature = "transport")]

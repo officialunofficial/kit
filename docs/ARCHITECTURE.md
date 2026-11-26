@@ -112,7 +112,8 @@ Each Total is Source plus Tests plus Generated.
 Generated code is a documented exception to the rule against checked-in
 generated output. The code generator needs `protoc`, and many hosts ship a `protoc` too old
 for protobuf edition 2023. A normal build needs neither, because
-`rust/crates/kit-rpc/generated/` stays in the tree. The
+`rust/crates/kit-rpc/generated/` stays in the tree and compiles as ordinary
+source. The generators live in the `kit-rpc-codegen` tool crate. The
 README in that directory gives the reason.
 `scripts/check-generated-fresh.sh` regenerates the code and fails when the
 checked-in copy differs. Only `kit-rpc` holds generated code.

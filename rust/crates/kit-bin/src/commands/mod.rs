@@ -259,6 +259,25 @@ pub(crate) fn error(msg: &str, code: u8) -> u8 {
     code
 }
 
+/// The commit that a cherry-pick or a revert in progress already made, when a
+/// stop left its state over it: `HEAD` is that commit, the index holds its
+/// tree, and no file still has the conflict markers of the operation. A pick
+/// whose `HEAD` moved to another commit of the same parent has markers or a
+/// resolution that the commit does not hold, and stays live.
+pub(crate) fn finished_pick(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    orig_head: Hash,
+    records: &[kit_core::ops::conflict_state::ConflictRecord],
+) -> Option<Hash> {
+    let commit = kit_core::ops::conflict_state::staged_result_commit(layout, store, orig_head)?;
+    matches!(
+        libkit::conflict::first_unresolved_marker(layout.worktree_root(), records),
+        Ok(None)
+    )
+    .then_some(commit)
+}
+
 /// Load the tree hash of a commit object, surfacing a CLI error code.
 ///
 /// Shared by the `cherry-pick`/`revert`/`merge` replay+rollback paths,
@@ -582,17 +601,40 @@ pub(crate) fn locally_modified_dropped_path(
     Ok(None)
 }
 
-/// Delete a dropped tracked path from the worktree. A regular file or
-/// symlink is removed; a directory (untracked content that replaced the
-/// tracked file) is LEFT in place rather than recursively deleted, and a
-/// missing path is a no-op — so this never crashes on `IsADirectory` and
-/// never nukes untracked directories.
-pub(crate) fn remove_dropped_path(abs: &Path) -> std::io::Result<()> {
-    match fs::symlink_metadata(abs) {
+/// Delete a dropped tracked path (repo-relative `rel` under `root`) from the
+/// worktree. A regular file or symlink is removed; a directory (untracked
+/// content that replaced the tracked file) is LEFT in place rather than
+/// recursively deleted, and a missing path is a no-op — so this never
+/// crashes on `IsADirectory` and never nukes untracked directories. A path
+/// below a symlink or a non-directory is left alone and never followed.
+pub(crate) fn remove_dropped_path(root: &Path, rel: &str) -> std::io::Result<()> {
+    let Some(abs) = core_worktree::path_under_real_dirs(root, rel)? else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(&abs) {
         Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => fs::remove_file(abs),
+        Ok(_) => fs::remove_file(&abs),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// After deleting the tracked file at repo-relative `rel`, remove its parent
+/// directories bottom-up while they are empty, stopping at `root`.
+/// `fs::remove_dir` refuses non-empty directories, so a parent still holding
+/// untracked (or ignored) files is left untouched, and the walk stops at the
+/// first survivor. Errors are swallowed — a leftover empty directory is
+/// cosmetic, never data loss. A path below a symlink is never walked.
+pub(crate) fn prune_empty_parents(root: &Path, rel: &str) {
+    let Ok(Some(abs)) = core_worktree::path_under_real_dirs(root, rel) else {
+        return;
+    };
+    let mut dir = abs.parent();
+    while let Some(d) = dir {
+        if d == root || fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
     }
 }
 
@@ -840,5 +882,171 @@ mod tests {
             ]),
             Some("edited".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::{prune_empty_parents, remove_dropped_path};
+    use std::fs;
+
+    /// The Kelvin sign spelling of `.kit`, the same entry as `.kit` on a
+    /// filesystem that folds Unicode (APFS) and a different name elsewhere.
+    const KELVIN_KIT: &str = ".\u{212A}it";
+
+    fn root_with_repo_dir() -> tempfile::TempDir {
+        let td = tempfile::tempdir().unwrap();
+        fs::create_dir_all(td.path().join(".kit")).unwrap();
+        fs::write(td.path().join(".kit/HEAD"), b"head\n").unwrap();
+        td
+    }
+
+    #[test]
+    fn a_file_in_real_directories_is_removed() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("a/b")).unwrap();
+        fs::write(r.join("a/b/f"), b"f").unwrap();
+        remove_dropped_path(r, "a/b/f").unwrap();
+        assert!(!r.join("a/b/f").exists());
+        assert!(
+            r.join("a/b").is_dir(),
+            "removal alone keeps the directories"
+        );
+    }
+
+    #[test]
+    fn a_top_level_file_is_removed() {
+        let td = tempfile::tempdir().unwrap();
+        fs::write(td.path().join("f"), b"f").unwrap();
+        remove_dropped_path(td.path(), "f").unwrap();
+        assert!(!td.path().join("f").exists());
+    }
+
+    #[test]
+    fn a_symlink_at_the_path_is_removed_and_not_followed() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::write(r.join("real"), b"keep").unwrap();
+        std::os::unix::fs::symlink("real", r.join("link")).unwrap();
+        remove_dropped_path(r, "link").unwrap();
+        assert!(fs::symlink_metadata(r.join("link")).is_err());
+        assert!(r.join("real").exists());
+    }
+
+    #[test]
+    fn a_directory_at_the_path_is_left_alone() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("d")).unwrap();
+        fs::write(r.join("d/f"), b"f").unwrap();
+        remove_dropped_path(r, "d").unwrap();
+        assert!(r.join("d/f").exists());
+    }
+
+    #[test]
+    fn a_missing_path_or_ancestor_is_a_no_op() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("a")).unwrap();
+        remove_dropped_path(r, "a/missing").unwrap();
+        remove_dropped_path(r, "nodir/missing").unwrap();
+        remove_dropped_path(r, "missing").unwrap();
+    }
+
+    #[test]
+    fn nothing_below_a_symlinked_directory_is_removed() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("sub")).unwrap();
+        fs::write(r.join("sub/x"), b"keep").unwrap();
+        std::os::unix::fs::symlink("sub", r.join("d")).unwrap();
+        remove_dropped_path(r, "d/x").unwrap();
+        assert!(r.join("sub/x").exists());
+    }
+
+    #[test]
+    fn nothing_below_a_file_is_removed() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::write(r.join("f"), b"f").unwrap();
+        remove_dropped_path(r, "f/x").unwrap();
+        assert!(r.join("f").exists());
+    }
+
+    #[test]
+    fn a_non_ascii_name_that_is_not_the_repository_directory_is_removed() {
+        let td = root_with_repo_dir();
+        let r = td.path();
+        fs::write(r.join("caf\u{e9}"), b"x").unwrap();
+        remove_dropped_path(r, "caf\u{e9}").unwrap();
+        assert!(!r.join("caf\u{e9}").exists());
+        assert!(r.join(".kit/HEAD").exists());
+    }
+
+    #[test]
+    fn the_repository_directory_is_never_reached_under_another_spelling() {
+        let td = root_with_repo_dir();
+        let r = td.path();
+        remove_dropped_path(r, &format!("{KELVIN_KIT}/HEAD")).unwrap();
+        assert!(
+            r.join(".kit/HEAD").exists(),
+            "removed .kit/HEAD as {KELVIN_KIT:?}"
+        );
+        prune_empty_parents(r, &format!("{KELVIN_KIT}/refs/heads/x"));
+        assert!(r.join(".kit").is_dir());
+    }
+
+    #[test]
+    fn the_repository_directory_is_never_reached_under_another_spelling_below_the_root() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("n/.kit")).unwrap();
+        fs::write(r.join("n/.kit/HEAD"), b"head\n").unwrap();
+        remove_dropped_path(r, &format!("n/{KELVIN_KIT}/HEAD")).unwrap();
+        assert!(r.join("n/.kit/HEAD").exists());
+    }
+
+    #[test]
+    fn a_pointer_file_is_never_removed_under_another_spelling() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::write(r.join(".kit"), b"kitdir: elsewhere\n").unwrap();
+        remove_dropped_path(r, KELVIN_KIT).unwrap();
+        assert!(r.join(".kit").exists());
+    }
+
+    #[test]
+    fn empty_parents_are_pruned_up_to_the_root() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("a/b/c")).unwrap();
+        fs::create_dir_all(r.join("a/keep")).unwrap();
+        prune_empty_parents(r, "a/b/c/f");
+        assert!(!r.join("a/b").exists());
+        assert!(r.join("a/keep").is_dir(), "a non-empty parent stays");
+        prune_empty_parents(r, "a/keep/f");
+        assert!(!r.join("a").exists(), "an emptied parent chain goes");
+        assert!(r.is_dir(), "the root stays");
+    }
+
+    #[test]
+    fn a_non_empty_parent_is_not_pruned() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("a")).unwrap();
+        fs::write(r.join("a/untracked"), b"u").unwrap();
+        prune_empty_parents(r, "a/f");
+        assert!(r.join("a/untracked").exists());
+    }
+
+    #[test]
+    fn parents_below_a_symlinked_directory_are_not_pruned() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        fs::create_dir_all(r.join("sub/e")).unwrap();
+        std::os::unix::fs::symlink("sub", r.join("d")).unwrap();
+        prune_empty_parents(r, "d/e/f");
+        assert!(r.join("sub/e").is_dir());
     }
 }

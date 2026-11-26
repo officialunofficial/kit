@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement};
 use kit_core::layout::RepoLayout;
@@ -21,7 +21,7 @@ use kit_git_bridge::translate::translate_closure;
 use kit_git_bridge::{BridgeError, map, refname};
 
 use super::{
-    Class, Error, Event, SignerError, Skipped, git_in, git_version, lock_state, plain,
+    Class, Error, Event, SignerError, Skipped, git_in, git_version, lock_state, plain, staging,
     state::read_stamp, step, validate_url,
 };
 
@@ -145,6 +145,7 @@ pub fn export(
     }
 
     let staging = state.join("repo.git");
+    staging::check_location(&staging)?;
     if !staging.join("objects").is_dir() {
         if request.passthrough {
             return Err(plain(
@@ -155,12 +156,14 @@ pub fn export(
         // (Re)initializing staging invalidates the map cache: cached
         // sha1s would point at objects the fresh staging repo does not
         // have, wedging update-ref/push (§12.3: cache is disposable).
+        staging::check_creatable(&staging)?;
         let _ = std::fs::remove_file(state.join("map"));
         std::fs::create_dir_all(&staging)
             .map_err(|e| step(Class::CannotCreate, "create staging dir", e))?;
-        git_in(&staging, &["init", "--bare", "--quiet", "."])
+        git_in(&staging, &["init", "--bare", "--quiet", "--template=", "."])
             .map_err(|e| step(Class::CannotCreate, "init staging repo", e))?;
     }
+    staging::check_mirror(&staging)?;
     let mut known = map::load_map(&state).map_err(|e| step(Class::General, "load map cache", e))?;
     let prior_state =
         map::load_ref_state(&state).map_err(|e| step(Class::General, "load ref state", e))?;
@@ -717,7 +720,10 @@ fn ensure_dest(dest: &str) -> Result<String, Error> {
     }
     let path = PathBuf::from(dest);
     let needs_init = if path.exists() {
-        let is_repo = kit_git_bridge::gitsrc::git_command(&path)
+        let mut probe = Command::new("git");
+        probe.arg("-C").arg(&path);
+        kit_git_bridge::gitsrc::apply_hygiene(&mut probe);
+        let is_repo = probe
             .args(["rev-parse", "--git-dir"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
