@@ -3900,7 +3900,7 @@ mod tests {
             let c1 = commit_with_named_file(&s, b"big.txt", old, vec![], "v1");
             let c2 = commit_with_named_file(&s, b"big.txt", new, vec![c1], "v2");
             let bases = select_chunk_delta_bases(&s, c2, c1).unwrap();
-            assert_eq!(bases.get(&new).is_some(), paired, "{old_len} {new_len}");
+            assert_eq!(bases.contains_key(&new), paired, "{old_len} {new_len}");
         }
     }
 
