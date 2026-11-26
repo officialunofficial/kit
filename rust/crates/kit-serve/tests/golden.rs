@@ -29,6 +29,8 @@ const SESSION_2_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/ses
 const SESSION_3_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.in.bin");
 const SESSION_3_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-3.bin");
 const SESSION_4_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-4.in.bin");
+const SESSION_4_V010_IN: &[u8] =
+    include_bytes!("../../../tests/golden/ssh-serve/session-4-v0.10.in.bin");
 const SESSION_4_OUT: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-4.bin");
 
 fn encode(bodies: Vec<Option<Body>>) -> Vec<u8> {
@@ -224,7 +226,7 @@ fn session_2_matches_the_capture() {
     ];
     let mut bodies = vec![hello()];
     bodies.extend(prefixes.map(list_refs));
-    // Pages of two and of one, a token that names a ref, a listing with no
+    // Pages of two and of one, a token that names a ref, an explicit zero
     // page size and a token over the name limit.
     let heads = Some("refs/heads/");
     let long = "a".repeat(MAX_REF_NAME_BYTES + 1);
@@ -232,7 +234,7 @@ fn session_2_matches_the_capture() {
         list_refs_page(heads, Some(2), None),
         list_refs_page(heads, Some(2), Some("featx")),
         list_refs_page(heads, Some(1), Some("feat/x")),
-        list_refs_page(heads, None, None),
+        list_refs_page(heads, Some(0), None),
         list_refs_page(heads, Some(2), Some(&long)),
     ]);
     bodies.extend([download(Some(&big_id)), exists(&big_id), close()]);
@@ -330,11 +332,20 @@ fn session_4_matches_the_capture() {
         "the builder must produce the captured script"
     );
 
+    assert_cursor_session_matches_capture(&input);
+}
+
+#[test]
+fn a_0_10_session_gets_the_captured_reply() {
+    assert_cursor_session_matches_capture(SESSION_4_V010_IN);
+}
+
+fn assert_cursor_session_matches_capture(input: &[u8]) {
     let fx = Fixture::new();
     fx.seed(&[("refs/heads/main", [0x11; 32])], &[]);
     let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
     stamp_dirs(&fx.root().join("refs"), ahead);
-    assert_same(&replay(&fx, None, &input), SESSION_4_OUT);
+    assert_same(&replay(&fx, None, input), SESSION_4_OUT);
 }
 
 #[test]
