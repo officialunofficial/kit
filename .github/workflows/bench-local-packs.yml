@@ -1,7 +1,8 @@
 name: "Bench: local pack segments"
 
 # Prototype benchmark: add and clone with loose objects against local pack
-# segments, on Linux and macOS runners.
+# segments, on Linux and macOS runners. Since 0.10 the main build packs too,
+# so the "main" column is main's own local packs, not loose objects.
 
 on:
   push:
