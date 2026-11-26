@@ -134,8 +134,8 @@ message ListRefs {
   // Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
   // capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
   string prefix = 1;
-  // The most refs the reply may hold. The server caps it, and an absent or
-  // zero value is refused. Same field numbers as the Connect ListRefsRequest.
+  // The most refs a page may hold. Omit it for an unpaged listing. The
+  // server caps it and refuses zero. Same field number as Connect ListRefsRequest.
   uint32 page_size = 2;
   // The `next_page_token` of the previous page; empty starts the listing.
   string page_token = 3;

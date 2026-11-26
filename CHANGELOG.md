@@ -11,8 +11,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
-- SSH clients now page ref listings. A 0.11 client can still list branches
-  from a 0.10 server within the original one-frame limit.
+- Only SSH clients switch to paged ref listings. A 0.10 client still works
+  with `kit serve` 0.11 because an unpaged request gets the whole listing
+  in one frame, up to the original size limit. A 0.11 client can still list
+  branches from a 0.10 server within that limit.
   `ListRefs` and `ListRefsView` gain `page_size` and `page_token`. Their
   responses and response views gain `next_page_token`. `RefListing::OneFrame`,
   `MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are gone, and the
@@ -63,8 +65,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `kit-rpc` no longer turns on proto3 JSON through `transport` and `transport-messages`: the serde impls on the transport messages and the ConnectRPC JSON codec are behind the new opt-in `json` feature, so an embedder that does not use JSON compiles none of it. Kit's own client and server speak binary protobuf and are unchanged on the wire. A crate that relied on the implicit JSON enables `kit-rpc/json`, and so does any build that has `connectrpc/json` on, including through connectrpc's default features.
 - `kit-rpc` compiles its checked-in generated code as ordinary source: it has no build script and no build dependencies, so no crate that depends on it builds `buffa-build`, `buffa-codegen`, `buffa-descriptor`, `connectrpc-build`, `connectrpc-codegen`, `prettyplease` or `anyhow` for it. The generators moved to the unpublished `kit-rpc-codegen` crate, which `scripts/regen-rpc-proto.sh` and `scripts/regen-transport-proto.sh` run.
 - `kit checkout` in a repository with no `.kit/index` file, as `kit clone --no-checkout` leaves it, is the first checkout, as in git: nothing is tracked yet, so no file counts as a local change and no tracked path is removed. A file the checkout would write over still refuses it.
-- **Breaking:** the ssh `ListRefs` request and reply page, as Connect's do (SPEC-TRANSPORT §4.2.3): `kit serve` returns at most 1,000 refs a page, and `kit+ssh` remotes read every page. A new `kit serve` refuses a `ListRefs` with no `page_size`, so a client from before this change cannot list refs on it and has to be upgraded; a new client against an old `kit serve` works as before, up to the old limit of one frame.
-- `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed: no remote lists in one frame any more, so a tag push no longer refuses a create over a listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
+- SSH clients now read ref listings a page at a time when the server supports paging. Kit 0.10 clients still get the whole listing in one frame up to the original size limit.
+- `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed. A tag push no longer refuses a create over a single-frame listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
 - `kit commit` of a plain commit no longer reads every tree of the new commit to rebuild the index it already holds, and no longer writes it again; a commit with a staged removal, a merge or an amend still rebuilds it.
 - `kit add` of files that are unchanged, and `kit add -A` or `-u` on a clean tree, no longer rewrite the index.
 - The applied-packs, verified-tip, checkpoint and cursor records are written with a temporary file and a rename and no device flush, since they only save work; a push saves 2 flushes and a fetch 4. The remote-tracking ref stays durable.
@@ -119,6 +121,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` now treat an operation result tree that the store cannot read as absent, instead of failing with `check operation changes`.
 - `kit reset` in every mode but `--soft` now ends a merge, cherry-pick or revert in progress, and drops the record of a pull that stopped before its restore, so a later commit of the pre-pull version of a pulled file is no longer refused.
 - `kit merge`, `kit cherry-pick` and `kit revert` record a paused operation before they write its conflict markers, and its conflict list after, so a crash between the two leaves an operation that `--abort` can undo and that `--continue` refuses, and never markers with no operation behind them. `kit_core::ops::conflict_state` gains `begin_merge_state`, `begin_cherry_pick_state` and `begin_revert_state`.
+- A new conflicting merge, cherry-pick or revert clears any conflict list left by an earlier operation so a partial write cannot be continued with stale state.
 - `kit commit` during a cherry-pick or a revert now refuses while a conflict has markers or is not staged, and when the operation's conflict list is missing, as it does for a merge, and ends the operation when it commits, so a later `--abort` cannot move the branch back over the commit. `libkit::commit::Error` gains `OperationStateIncomplete`.
 - `kit merge --abort` keeps a file that the merge added and the user then edited and stopped tracking with `kit rm --cached`, as git does.
 - `kit merge --abort` when a crash left the merge state over a finished merge commit now clears the state and leaves the branch on the merge commit, where it moved the branch back and left the commit for `gc` to delete.

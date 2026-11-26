@@ -1208,8 +1208,8 @@ pub struct ListRefs {
     ///
     /// Field 1: `prefix`
     pub prefix: ::core::option::Option<::buffa::alloc::string::String>,
-    /// The most refs the reply may hold. The server caps it, and an absent or
-    /// zero value is refused. Same field numbers as the Connect ListRefsRequest.
+    /// The most refs a page may hold. Omit it for an unpaged listing. The
+    /// server caps it and refuses zero. Same field number as Connect ListRefsRequest.
     ///
     /// Field 2: `page_size`
     pub page_size: ::core::option::Option<u32>,
