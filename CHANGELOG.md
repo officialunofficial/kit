@@ -7,6 +7,46 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-26
+
+### Breaking
+
+- SSH ref listings now require paging. Upgrade SSH clients before the server.
+  `ListRefs` and `ListRefsView` gain `page_size` and `page_token`; their
+  responses and response views gain `next_page_token`. `RefListing::OneFrame`,
+  `MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are gone, and the
+  numeric discriminant of `RefListing::Eventual` changes from 2 to 1.
+- Enable `kit-rpc/json` for proto3 JSON or when another dependency enables
+  `connectrpc/json`. Enabling `transport` or `transport-messages` alone now
+  gives you the binary protobuf API.
+- `kit_core::durable` replaces the internal `atomic` and `flush` helpers.
+  Fault-injection matches on `SyncStep` must handle `Writeout` and `Flush`.
+- `SyncOptions` literals need the new `checkout` field. It defaults to true.
+  `kit clone --no-checkout` leaves no index, and the first checkout in
+  a repository without an index treats existing files as untracked.
+- `StoreError::HashMismatch` now includes `pack`. New error variants cover
+  oversized trees, non-commit branch tips, transient HTTP status responses,
+  overlapping remote names, config lock failures, and interrupted operations.
+  Update exhaustive matches and callers that branch on these errors.
+- Linked worktrees need a registered state directory and matching backpointer.
+  Run `kit worktree repair <path>` after moving a worktree by hand. Discovery can
+  return `NotRegistered` or `BackpointerMismatch`.
+- Git bridge commands reject unsafe state files and staging mirrors with
+  unexpected files or config. Remove a rejected staging mirror and rerun the
+  command to rebuild it.
+- Tree expansion and fetch decoding have aggregate limits. Raise
+  `WindowReader`'s `max_decoded_bytes` to cover a whole pack. Diffs show blobs
+  over a million lines as binary, and merging them can report a conflict.
+- Fetch refuses a non-commit branch tip and a file remote refuses special
+  files. Pull returns `UpToDate` when the local branch is ahead. An interrupted
+  pull can block commit until the restore finishes.
+- A non-soft reset clears interrupted pull, merge, cherry-pick and revert
+  state. Commit checks unfinished operations, and abort or continue preserves
+  a commit the operation already made.
+- On case-insensitive filesystems, ref lock names change for upper-case refs.
+  Use one version of kit when writing to the same repository. Worktree
+  removals and writes also check every parent directory.
+
 ### Added
 
 - `kit clone --no-checkout` (`-n`) fetches, sets the branch and HEAD, and writes no worktree file and no index; `kit checkout <branch>` fills the worktree later. `kit_sync::SyncOptions` gains `checkout`, set with `with_checkout`.
@@ -52,7 +92,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Long `kit status`, `kit clean`, the commit summary, the conflict lines of `merge`, `cherry-pick`, `rebase` and the conflict notes, and the `cherry-pick` and `revert` unresolved-marker errors now quote a file name that holds a control character or a non-ASCII byte, as `kit status -s` and git do. The restore and pull refusals and the `merge --continue` and `rebase --continue` marker errors write a control character in a file name as `\u{..}`. A name cannot write an escape sequence to the terminal. `kit_sync::SourceError` now escapes control characters in the text that came from a remote (`RemoteError`, `InvalidRef`, and the message of `Remote`) and cuts that text to 256 bytes, as `TransportError` does.
 - `kit remote add` and `kit remote rename` refuse a name that is a path prefix of another remote's name (`team` and `team/upstream`), or the reverse, because the two would share a directory of tracking refs, and a fetch or prune of one changed the other's. `libkit::remote::Error` gains `OverlappingName`.
 - `kit verify-attest` no longer panics on a key id whose 16th byte is inside a multi-byte character.
-- `SECURITY.md` lists 0.10.x as the supported version.
+- `SECURITY.md` lists 0.11.x as the supported version.
 - `kit fetch`, `pull` and `clone` now check that the tip of each remote branch is a commit or a remix before they write its tracking ref. A branch that points at a tree, a blob or another object fails the fetch with `remote branch '<name>' points at a <type>, not a commit`, and no tracking ref is written for it. `kit_sync::SyncError` and `libkit::transfer::Error` gain a `BranchTipNotCommit { branch, found }` variant.
 - A file remote no longer blocks `kit clone`, `fetch`, `pull` or `push` when a pack, a packmap or a ref file in it is a named pipe, a device or a socket. kit opens these files without blocking and refuses one that is not a regular file before it reads, with `ref file is not a regular file`; a directory of other refs still reads as no ref.
 - The repair after a missing object now flushes the fetch-records directories after removing the verified-tip and applied-packs records, so a power loss cannot bring them back and undo the repair.
