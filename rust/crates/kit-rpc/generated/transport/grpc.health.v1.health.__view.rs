@@ -98,6 +98,7 @@ impl<'a> ::buffa::ViewEncode<'a> for HealthCheckRequestView<'a> {
         self.__buffa_unknown_fields.write_to(buf);
     }
 }
+#[cfg(feature = "json")]
 /// Serializes this view as protobuf JSON.
 ///
 /// Implicit-presence fields with default values are omitted, `required`
@@ -242,6 +243,7 @@ impl ::buffa::HasMessageView for super::super::HealthCheckRequest {
     type View<'a> = HealthCheckRequestView<'a>;
     type ViewHandle = HealthCheckRequestOwnedView;
 }
+#[cfg(feature = "json")]
 impl ::serde::Serialize for HealthCheckRequestOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,
@@ -361,6 +363,7 @@ impl<'a> ::buffa::ViewEncode<'a> for HealthCheckResponseView<'a> {
         self.__buffa_unknown_fields.write_to(buf);
     }
 }
+#[cfg(feature = "json")]
 /// Serializes this view as protobuf JSON.
 ///
 /// Implicit-presence fields with default values are omitted, `required`
@@ -507,6 +510,7 @@ impl ::buffa::HasMessageView for super::super::HealthCheckResponse {
     type View<'a> = HealthCheckResponseView<'a>;
     type ViewHandle = HealthCheckResponseOwnedView;
 }
+#[cfg(feature = "json")]
 impl ::serde::Serialize for HealthCheckResponseOwnedView {
     fn serialize<__S: ::serde::Serializer>(
         &self,

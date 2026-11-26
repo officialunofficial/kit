@@ -26,6 +26,7 @@
 pub mod export;
 pub mod import;
 pub mod patch;
+mod staging;
 pub mod state;
 pub mod verify;
 

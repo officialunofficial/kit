@@ -85,7 +85,45 @@ impl Direction {
     }
 }
 
+/// Refuse a state file that is a link or anything but a plain file. State
+/// files sit in a directory the repository controls, so a link there would
+/// send a read or a write to another file. A file that does not exist is
+/// fine.
+///
+/// # Errors
+/// [`BridgeError::Source`] when `path` is a link or not a plain file.
+pub fn check_plain(path: &Path) -> Result<(), BridgeError> {
+    check_kind(path, std::fs::Metadata::is_file, "a plain file")
+}
+
+/// Refuse a state directory that is a link or anything but a plain
+/// directory. A directory that does not exist is fine.
+///
+/// # Errors
+/// [`BridgeError::Source`] when `path` is a link or not a plain directory.
+pub fn check_plain_dir(path: &Path) -> Result<(), BridgeError> {
+    check_kind(path, std::fs::Metadata::is_dir, "a plain directory")
+}
+
+fn check_kind(
+    path: &Path,
+    ok: fn(&std::fs::Metadata) -> bool,
+    what: &str,
+) -> Result<(), BridgeError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if ok(&m) => Ok(()),
+        Ok(_) => Err(BridgeError::Source(format!(
+            "refusing the bridge state entry {}: it is a link or not {what}. \
+             Delete it and rerun",
+            path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn read_stamp(dir: &Path, name: &str) -> Result<Option<String>, BridgeError> {
+    check_plain(&dir.join(name))?;
     match kit_core::bounded_read::read_capped_string(&dir.join(name), STAMP_MAX_BYTES) {
         Ok(v) => Ok(Some(v.trim().to_owned())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -99,6 +137,8 @@ fn write_stamp(dir: &Path, name: &str, value: &str) -> Result<(), BridgeError> {
     // (direction, signer, source, …) — a torn or vanished stamp after
     // power loss either wedges the state dir or silently unbinds it.
     let tmp = dir.join(format!(".{name}.tmp"));
+    check_plain(&tmp)?;
+    check_plain(&dir.join(name))?;
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(format!("{value}\n").as_bytes())?;
@@ -224,6 +264,7 @@ pub fn bind_import_spec(dir: &Path, version: u32) -> Result<(), BridgeError> {
 /// rebuild rather than trust the surviving lines alone (§12.3).
 pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
     let path = dir.join(MAP_FILE);
+    check_plain(&path)?;
     let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -255,6 +296,7 @@ pub fn map_is_intact(dir: &Path) -> Result<bool, BridgeError> {
 /// sha1 and force a pointless re-translation every fetch.
 pub fn load_map_inverse(dir: &Path) -> Result<HashMap<Sha1Id, Hash>, BridgeError> {
     let path = dir.join(MAP_FILE);
+    check_plain(&path)?;
     let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -284,6 +326,7 @@ pub fn append_map_import(dir: &Path, pairs: &[(Sha1Id, Hash)]) -> Result<(), Bri
 /// not parse (torn tail from a crash) are ignored.
 pub fn load_map(dir: &Path) -> Result<HashMap<Hash, Sha1Id>, BridgeError> {
     let path = dir.join(MAP_FILE);
+    check_plain(&path)?;
     // §12.3: corruption (including undecodable bytes) means "rebuild",
     // never an error — lossy decoding turns garbage into skipped lines.
     let data = match kit_core::bounded_read::read_capped(&path, MAP_MAX_BYTES) {
@@ -312,6 +355,7 @@ pub fn append_map(dir: &Path, pairs: &[(Hash, Sha1Id)]) -> Result<(), BridgeErro
         return Ok(());
     }
     std::fs::create_dir_all(dir)?;
+    check_plain(&dir.join(MAP_FILE))?;
     let mut out = String::new();
     for (h, id) in pairs {
         out.push_str(&to_hex(h));
@@ -356,6 +400,7 @@ pub fn load_import_ref_state(dir: &Path) -> Result<Vec<RefState>, BridgeError> {
 
 fn load_ref_state_file(dir: &Path, file: &str) -> Result<Vec<RefState>, BridgeError> {
     let path = dir.join(file);
+    check_plain(&path)?;
     let data = match kit_core::bounded_read::read_capped(&path, REFS_MAX_BYTES) {
         Ok(d) => String::from_utf8_lossy(&d).into_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -404,6 +449,8 @@ fn store_ref_state_file(dir: &Path, file: &str, states: &[RefState]) -> Result<(
     // not race each other onto one temp path (fetch + export can run
     // concurrently against a fork state dir).
     let tmp = dir.join(format!(".{file}.tmp"));
+    check_plain(&tmp)?;
+    check_plain(&dir.join(file))?;
     {
         use std::io::Write as _;
         let mut f = std::fs::File::create(&tmp)?;
@@ -473,6 +520,90 @@ mod tests {
         }];
         store_ref_state(dir.path(), &states).unwrap();
         assert_eq!(load_ref_state(dir.path()).unwrap(), states);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_state_files_are_refused() {
+        use std::os::unix::fs::symlink;
+        let pairs = vec![([1u8; 32], [2u8; 20])];
+        let states = vec![RefState {
+            ref_name: "refs/heads/main".into(),
+            kit_hash: [7; 32],
+            git_id: [9; 20],
+        }];
+        let refused = |e: BridgeError| {
+            let why = e.to_string();
+            assert!(why.contains("Delete it and rerun"), "{why}");
+        };
+        for name in [
+            MAP_FILE,
+            REFS_FILE,
+            ".refs.tmp",
+            "direction",
+            ".direction.tmp",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let target = other.path().join("target");
+            std::fs::write(&target, "keep\n").unwrap();
+            symlink(&target, dir.path().join(name)).unwrap();
+            match name {
+                MAP_FILE => {
+                    refused(append_map(dir.path(), &pairs).unwrap_err());
+                    refused(load_map(dir.path()).unwrap_err());
+                    refused(load_map_inverse(dir.path()).unwrap_err());
+                    refused(map_is_intact(dir.path()).unwrap_err());
+                }
+                REFS_FILE | ".refs.tmp" => {
+                    refused(store_ref_state(dir.path(), &states).unwrap_err());
+                    if name == REFS_FILE {
+                        refused(load_ref_state(dir.path()).unwrap_err());
+                    }
+                }
+                _ => {
+                    refused(bind_direction(dir.path(), Direction::Import).unwrap_err());
+                }
+            }
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "keep\n",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_state_files_still_work() {
+        let dir = tempfile::tempdir().unwrap();
+        bind_direction(dir.path(), Direction::Import).unwrap();
+        assert_eq!(read_direction(dir.path()).unwrap(), Some(Direction::Import));
+        append_map(dir.path(), &[([1u8; 32], [2u8; 20])]).unwrap();
+        assert!(map_is_intact(dir.path()).unwrap());
+        store_ref_state(dir.path(), &[]).unwrap();
+        store_ref_state(dir.path(), &[]).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_checks_refuse_links_and_wrong_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        let sub = dir.path().join("d");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        assert!(check_plain(&file).is_ok());
+        assert!(check_plain_dir(&sub).is_ok());
+        assert!(check_plain(&dir.path().join("missing")).is_ok());
+        assert!(check_plain_dir(&dir.path().join("missing")).is_ok());
+        assert!(check_plain(&sub).is_err());
+        assert!(check_plain_dir(&file).is_err());
+        let link = dir.path().join("l");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(check_plain(&link).is_err());
+        let dlink = dir.path().join("dl");
+        std::os::unix::fs::symlink(&sub, &dlink).unwrap();
+        assert!(check_plain_dir(&dlink).is_err());
     }
 
     #[test]

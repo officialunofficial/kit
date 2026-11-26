@@ -205,12 +205,19 @@ fn symlink_blob_hash(target: &str) -> Option<kit_core::hash::Hash> {
 }
 
 /// Delete every worktree file named by the matched index entries, then
-/// prune directories left empty by those deletions.
+/// prune directories left empty by those deletions. A file below a symlink
+/// is not touched.
 fn remove_worktree_paths(root: &Path, idx: &Index, matches: &[usize]) -> Result<(), String> {
     let mut dirs_to_prune: Vec<PathBuf> = Vec::new();
     for &i in matches {
         let rel = &idx.entries[i].path;
-        let abs = root.join(rel);
+        // A path below a symlink or a non-directory is left alone: it would
+        // resolve through the link to a file outside this path.
+        let Some(abs) = kit_core::worktree::path_under_real_dirs(root, rel)
+            .map_err(|e| format!("remove {}: {e}", root.join(rel).display()))?
+        else {
+            continue;
+        };
         match std::fs::symlink_metadata(&abs) {
             Ok(_) => {
                 std::fs::remove_file(&abs).map_err(|e| format!("remove {}: {e}", abs.display()))?;

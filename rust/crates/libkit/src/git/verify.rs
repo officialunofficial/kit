@@ -24,6 +24,7 @@ use kit_git_bridge::{
     gitparse, import as bridge_import, map, reconstruct, verify as bridge_verify,
 };
 
+use super::staging;
 use super::state::{read_stamp, resolve};
 use super::{Class, Error, open_repo, plain, step};
 
@@ -456,6 +457,7 @@ pub fn verify(cwd: &Path, request: &Request<'_>) -> Result<Report, Error> {
         ));
     }
 
+    staging::check_mirror(&staging)?;
     let targets = audit_targets(request, &state, &name)?;
 
     let mut audit = Audit {
@@ -576,6 +578,11 @@ fn read_retained(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let limit = kit_git_bridge::gitsrc::MAX_OBJECT_BYTES + 64;
     let mut bytes = Vec::new();
+    // `raw/` and `raw/xx` must be plain directories, and the file a plain file.
+    for dir in path.ancestors().skip(1).take(2) {
+        kit_git_bridge::map::check_plain_dir(dir).map_err(std::io::Error::other)?;
+    }
+    kit_git_bridge::map::check_plain(path).map_err(std::io::Error::other)?;
     std::fs::File::open(path)?
         .take(limit + 1)
         .read_to_end(&mut bytes)?;
@@ -585,4 +592,32 @@ fn read_retained(path: &Path) -> std::io::Result<Vec<u8>> {
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+mod retained_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn retained_bytes_are_read_through_plain_entries_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = tmp.path().join("raw");
+        std::fs::create_dir_all(raw.join("ab")).unwrap();
+        std::fs::write(raw.join("ab/cd"), b"bytes").unwrap();
+        assert_eq!(read_retained(&raw.join("ab/cd")).unwrap(), b"bytes");
+        assert_eq!(
+            read_retained(&raw.join("ab/missing")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        // A linked file, a linked `raw/xx` and a linked `raw` are each refused.
+        symlink(raw.join("ab/cd"), raw.join("ab/link")).unwrap();
+        assert!(read_retained(&raw.join("ab/link")).is_err());
+        symlink(raw.join("ab"), raw.join("xy")).unwrap();
+        assert!(read_retained(&raw.join("xy/cd")).is_err());
+        let linked_raw = tmp.path().join("linked-raw");
+        symlink(&raw, &linked_raw).unwrap();
+        assert!(read_retained(&linked_raw.join("ab/cd")).is_err());
+    }
 }

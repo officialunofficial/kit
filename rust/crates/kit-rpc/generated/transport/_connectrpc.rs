@@ -9,7 +9,7 @@ pub mod grpc {
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
         pub mod v1 {
             use super::*;
-            include!(concat!(env!("OUT_DIR"), "/grpc.health.v1.mod.rs"));
+            include!("grpc.health.v1.mod.rs");
         }
     }
 }
@@ -22,7 +22,7 @@ pub mod kit {
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception, impl_trait_redundant_captures)]
         pub mod v1 {
             use super::*;
-            include!(concat!(env!("OUT_DIR"), "/kit.transport.v1.mod.rs"));
+            include!("kit.transport.v1.mod.rs");
         }
     }
 }

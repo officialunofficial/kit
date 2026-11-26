@@ -24,6 +24,7 @@ use kit_core::hash::{Hash, to_hex};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{KitError, Object, ObjectType};
 use kit_core::ops::{Known, Presence};
+use kit_core::pack::FetchDecodeBudget;
 use kit_core::refs::{self, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
 use kit_core::store::{ClosureSource, ObjectStore, PruneGuard, StoreError};
 
@@ -534,6 +535,8 @@ pub(crate) struct TagPhase<'a> {
     pub(crate) guard: &'a PruneGuard,
     pub(crate) applied: &'a mut AppliedPacks,
     pub(crate) verified: &'a mut VerifiedHistory,
+    /// What the fetch's packs may still decode, branch chains included.
+    pub(crate) decoded: &'a mut FetchDecodeBudget,
     pub(crate) stop: StopSet,
     pub(crate) report: &'a mut FetchReport,
     /// The tags this phase published, with their values.
@@ -888,6 +891,7 @@ impl TagPhase<'_> {
             self.require_signed,
             &mut done,
             self.guard,
+            self.decoded,
             |view| {
                 prover.refresh_missing(|id| view.contains(id));
                 proof = Some(prover.prove(

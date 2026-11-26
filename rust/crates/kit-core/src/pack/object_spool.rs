@@ -537,6 +537,7 @@ impl ObjectSpool {
             return Err(StoreError::HashMismatch {
                 expected: to_hex(id),
                 actual: to_hex(&actual),
+                pack: None,
             }
             .into());
         }
