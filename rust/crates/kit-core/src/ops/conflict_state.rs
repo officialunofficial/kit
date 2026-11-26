@@ -272,6 +272,8 @@ fn write_operation_state(
         write_state_file(message.0, message.1)?;
         if let Some(conflicts) = conflicts {
             write_state_file(&layout.conflicts_file(), &serialize_conflicts(conflicts))?;
+        } else {
+            remove_if_present(&layout.conflicts_file())?;
         }
         write_hex_file(dir, head_name, head)
     })();
@@ -622,9 +624,9 @@ pub fn clear_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<()> {
 }
 
 /// Refuse to go on with a merge, cherry-pick or revert whose conflict list is
-/// missing. The writers always write the list, empty for a clean operation, and
-/// they write it before the head marker. So a marker without a list is a torn
-/// state, and finishing it would take every conflict as resolved.
+/// missing. A conflicting operation writes the list after its conflict
+/// material. A marker without a list means the operation did not finish
+/// writing its state. Continuing would take every conflict as resolved.
 ///
 /// # Errors
 /// [`ConflictStateError::Io`] with kind `NotFound` when the list is missing.
@@ -769,6 +771,24 @@ mod tests {
         store
             .write(&crate::serialize::serialize(&commit).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn an_interrupted_revert_cannot_use_an_older_conflict_list() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        write_conflicts(layout.worktree_state_dir(), &[]).unwrap();
+        let state = RevertState {
+            revert_head: h("revert"),
+            orig_head: h("head"),
+            message: b"Revert".to_vec(),
+        };
+
+        begin_revert_state(&layout, &state).unwrap();
+        assert_eq!(read_revert_state(&layout).unwrap(), Some(state));
+        assert!(ensure_conflict_list(&layout).is_err());
+        write_conflicts(layout.worktree_state_dir(), &[]).unwrap();
+        assert!(ensure_conflict_list(&layout).is_ok());
     }
 
     #[test]

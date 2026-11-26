@@ -711,7 +711,7 @@ fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_m
 }
 
 #[test]
-fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
+fn a_stale_conflict_list_cannot_commit_an_interrupted_merge() {
     let mut f = Fixture::new();
     f.stage("a.txt", "one\n");
     f.commit("first");
@@ -728,8 +728,8 @@ fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
         ours_hash: None,
         theirs_hash: None,
     }];
-    conflict_state::write_merge_state(&f.layout, &state, &conflicts).unwrap();
-    fs::remove_file(f.layout.conflicts_file()).unwrap();
+    conflict_state::write_conflicts(f.layout.worktree_state_dir(), &conflicts).unwrap();
+    conflict_state::begin_merge_state(&f.layout, &state).unwrap();
     f.stage("b.txt", "merged\n");
     let before = f.head();
 

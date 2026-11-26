@@ -594,16 +594,34 @@ fn a_paused_merge_is_recorded_before_its_markers_and_its_list_comes_last() {
 }
 
 #[test]
-fn a_merge_without_its_list_is_not_continued() {
+fn a_stale_conflict_list_cannot_continue_an_interrupted_merge() {
+    struct StopAfterMarkers;
+    impl Observer<conflict::Event> for StopAfterMarkers {
+        fn event(&self, _event: &conflict::Event) {
+            std::panic::panic_any(StopAfterMarkers);
+        }
+    }
+
     let f = init();
-    diverged(&f);
-    start(&f, &merge_request("topic")).unwrap();
-    // The stop came after the merge was recorded and before its list was.
-    std::fs::remove_file(f.layout.conflicts_file()).unwrap();
+    let (ours, _) = diverged(&f);
+    conflict_state::write_conflicts(f.layout.worktree_state_dir(), &[]).unwrap();
+
+    let stop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        merge::start(
+            &f.layout,
+            &f.store,
+            &merge_request("topic"),
+            &TestSigning,
+            &StopAfterMarkers,
+        )
+    }));
+    assert!(stop.unwrap_err().is::<StopAfterMarkers>());
+    assert!(f.read("a.txt").starts_with("<<<<<<< ours\n"));
 
     let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
     assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
     assert!(is_merge_in_progress(&f.layout));
+    assert_eq!(refs::read_ref(&f.layout, "main").unwrap(), Some(ours));
 }
 
 #[test]
