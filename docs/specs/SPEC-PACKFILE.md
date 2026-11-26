@@ -372,14 +372,18 @@ repository-scoped verified-membership requirements of the server to
 external bases; naming another pack in the same operation does not establish
 that membership.
 
-**Delta-depth counting.** An entry reconstructed directly from `raw` or
+**Delta-depth counting.** A verifier that enforces a delta-depth cap counts
+depth as follows. An entry reconstructed directly from `raw` or
 `zstd-raw` bytes has delta depth zero. An entry reconstructed from a `delta`
 or `zstd-delta` instruction stream has depth one more than the depth of the
 base it resolved against: an in-pack earlier object contributes its own
 verified depth, and an external base contributes the supplier-provided depth
 carried by its repository-scoped member fact. Depth therefore counts delta
 edges on the longest chain that produced the object, and a chain at the
-caller-selected cap refuses rather than wraps or silently truncates.
+caller-selected cap refuses rather than wraps or silently truncates. The
+readers of `kit-core` select no cap. They resolve each delta against the
+full bytes of its base, so a long chain costs no more than its entries, which
+the limits of §5 and §11.1 bound.
 
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
@@ -409,7 +413,7 @@ These are policy caps, not wire limits. Implementations MUST fail with
 `TooManyObjects`/`PackfileTooLarge` on violation rather than
 silently truncating.
 
-**A writer seals a pack every reader accepts.** The caps above are the
+**A writer seals a pack within every reader's budget.** The caps above are the
 format's. A reader also refuses a pack for its own limits, so a writer stops
 adding entries to a pack before it passes any of them, and never relies on
 the remote to advertise a limit:
@@ -823,10 +827,11 @@ window at a time, so its memory does not grow with the pack's length.
   window. A base or delta target is kept only while a later entry of the same
   window names it. No decoded byte is held across a window boundary. A delta
   whose base an earlier window stored reads it back from the store, so a base
-  shared across windows is read once per window that uses it. That reading is
-  charged to the decoded share while the base is held, but not counted
-  against the cumulative decoded cap: it costs at most one read of each base
-  per window. A window closes when the next frame would take it past 64 MiB,
+  shared across windows is read once per window that uses it. Each such read
+  is charged to the decoded share while the base is held. It also counts
+  toward what a fetch decodes (§12), where a pack has one, and not toward
+  the cap of the pack, since a writer counts only the longest base. A window
+  closes when the next frame would take it past 64 MiB,
   so two windows in a row hold more than 64 MiB of frames: there are at most
   the entry count over 65,536, plus twice the frame bytes over 64 MiB, plus
   one windows.
@@ -893,6 +898,26 @@ chain metadata: one million packs and 100,000 pack-list nodes. Application
 uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
+
+A fetch also bounds what all its packs decode together: 1 TiB, and 2 Mi
+decoded bytes more for each wire byte of each pack it reads. A kit writer stays
+under that ratio. A zstd entry expands at most 32,768 times (a 128 KiB block of
+one byte takes 4 bytes). A delta stream expands at most 9,362 times (a COPY of
+65,535 bytes takes 7, SPEC-DELTA §7). The most a pack counts per wire byte is a
+zstd delta entry whose stream is 256 COPYs of one block: a result of about 16 MiB,
+the most the planner deltas, with a base of 16 MiB read from the store, about
+32 MiB counted for about 70 bytes of pack, or 480,000 times, which is under
+half of 2 Mi. A fetch of packs a writer makes is never refused, however much it
+holds. Packs of older writers, which paired a changed same-path blob of any
+size as a delta, can pass the ratio, and the 1 TiB absorbs them: each such
+delta over a base of 1 GiB drains about 1 GiB, so a fetch would need over a
+thousand of them, over a TiB of stored merged blobs that were each cut short. A hostile pack that claims 2 GiB from a hundred bytes is 21
+million times, and a fetch of about 570 of them runs out. Each pack still obeys its
+own cap, and the bytes it decodes, a pack that fails included, come off what
+the fetch has left for the next pack. A retry of a chain decodes its packs
+again, is charged again and adds their lengths again. A delta base read from
+the store counts toward what the fetch decodes each time the file reader reads
+it, and not toward the cap of the pack.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of

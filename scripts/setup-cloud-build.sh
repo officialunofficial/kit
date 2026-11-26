@@ -64,10 +64,9 @@ gcloud artifacts repositories add-iam-policy-binding "$GAR_REPO" \
 gcloud builds submit . --project="$PROJECT" --region="$REGION" \
   --config=cloudbuild/builder.yaml --substitutions="_CI_IMAGE=${CI_IMAGE}"
 
-# 3. The triggers. A pull request from an organization collaborator starts a
-# build at once. A pull request from an external contributor waits for a
-# maintainer comment `/gcbrun`.
-COL="COMMENTS_ENABLED_FOR_EXTERNAL_CONTRIBUTORS_ONLY"
+# 3. The triggers. No pull request starts a build by itself. A maintainer
+# comment `/gcbrun` starts the pull request builds for the current head.
+COL="COMMENTS_ENABLED"
 
 # Create a trigger unless one with this name exists.
 mk() {
@@ -86,10 +85,12 @@ mk_push() { local n="$1"; shift; mk "$n" --branch-pattern='^main$' "$@"; }
 echo "== triggers =="
 
 # The main suite. No path filter: the writing and path checks read the
-# documents too, so a change to a document can fail them. This trigger is the
-# required check of the repository.
+# documents too, so a change to a document can fail them.
 mk_pr   kit-ci-pr   --build-config=cloudbuild/ci.yaml --comment-control="$COL"
-mk_push kit-ci-main --build-config=cloudbuild/ci.yaml
+# A push to main starts nothing: the sentinel path never changes. Run it by
+# hand: gcloud builds triggers run kit-ci-main --branch=main
+mk_push kit-ci-main --build-config=cloudbuild/ci.yaml \
+        --included-files=cloudbuild/scheduled-main.sentinel
 
 # Third-party notices and the release artifact check. They run only when an
 # input that can change the result changes.

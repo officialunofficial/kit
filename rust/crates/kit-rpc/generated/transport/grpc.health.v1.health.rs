@@ -2,17 +2,20 @@
 // source: grpc/health/v1/health.proto
 
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct HealthCheckRequest {
     /// Field 1: `service`
-    #[serde(
-        rename = "service",
-        with = "::buffa::json_helpers::proto_string",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "service",
+            with = "::buffa::json_helpers::proto_string",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
+        )
     )]
     pub service: ::buffa::alloc::string::String,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -105,6 +108,7 @@ impl ::buffa::ExtensionSet for HealthCheckRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for HealthCheckRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -118,6 +122,7 @@ impl ::buffa::json_helpers::ProtoElemJson for HealthCheckRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __HEALTH_CHECK_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/grpc.health.v1.HealthCheckRequest",
@@ -126,17 +131,20 @@ pub const __HEALTH_CHECK_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct HealthCheckResponse {
     /// Field 1: `status`
-    #[serde(
-        rename = "status",
-        with = "::buffa::json_helpers::proto_enum",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "status",
+            with = "::buffa::json_helpers::proto_enum",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_default_enum_value"
+        )
     )]
     pub status: ::buffa::EnumValue<health_check_response::ServingStatus>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -237,6 +245,7 @@ impl ::buffa::ExtensionSet for HealthCheckResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for HealthCheckResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -250,6 +259,7 @@ impl ::buffa::json_helpers::ProtoElemJson for HealthCheckResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __HEALTH_CHECK_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/grpc.health.v1.HealthCheckResponse",
@@ -289,94 +299,99 @@ pub mod health_check_response {
             Self::UNKNOWN
         }
     }
-    impl ::serde::Serialize for ServingStatus {
-        fn serialize<S: ::serde::Serializer>(
-            &self,
-            s: S,
-        ) -> ::core::result::Result<S::Ok, S::Error> {
-            s.serialize_str(::buffa::Enumeration::proto_name(self))
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for ServingStatus {
-        fn deserialize<D: ::serde::Deserializer<'de>>(
-            d: D,
-        ) -> ::core::result::Result<Self, D::Error> {
-            struct _V;
-            impl ::serde::de::Visitor<'_> for _V {
-                type Value = ServingStatus;
-                fn expecting(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.write_str(
-                        concat!(
-                            "a string, integer, or null for ", stringify!(ServingStatus)
-                        ),
-                    )
-                }
-                fn visit_str<E: ::serde::de::Error>(
-                    self,
-                    v: &str,
-                ) -> ::core::result::Result<ServingStatus, E> {
-                    <ServingStatus as ::buffa::Enumeration>::from_proto_name(v)
-                        .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
-                }
-                fn visit_i64<E: ::serde::de::Error>(
-                    self,
-                    v: i64,
-                ) -> ::core::result::Result<ServingStatus, E> {
-                    let v32 = i32::try_from(v)
-                        .map_err(|_| {
-                            ::serde::de::Error::custom(
-                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                            )
-                        })?;
-                    <ServingStatus as ::buffa::Enumeration>::from_i32(v32)
-                        .ok_or_else(|| {
-                            ::serde::de::Error::custom(
-                                ::buffa::alloc::format!("unknown enum value {v32}"),
-                            )
-                        })
-                }
-                fn visit_u64<E: ::serde::de::Error>(
-                    self,
-                    v: u64,
-                ) -> ::core::result::Result<ServingStatus, E> {
-                    let v32 = i32::try_from(v)
-                        .map_err(|_| {
-                            ::serde::de::Error::custom(
-                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                            )
-                        })?;
-                    <ServingStatus as ::buffa::Enumeration>::from_i32(v32)
-                        .ok_or_else(|| {
-                            ::serde::de::Error::custom(
-                                ::buffa::alloc::format!("unknown enum value {v32}"),
-                            )
-                        })
-                }
-                fn visit_unit<E: ::serde::de::Error>(
-                    self,
-                ) -> ::core::result::Result<ServingStatus, E> {
-                    ::core::result::Result::Ok(::core::default::Default::default())
-                }
+    #[cfg(feature = "json")]
+    const _: () = {
+        impl ::serde::Serialize for ServingStatus {
+            fn serialize<S: ::serde::Serializer>(
+                &self,
+                s: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                s.serialize_str(::buffa::Enumeration::proto_name(self))
             }
-            d.deserialize_any(_V)
         }
-    }
-    impl ::buffa::json_helpers::ProtoElemJson for ServingStatus {
-        fn serialize_proto_json<S: ::serde::Serializer>(
-            v: &Self,
-            s: S,
-        ) -> ::core::result::Result<S::Ok, S::Error> {
-            ::serde::Serialize::serialize(v, s)
+        impl<'de> ::serde::Deserialize<'de> for ServingStatus {
+            fn deserialize<D: ::serde::Deserializer<'de>>(
+                d: D,
+            ) -> ::core::result::Result<Self, D::Error> {
+                struct _V;
+                impl ::serde::de::Visitor<'_> for _V {
+                    type Value = ServingStatus;
+                    fn expecting(
+                        &self,
+                        f: &mut ::core::fmt::Formatter<'_>,
+                    ) -> ::core::fmt::Result {
+                        f.write_str(
+                            concat!(
+                                "a string, integer, or null for ", stringify!(ServingStatus)
+                            ),
+                        )
+                    }
+                    fn visit_str<E: ::serde::de::Error>(
+                        self,
+                        v: &str,
+                    ) -> ::core::result::Result<ServingStatus, E> {
+                        <ServingStatus as ::buffa::Enumeration>::from_proto_name(v)
+                            .ok_or_else(|| {
+                                ::serde::de::Error::unknown_variant(v, &[])
+                            })
+                    }
+                    fn visit_i64<E: ::serde::de::Error>(
+                        self,
+                        v: i64,
+                    ) -> ::core::result::Result<ServingStatus, E> {
+                        let v32 = i32::try_from(v)
+                            .map_err(|_| {
+                                ::serde::de::Error::custom(
+                                    ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                                )
+                            })?;
+                        <ServingStatus as ::buffa::Enumeration>::from_i32(v32)
+                            .ok_or_else(|| {
+                                ::serde::de::Error::custom(
+                                    ::buffa::alloc::format!("unknown enum value {v32}"),
+                                )
+                            })
+                    }
+                    fn visit_u64<E: ::serde::de::Error>(
+                        self,
+                        v: u64,
+                    ) -> ::core::result::Result<ServingStatus, E> {
+                        let v32 = i32::try_from(v)
+                            .map_err(|_| {
+                                ::serde::de::Error::custom(
+                                    ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                                )
+                            })?;
+                        <ServingStatus as ::buffa::Enumeration>::from_i32(v32)
+                            .ok_or_else(|| {
+                                ::serde::de::Error::custom(
+                                    ::buffa::alloc::format!("unknown enum value {v32}"),
+                                )
+                            })
+                    }
+                    fn visit_unit<E: ::serde::de::Error>(
+                        self,
+                    ) -> ::core::result::Result<ServingStatus, E> {
+                        ::core::result::Result::Ok(::core::default::Default::default())
+                    }
+                }
+                d.deserialize_any(_V)
+            }
         }
-        fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-            d: D,
-        ) -> ::core::result::Result<Self, D::Error> {
-            <Self as ::serde::Deserialize>::deserialize(d)
+        impl ::buffa::json_helpers::ProtoElemJson for ServingStatus {
+            fn serialize_proto_json<S: ::serde::Serializer>(
+                v: &Self,
+                s: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                ::serde::Serialize::serialize(v, s)
+            }
+            fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+                d: D,
+            ) -> ::core::result::Result<Self, D::Error> {
+                <Self as ::serde::Deserialize>::deserialize(d)
+            }
         }
-    }
+    };
     impl ::buffa::Enumeration for ServingStatus {
         fn from_i32(value: i32) -> ::core::option::Option<Self> {
             match value {

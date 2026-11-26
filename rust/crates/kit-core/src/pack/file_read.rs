@@ -17,11 +17,11 @@
 use super::spool::VerifiedPack;
 use super::window::WindowSource;
 use super::{
-    BaseUses, DELTA_BASE_LEN, EMPTY_PACK_LEN, ENTRY_FRAME_LEN, EncodedPayload, Entry, HEADER_LEN,
-    MAGIC, MAX_ENTRIES, MAX_RAW_OBJECT_SIZE, MAX_TOTAL_PAYLOAD, MEMORY_FLOOR,
-    PACK_ENTRY_RESIDENT_COST, PackError, PackReader, ResidentBudget, STAGE_WINDOW, TRAILER_LEN,
-    UnpackReport, VERSION, VERSION_V2, ZSTD_LEN_PREFIX, decoded_bytes_cap, encoded_payload,
-    replay_window, stage_raw_entries, zstd_entry_len,
+    BaseUses, DELTA_BASE_LEN, EMPTY_PACK_LEN, ENTRY_FRAME_LEN, EncodedPayload, Entry,
+    FetchDecodeBudget, HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_RAW_OBJECT_SIZE, MAX_TOTAL_PAYLOAD,
+    MEMORY_FLOOR, PACK_ENTRY_RESIDENT_COST, PackError, PackReader, ResidentBudget, STAGE_WINDOW,
+    TRAILER_LEN, UnpackReport, VERSION, VERSION_V2, ZSTD_LEN_PREFIX, decoded_bytes_cap,
+    encoded_payload, replay_window, stage_raw_entries, zstd_entry_len,
 };
 use super::{DeltaBaseSource, ObjectSpool, UnpackSink};
 use crate::store::ObjectStore;
@@ -124,20 +124,20 @@ pub(super) fn bookkeeping(entries: usize, path_len: usize) -> Option<usize> {
 }
 
 /// The budget of one file-backed read: the bookkeeping, reserved before any
-/// of it is allocated, plus the decoded share.
+/// of it is allocated, plus the decoded share. `decoded_cap` bounds the
+/// decoded bytes the whole read may charge.
 pub(super) fn file_budget(
     pack_len: u64,
     entries: usize,
     path_len: usize,
     owned_bytes: Option<&AtomicU64>,
+    decoded_cap: u64,
 ) -> Result<ResidentBudget<'_>, PackError> {
     let book = bookkeeping(entries, path_len).ok_or(PackError::PackfileTooLarge)?;
     let share =
         usize::try_from(decoded_share(pack_len)).map_err(|_| PackError::PackfileTooLarge)?;
     let cap = book.checked_add(share).ok_or(PackError::PackfileTooLarge)?;
-    let budget = ResidentBudget::new(cap, owned_bytes).with_decoded_cap(decoded_bytes_cap(
-        usize::try_from(pack_len).unwrap_or(usize::MAX),
-    ));
+    let budget = ResidentBudget::new(cap, owned_bytes).with_decoded_cap(decoded_cap);
     budget.reserve_bookkeeping(book)?;
     Ok(budget)
 }
@@ -380,7 +380,8 @@ impl PackReader {
 
     /// Decode a verified wire pack into private staging. Earlier objects
     /// in this pack and in the pending publication windows (the open one and any
-    /// still sealing) can be bases.
+    /// still sealing) can be bases. What the pack decodes counts against
+    /// `fetch`, which spans every pack of the fetch.
     ///
     /// # Errors
     /// The same decode errors as `read_verified`, or a local spool failure.
@@ -390,6 +391,7 @@ impl PackReader {
         store: &ObjectStore,
         pending: &[&ObjectSpool],
         spool: &ObjectSpool,
+        fetch: &mut FetchDecodeBudget,
     ) -> Result<UnpackReport, PackError> {
         decode_file(
             pack,
@@ -397,6 +399,7 @@ impl PackReader {
             WindowShape::DEFAULT,
             None,
             Some((pending, spool)),
+            Some(fetch),
             #[cfg(test)]
             None,
         )
@@ -416,26 +419,63 @@ pub(super) fn read_file(
         shape,
         owned_bytes,
         None,
+        None,
         #[cfg(test)]
         boundary,
     )
 }
 
-fn decode_file(
+/// Read `pack` window by window. With a `fetch` budget, the pack's decoded
+/// cap is what the fetch has left, and what the pack decodes, a failed pack
+/// included, comes off it.
+pub(super) fn decode_file(
     pack: &VerifiedPack,
     store: &ObjectStore,
     shape: WindowShape,
     owned_bytes: Option<&AtomicU64>,
     staging: Option<(&[&ObjectSpool], &ObjectSpool)>,
-    #[cfg(test)] mut boundary: Option<BoundaryHook<'_>>,
+    mut fetch: Option<&mut FetchDecodeBudget>,
+    #[cfg(test)] boundary: Option<BoundaryHook<'_>>,
 ) -> Result<UnpackReport, PackError> {
     let (version, count) = read_header(pack)?;
+    let (decoded_cap, fetch_left) = match fetch.as_deref_mut() {
+        Some(fetch) => fetch.admit(pack.len()),
+        None => (
+            decoded_bytes_cap(usize::try_from(pack.len()).unwrap_or(usize::MAX)),
+            u64::MAX,
+        ),
+    };
     let budget = file_budget(
         pack.len(),
         count as usize,
         store.objects_root_len(),
         owned_bytes,
-    )?;
+        decoded_cap,
+    )?
+    .with_fetch_left(fetch_left);
+    let result = decode_windows(
+        pack,
+        store,
+        (version, count, shape),
+        staging,
+        &budget,
+        #[cfg(test)]
+        boundary,
+    );
+    if let Some(fetch) = fetch {
+        fetch.settle(budget.decoded_so_far());
+    }
+    result
+}
+
+fn decode_windows(
+    pack: &VerifiedPack,
+    store: &ObjectStore,
+    (version, count, shape): (u32, u32, WindowShape),
+    staging: Option<(&[&ObjectSpool], &ObjectSpool)>,
+    budget: &ResidentBudget<'_>,
+    #[cfg(test)] mut boundary: Option<BoundaryHook<'_>>,
+) -> Result<UnpackReport, PackError> {
     let windows = scan_frames(pack, version, count, shape)?;
     let mut report = UnpackReport::default();
     report
@@ -490,7 +530,7 @@ fn decode_file(
                     Entry::Delta { .. } => None,
                 })
                 .collect();
-            let raw_results = stage_raw_entries(sink, &raw_frames, &uses, &budget);
+            let raw_results = stage_raw_entries(sink, &raw_frames, &uses, budget);
             let mut in_pack = HashMap::new();
             replay_window(
                 &frames,
@@ -499,7 +539,7 @@ fn decode_file(
                 &mut uses,
                 &mut in_pack,
                 &mut report,
-                &budget,
+                budget,
                 &mut bases,
                 sink,
                 false,

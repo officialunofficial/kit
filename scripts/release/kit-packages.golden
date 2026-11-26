@@ -7,7 +7,6 @@ adler2
 aead
 aes
 anstyle
-anyhow
 arrayvec
 async-broadcast
 async-channel
@@ -32,9 +31,6 @@ block-buffer
 block-padding
 blocking
 buffa
-buffa-build
-buffa-codegen
-buffa-descriptor
 bytes
 cbc
 cc
@@ -54,8 +50,6 @@ commonware-macros
 commonware-macros-impl
 concurrent-queue
 connectrpc
-connectrpc-build
-connectrpc-codegen
 const-oid
 constant_time_eq
 core-foundation
@@ -182,7 +176,6 @@ pkg-config
 polling
 poly1305
 potential_utf
-prettyplease
 primefield
 primeorder
 proc-macro-crate

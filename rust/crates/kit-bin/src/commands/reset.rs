@@ -236,7 +236,7 @@ pub fn run(args: &[String]) -> u8 {
             return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
         }
         for (path, _, _) in &hard_removed {
-            if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
+            if let Err(e) = super::remove_dropped_path(&cwd, path) {
                 return emit_err(
                     &format!("reset worktree: remove {path}: {e}"),
                     exit::CANTCREAT,

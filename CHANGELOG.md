@@ -7,15 +7,66 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-26
+
+### Breaking
+
+- Only SSH clients switch to paged ref listings. A 0.10 client still works
+  with `kit serve` 0.11 because an unpaged request gets the whole listing
+  in one frame, up to the original size limit. A 0.11 client can still list
+  branches from a 0.10 server within that limit.
+  `ListRefs` and `ListRefsView` gain `page_size` and `page_token`. Their
+  responses and response views gain `next_page_token`. `RefListing::OneFrame`,
+  `MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are gone, and the
+  numeric discriminant of `RefListing::Eventual` changes from 2 to 1.
+- Enable `kit-rpc/json` for proto3 JSON or when another dependency enables
+  `connectrpc/json`. Enabling `transport` or `transport-messages` alone now
+  gives you the binary protobuf API.
+- Fault-injection matches on `SyncStep` must handle `Writeout` and `Flush`.
+  The new `kit_core::durable` module replaces the internal `atomic` and
+  `flush` helpers.
+- `kit clone --no-checkout` leaves no index. The first checkout in a
+  repository without an index treats existing files as untracked.
+  `SyncOptions::with_checkout(false)` opts library callers into this mode.
+- `StoreError::HashMismatch` now includes `pack`. New error variants cover
+  oversized trees (`TreeTooLarge`), non-commit branch tips
+  (`BranchTipNotCommit`), transient HTTP responses (`ServerStatus`),
+  overlapping remote names (`OverlappingName`), and config lock failures
+  (`ConfigError::Lock`). Commit and conflict handling can now return
+  `MergeStateIncomplete`, `OperationStateIncomplete`, `ReadPullState`,
+  `PullUnfinished`, or `AbortWithoutList`.
+- Linked worktrees need a registered state directory and matching backpointer.
+  Run `kit worktree repair <path>` after moving a worktree by hand. Discovery can
+  return `NotRegistered` or `BackpointerMismatch`.
+- Git bridge commands reject unsafe state files and staging mirrors with
+  unexpected files or config. Remove a rejected staging mirror and rerun the
+  command to rebuild it.
+- Tree expansion and fetch decoding have aggregate limits. Raise
+  `WindowReader`'s `max_decoded_bytes` to cover a whole pack. Diffs show blobs
+  over a million lines as binary, and merging them can report a conflict.
+- Fetch refuses a non-commit branch tip and a file remote refuses special
+  files. Pull returns `UpToDate` when the local branch is ahead. An interrupted
+  pull can block commit until the restore finishes.
+- A non-soft reset clears interrupted pull, merge, cherry-pick and revert
+  state. Commit checks unfinished operations, and abort or continue preserves
+  a commit the operation already made.
+- On case-insensitive filesystems, ref lock names change for upper-case refs.
+  Use one version of kit when writing to the same repository.
+- Worktree removals and writes now check each parent directory and reject
+  paths that pass through a symlink or a non-directory ancestor.
+
 ### Added
 
 - `kit clone --no-checkout` (`-n`) fetches, sets the branch and HEAD, and writes no worktree file and no index; `kit checkout <branch>` fills the worktree later. `kit_sync::SyncOptions` gains `checkout`, set with `with_checkout`.
 
 ### Changed
 
+- A push sends a changed same-path blob of more than 16 MiB, a file `kit merge` stored in one piece, whole and no longer as a delta over its old version.
+- **Breaking:** `kit-rpc` no longer turns on proto3 JSON through `transport` and `transport-messages`: the serde impls on the transport messages and the ConnectRPC JSON codec are behind the new opt-in `json` feature, so an embedder that does not use JSON compiles none of it. Kit's own client and server speak binary protobuf and are unchanged on the wire. A crate that relied on the implicit JSON enables `kit-rpc/json`, and so does any build that has `connectrpc/json` on, including through connectrpc's default features.
+- `kit-rpc` compiles its checked-in generated code as ordinary source: it has no build script and no build dependencies, so no crate that depends on it builds `buffa-build`, `buffa-codegen`, `buffa-descriptor`, `connectrpc-build`, `connectrpc-codegen`, `prettyplease` or `anyhow` for it. The generators moved to the unpublished `kit-rpc-codegen` crate, which `scripts/regen-rpc-proto.sh` and `scripts/regen-transport-proto.sh` run.
 - `kit checkout` in a repository with no `.kit/index` file, as `kit clone --no-checkout` leaves it, is the first checkout, as in git: nothing is tracked yet, so no file counts as a local change and no tracked path is removed. A file the checkout would write over still refuses it.
-- **Breaking:** the ssh `ListRefs` request and reply page, as Connect's do (SPEC-TRANSPORT §4.2.3): `kit serve` returns at most 1,000 refs a page, and `kit+ssh` remotes read every page. A new `kit serve` refuses a `ListRefs` with no `page_size`, so a client from before this change cannot list refs on it and has to be upgraded; a new client against an old `kit serve` works as before, up to the old limit of one frame.
-- `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed: no remote lists in one frame any more, so a tag push no longer refuses a create over a listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
+- SSH clients now read ref listings a page at a time when the server supports paging. Kit 0.10 clients still get the whole listing in one frame up to the original size limit.
+- `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed. A tag push no longer refuses a create over a single-frame listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
 - `kit commit` of a plain commit no longer reads every tree of the new commit to rebuild the index it already holds, and no longer writes it again; a commit with a staged removal, a merge or an amend still rebuilds it.
 - `kit add` of files that are unchanged, and `kit add -A` or `-u` on a clean tree, no longer rewrite the index.
 - The applied-packs, verified-tip, checkpoint and cursor records are written with a temporary file and a rename and no device flush, since they only save work; a push saves 2 flushes and a fetch 4. The remote-tracking ref stays durable.
@@ -26,9 +77,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit pull` reads each directory of the worktree once for its safety check, not twice, and no longer walks the directories its restore leaves alone a third time, since the safety check has refused every untracked path outside the ignore rules there already. For library users, `kit_core::worktree::DirListings` and `build_tree_filtered_listed_with_source` return what the walk read, and `kit_core::ops::restore::restore_tree_to_worktree_gated` is the restore for a caller that has run that check.
 - `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
 - Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
+- **Breaking:** `kit_core::StoreError::HashMismatch` gains `pack`, the local pack that held the mismatched bytes (`None` for any other source), and the message names it.
 
 ### Fixed
 
+- `kit stash apply` and `kit stash pop` read a stash saved by kit 0.8, which has no scope marker, as a full stash, in place of refusing it as an invalid format.
+- The git bridge refuses a state file that is a link or not a plain file (`map`, `refs`, `refs-import`, the stamps, the retained `raw/` objects and their temporary files), in place of reading or writing through it; delete the file and rerun.
+- `kit git fetch`, `pull`, `export` and `verify` refuse a staging mirror under `.kit/git/<name>/repo.git` whose git config or layout is not one kit wrote: a link or special file anywhere in it, a `commondir`, `config.worktree`, `gitdir` or alternates file, a repeated config key, or a config key that `git clone --bare` and `git init --bare` do not write. Delete the mirror and run the command again to rebuild it; a mirror that an `init.templateDir` added keys to needs this once, and new mirrors are created with an empty template.
+- A linked worktree must be registered under the repository's `.kit/worktrees/` and point back to the tree. Run `kit worktree repair <path>` after moving one by hand. For library users, `kit_core::layout::discover_unverified` is the lookup without this check, for `worktree repair`, and `DiscoverError` gains `NotRegistered` and `BackpointerMismatch`.
+- `kit closure repair-indexes` no longer stops at the first damaged pack: it rebuilds the indexes of the healthy packs, and then reports every damaged pack, a damaged pack that lost its index included, in one error.
 - A tree that expands to more than 2,000,000 files (or 4,000,000 entries counting directories, so a chain of empty directories too), or to paths an index file could not hold, such as a chain of trees that each name the level below twice, is now refused before anything is built or written, by `index::from_tree`, the restore and `check_nested_repositories`, and so by `kit clone`, `kit pull`, `kit checkout` and `kit status`. `diff_trees` and `merge_trees` add no pass over unchanged trees: each walk counts the entries it compares, and the entries of the subtrees only one side has (a diff counts the old side's and the new side's separately, so a renamed directory counts once on each side), files and directories both, and stops at 4,000,000 entries or twice an index file's bytes of paths, so two trees that differ at every path, or a wide tree of names that share one large subtree, are refused too. The size is memoised per tree, so a chain of 40 trees fails in milliseconds and not after a walk of every path. `kit_core::StoreError` gains `TreeTooLarge`, and `kit_core::{MAX_TREE_LEAVES, check_tree_leaves}` are public.
 - `kit gc` no longer stops on a recovery log whose last line was cut short by a crash or a full disk: readers ignore a last line without its newline, `record` cuts it off before it appends, and a tab in the branch field fails the parse, and appends from linked trees take a `recovery-log.lock`, so a later entry is no longer glued to the torn bytes and left out of the gc roots.
 - `.kit/config` is written with an fsync of the file and of its directory, and `kit remote`, `kit config` and the upstream a push or `kit branch` records read and write it under one `config.lock`, so commands that run at once keep every change.
@@ -36,11 +93,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit init` and `kit clone` into a `.kit` that a killed `init` left with no format marker and no objects now start over, and no longer report an existing repository.
 - A per-object write that creates a loose shard directory now flushes `objects/`, so the directory entry survives a power loss.
 - `kit diff`, `kit show`, `kit log -p`, `diff --stat`, the pull and merge diffstat, `add -p` and the 3-way merge now build no line table for a blob of more than 1,000,000 lines. The diff shows it as binary ("Binary files differ"), and the merge records a conflict. `kit blame` counts the lines of a file before it splits it, so a file over its 100,000-line limit is refused without a per-line allocation. A blob of newlines used to cost about 120 bytes of memory per byte.
+- A fetch refuses its packs once they decode more than 1 TiB together plus 2 Mi bytes for each wire byte of the packs it read (`PackfileTooLarge`), a limit that the packs a kit writer makes never reach. Packs of older writers that hold a delta of a same-path blob over 16 MiB can pass the ratio, and the 1 TiB absorbs them: it takes over a thousand such deltas over bases of 1 GiB to run a fetch out. Before, each pack had its own cap with a 2 GiB floor and nothing totalled them, so a fetch of many tiny packs could decode 2 GiB from each. A retry of a chain decodes its packs again and is charged again. `PackReader::stage_verified` (hidden) takes the fetch's `kit_core::pack::FetchDecodeBudget`.
+- A delta base read from the store counts toward what a fetch decodes each time the file reader reads it, so a pack of many windows over one stored base spends the fetch's budget for each window. The reads do not count toward the cap of the pack.
+- `kit_core::pack::window::WindowReader` keeps a running total of the sizes its zstd entries decompress to and refuses the entry that passes `max_decoded_bytes` (`PackfileTooLarge`), so the limit now caps the whole run and not only each entry; it checked each entry alone before and a 35 KiB pack could deliver 1 GiB against a 32 MiB budget. A reader resumed from a cursor counts from zero. A host that streams sealed packs with a `max_decoded_bytes` under 1 GiB now needs 1 GiB to read every pack a writer seals, and a pack sealed before 0.8.0 can decode past 1 GiB, so a host that streams those needs a larger `max_decoded_bytes`.
 - `kit ls-tree -r` stops at the 128-level nesting limit that checkout uses and prints "tree nesting exceeds 128 levels", where a hostile chain of nested trees overflowed the stack.
 - Long `kit status`, `kit clean`, the commit summary, the conflict lines of `merge`, `cherry-pick`, `rebase` and the conflict notes, and the `cherry-pick` and `revert` unresolved-marker errors now quote a file name that holds a control character or a non-ASCII byte, as `kit status -s` and git do. The restore and pull refusals and the `merge --continue` and `rebase --continue` marker errors write a control character in a file name as `\u{..}`. A name cannot write an escape sequence to the terminal. `kit_sync::SourceError` now escapes control characters in the text that came from a remote (`RemoteError`, `InvalidRef`, and the message of `Remote`) and cuts that text to 256 bytes, as `TransportError` does.
 - `kit remote add` and `kit remote rename` refuse a name that is a path prefix of another remote's name (`team` and `team/upstream`), or the reverse, because the two would share a directory of tracking refs, and a fetch or prune of one changed the other's. `libkit::remote::Error` gains `OverlappingName`.
 - `kit verify-attest` no longer panics on a key id whose 16th byte is inside a multi-byte character.
-- `SECURITY.md` lists 0.10.x as the supported version.
+- `SECURITY.md` lists 0.11.x as the supported version.
 - `kit fetch`, `pull` and `clone` now check that the tip of each remote branch is a commit or a remix before they write its tracking ref. A branch that points at a tree, a blob or another object fails the fetch with `remote branch '<name>' points at a <type>, not a commit`, and no tracking ref is written for it. `kit_sync::SyncError` and `libkit::transfer::Error` gain a `BranchTipNotCommit { branch, found }` variant.
 - A file remote no longer blocks `kit clone`, `fetch`, `pull` or `push` when a pack, a packmap or a ref file in it is a named pipe, a device or a socket. kit opens these files without blocking and refuses one that is not a regular file before it reads, with `ref file is not a regular file`; a directory of other refs still reads as no ref.
 - The repair after a missing object now flushes the fetch-records directories after removing the verified-tip and applied-packs records, so a power loss cannot bring them back and undo the repair.
@@ -61,9 +121,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` now treat an operation result tree that the store cannot read as absent, instead of failing with `check operation changes`.
 - `kit reset` in every mode but `--soft` now ends a merge, cherry-pick or revert in progress, and drops the record of a pull that stopped before its restore, so a later commit of the pre-pull version of a pulled file is no longer refused.
 - `kit merge`, `kit cherry-pick` and `kit revert` record a paused operation before they write its conflict markers, and its conflict list after, so a crash between the two leaves an operation that `--abort` can undo and that `--continue` refuses, and never markers with no operation behind them. `kit_core::ops::conflict_state` gains `begin_merge_state`, `begin_cherry_pick_state` and `begin_revert_state`.
+- A new conflicting merge, cherry-pick or revert clears any conflict list left by an earlier operation so a partial write cannot be continued with stale state.
 - `kit commit` during a cherry-pick or a revert now refuses while a conflict has markers or is not staged, and when the operation's conflict list is missing, as it does for a merge, and ends the operation when it commits, so a later `--abort` cannot move the branch back over the commit. `libkit::commit::Error` gains `OperationStateIncomplete`.
 - `kit merge --abort` keeps a file that the merge added and the user then edited and stopped tracking with `kit rm --cached`, as git does.
 - `kit merge --abort` when a crash left the merge state over a finished merge commit now clears the state and leaves the branch on the merge commit, where it moved the branch back and left the commit for `gc` to delete.
+- `kit cherry-pick` and `kit revert` with `--abort` or `--continue`, `kit merge --continue`, and `kit commit` over a merge, no longer drop or repeat a commit that a stop left the operation's state over: when `HEAD` already is the commit that the operation made, they clear the state and keep the branch where it is, where an abort could move the branch back over the commit, a continue wrote a second commit, and a commit wrote a sibling of the merge commit. A cherry-pick or revert is taken as over only when the index also holds the commit's tree, so a paused one whose `HEAD` moved to another commit stays live. With `--format json`, `--abort` then reports the kept commit as `hash`.
+- `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` of an operation that a stop left with its conflict files and no conflict list now say to run `kit reset --hard -f`, as the abort cannot tell the conflict files from changes of your own.
+- Removals and conflict writes no longer follow a symlinked parent directory: `kit reset --hard`, `kit rm`, `kit checkout`, stash and the conflict steps of merge, rebase and cherry-pick leave a path alone when a parent of it is a symlink or is not a directory, and no longer treat a spelling of `.kit` as a path to remove or write. A restore also refuses a name that the filesystem treats as `.kit` at any depth, not only at the root. `kit_core::worktree` gains `path_under_real_dirs` and `path_for_write` for callers that remove or write a worktree path.
 
 ## [0.10.0] - 2026-11-22
 

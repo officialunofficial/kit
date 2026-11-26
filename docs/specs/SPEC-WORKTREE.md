@@ -187,10 +187,17 @@ the worktree root; there is no upward search):
      relative); it MUST exist and is canonicalized;
    - the common dir comes from `<state>/commondir` (default `../..`),
      resolved against the state dir, canonicalized; it MUST exist.
+   - the state dir MUST be a registry entry of that common dir: its
+     parent is `<common>/worktrees` and its name is a valid id;
+   - its back-pointer (`kitdir`) MUST name `W/.kit`. A pointer file
+     therefore cannot send kit into a repository that never registered
+     the tree. `worktree repair` is the only reader that skips this
+     step, because it exists to fix a stale back-pointer.
 3. **Every failure in step 2 is fatal** (typed `DiscoverError`):
    malformed/oversized/non-UTF-8/multi-line pointer, dangling state
-   dir, unreadable or dangling `commondir`. A broken linked tree MUST
-   NOT silently degrade to operating on some other directory.
+   dir, unreadable or dangling `commondir`, a state dir outside the
+   registry, a missing or foreign back-pointer. A broken linked tree
+   MUST NOT silently degrade to operating on some other directory.
 
 A registry entry is **prunable** when its back-pointer is missing or
 unreadable, its tree is gone, or the tree's pointer no longer names
@@ -326,8 +333,10 @@ The local stash index wrapper carries blobs `i` (serialized index) and `p`
 (scope), plus tree `t` (staged content). The scope blob is exactly one byte:
 `0` for a full stash and `1` for selected paths. Other values or a missing
 marker refuse apply and pop. Full stashes retain the whole-worktree restore
-guard; selected stashes guard only their saved paths. No earlier wrapper
-shape is read as a compatibility case.
+guard; selected stashes guard only their saved paths. The wrapper that kit
+0.8 wrote has only `i` and `t`, with no scope blob. A reader MUST read that
+exact shape as a full stash, since 0.8 had no selected stashes. A wrapper of
+any other shape is refused.
 
 Reference implementation: `kit-core/src/ops/stash.rs`
 (`serialize_list`, `deserialize_list`). The uniqueness test in
