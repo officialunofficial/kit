@@ -76,7 +76,7 @@ thiserror = "2.0.21"
 # kit-rpc (kit-bin, kit-attest,
 # kit-transport-ssh) also depends on kit-core directly with default
 # features on, so their builds still get `pack-zstd` via that edge.
-kit-core = { version = "=0.10.0", path = "../kit-core", default-features = false }
+kit-core = { version = "=0.11.0", path = "../kit-core", default-features = false }
 
 # cargo-machete scans only the Rust sources under src/. It cannot see these
 # dependencies, so it lists them as unused. Each one is used: the generated
