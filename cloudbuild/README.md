@@ -103,22 +103,22 @@ there. Use a trigger to reproduce a build.
 
 ## Triggers
 
-All triggers use the branch `^main$`. A pull request from an organization
-collaborator starts at once. A pull request from an external contributor waits
-for a maintainer comment `/gcbrun`.
+All triggers use the branch `^main$`. No pull request starts a build by itself.
+A maintainer comment `/gcbrun` starts the pull request triggers for the current
+head. Run it once on the final head of a pull request, not on every push.
 
 | Trigger | Configuration | Runs |
 |---|---|---|
-| `kit-ci-pr`, `kit-ci-main` | `ci.yaml` | Every pull request and every push to `main`. No path filter, because the writing and path checks read the documents too. |
+| `kit-ci-pr`, `kit-ci-main` | `ci.yaml` | A pull request after `/gcbrun`, and every push to `main`. No path filter, because the writing and path checks read the documents too. |
 | `kit-supply-pr`, `kit-supply-main` | `supply.yaml` | When a manifest, the lockfile, the notices policy, the release scripts, the publish check or the `kit-bin` crate changes. |
 | `kit-connect-pr` | `connect-latest.yaml` | When a manifest, a lockfile or the probe script changes. |
 | `kit-ci-weekly`, `kit-connect-weekly` | `ci.yaml`, `connect-latest.yaml` | Mondays at 06:00 and 05:23 UTC. Opt in with `ENABLE_SCHEDULED_TRIGGERS=1`. A new advisory can match a dependency tree that did not change. |
 
 ### Required checks
 
-Make only `kit-ci-pr` a required check. The other pull request triggers use
-path filters. A path filter leaves no check on a pull request that touches
-none of those paths, and a required check that never appears blocks the merge.
+Make no Cloud Build trigger a required check. A pull request has no check
+until a maintainer comments `/gcbrun`, and the path-filtered triggers leave no
+check on a pull request that touches none of their paths.
 The GitHub workflow `CI: macOS` runs on `main` and on demand, never on a pull
 request, so it is not a required check either. The GitHub job `Rust CI gate`
 of `rust.yml` runs on every pull request, so a maintainer can require it.
