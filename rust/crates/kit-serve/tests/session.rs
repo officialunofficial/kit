@@ -467,15 +467,8 @@ fn a_listing_pages_in_name_order() {
     );
 }
 
-/// A page size above the cap gets a page of the cap, and a listing of 1,001
-/// refs takes two pages. A page of the longest names still fits one frame.
-#[test]
-fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
-    let fx = Fixture::new();
-    let count = MAX_LIST_PAGE_REFS + 1;
-    // A ref file as the transport writes it, copied to each name: a durable
-    // write per ref would take minutes. The names are of the longest length,
-    // in two components that a file name holds.
+/// Copy a ref file to long names without syncing each copy to disk.
+fn seed_long_refs(fx: &Fixture, range: std::ops::Range<usize>) {
     let seed = fx.root().join("refs/heads/seed");
     FileTransport::new(fx.root())
         .update_ref("refs/heads/seed", RefWriteCondition::Any, &[2; 32])
@@ -484,7 +477,7 @@ fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
     std::fs::remove_file(&seed).unwrap();
     let first = "x".repeat(250);
     let second = "y".repeat(MAX_REF_NAME_BYTES - "refs/heads/0000/".len() - first.len() - 1);
-    for i in 0..count {
+    for i in range {
         let dir = fx
             .root()
             .join("refs/heads")
@@ -493,6 +486,14 @@ fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(&second), &wire).unwrap();
     }
+}
+
+/// A page size above the cap gets a page of the cap, and a listing of 1,001
+/// refs takes two pages. A page of the longest names still fits one frame.
+#[test]
+fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
+    let fx = Fixture::new();
+    seed_long_refs(&fx, 0..MAX_LIST_PAGE_REFS + 1);
     let heads = Some("refs/heads/");
     let (_, frames) = fx.run([list_refs_page(heads, Some(u32::MAX), None)]);
     assert_eq!(listed_names(&frames[0]).len(), MAX_LIST_PAGE_REFS);
@@ -505,21 +506,51 @@ fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
     assert_eq!(next_token(&frames[0]), None);
 }
 
-/// A listing without a page size is refused, so a client from before
-/// listings paged fails loudly and never takes a first page for the whole.
 #[test]
-fn a_listing_without_a_page_size_is_refused() {
+fn an_unpaged_listing_returns_every_ref_or_the_single_frame_error() {
     let fx = Fixture::new();
-    fx.seed(&[("refs/heads/main", [1; 32])], &[]);
+    let heads = Some("refs/heads/");
+    // The 0.10 server allows 1 MiB minus 1 KiB at 48 bytes per name plus its
+    // length. Fill that budget exactly, then add a ref.
+    let budget = kit_rpc::MAX_FRAME_BYTES as usize - 1024;
+    let long_cost = MAX_REF_NAME_BYTES - "refs/heads/".len() + 48;
+    let count = budget / long_cost;
+    seed_long_refs(&fx, 0..count);
+    let last = "z".repeat(budget % long_cost - 48);
+    FileTransport::new(fx.root())
+        .update_ref(
+            &format!("refs/heads/{last}"),
+            RefWriteCondition::Any,
+            &[2; 32],
+        )
+        .unwrap();
+    let (_, frames) = fx.run([list_refs_page(heads, None, None)]);
+    let names = listed_names(&frames[0]);
+    assert_eq!(names.len(), count + 1);
+    assert_eq!(names.last(), Some(&last));
+    assert_eq!(next_token(&frames[0]), None);
+
+    seed_long_refs(&fx, count..count + 1);
     let (end, frames) = fx.run([
-        list_refs_page(Some("refs/heads/"), None, None),
-        list_refs_page(Some("refs/heads/"), Some(0), None),
-        list_refs(Some("refs/heads/")),
+        list_refs_page(heads, None, None),
+        list_refs_page(heads, Some(1), None),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::Internal, "list refs failed");
+    assert_eq!(listed_names(&frames[1]).len(), 1);
+    assert!(next_token(&frames[1]).is_some());
+}
+
+#[test]
+fn zero_page_size_and_a_token_without_page_size_are_refused() {
+    let fx = Fixture::new();
+    let (end, frames) = fx.run([
+        list_refs_page(None, Some(0), None),
+        list_refs_page(None, None, Some("refs/heads/main")),
     ]);
     assert_eq!(end, SessionEnd::Clean);
     assert_error(&frames[0], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
-    assert_error(&frames[1], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
-    assert_eq!(listed_names(&frames[2]), ["main"]);
+    assert_error(&frames[1], ErrorCode::InvalidRequest, "invalid page token");
 }
 
 /// A page token over the name limit cannot be a name, so it is refused.

@@ -16,7 +16,8 @@
 #   * the handshake and the rejection of an empty, repeated or misplaced frame;
 #   * ListRefs with the path-component prefix rule, sorted by name, in pages
 #     of at most `page_size` refs after the name in `page_token`, with the
-#     last name of a page as the token while more follow;
+#     last name of a page as the token while more follow, or the whole
+#     listing in one frame when the request omits the page size;
 #   * ReadRef, and UpdateRef with the three CAS expectations, the
 #     `details` field that holds the current value, and the refusal of a name
 #     that breaks the ref grammar;
@@ -224,14 +225,19 @@ class Model:
         if not self.handshake:
             return self.error(INVALID), 0
         if kind == "list_refs":
-            # A listing names a page size, or it is refused.
-            if f.get(2, 0) == 0 or len(f.get(3, b"")) > MAX_TOKEN:
+            token_bytes = f.get(3, b"")
+            if f.get(2) == 0 or len(token_bytes) > MAX_TOKEN or (2 not in f and token_bytes):
                 return self.error(INVALID), 0
             prefix = f.get(1, b"").decode()
             if prefix and not (ref_name_valid(prefix.rstrip("/")) or prefix.rstrip("/") == ""):
                 return self.error(BAD_NAME), 0
-            token = f.get(3, b"").decode()
-            rest = [e for e in list_refs(self.refs, prefix) if e[0] > token]
+            listed = list_refs(self.refs, prefix)
+            if 2 not in f:
+                if sum(len(name) + 48 for name, _ in listed) > MAX_FRAME - 1024:
+                    return self.error(INTERNAL), 0
+                return [("list", tuple(listed), b"")], 0
+            token = token_bytes.decode()
+            rest = [e for e in listed if e[0] > token]
             page = rest[: min(f[2], MAX_PAGE_REFS)]
             more = page[-1][0].encode() if len(rest) > len(page) else b""
             return [("list", tuple(page), more)], 0
@@ -340,8 +346,8 @@ def normalize(frames):
     return events
 
 
-def check_session(root, n):
-    inputs = [decode(b) for b in read_frames(o.read(root, D, f"session-{n}.in.bin"))]
+def check_session(root, n, input_name=None):
+    inputs = [decode(b) for b in read_frames(o.read(root, D, input_name or f"session-{n}.in.bin"))]
     outputs = [decode(b) for b in read_frames(o.read(root, D, f"session-{n}.bin"))]
     got = normalize(outputs)
     model = Model(SESSIONS[n])
@@ -380,6 +386,7 @@ def main():
     root = sys.argv[1]
     for n in (1, 2, 3, 4):
         check_session(root, n)
+    check_session(root, 4, "session-4-v0.10.in.bin")
     if o.FAILURES:
         sys.exit(1)
     print("OK")
