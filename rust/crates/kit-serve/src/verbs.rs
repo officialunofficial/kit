@@ -63,8 +63,8 @@ const MAX_LISTING_BYTES: usize = kit_rpc::MAX_FRAME_BYTES as usize - 1024;
 /// the tags and the lengths.
 const LISTING_ENTRY_OVERHEAD: usize = 48;
 
-/// Even entries with empty names overflow at this count.
-const UNPAGED_LIST_LIMIT: usize = MAX_LISTING_BYTES / LISTING_ENTRY_OVERHEAD + 1;
+/// Nonempty names make a listing of this many refs exceed the byte budget.
+const UNPAGED_LIST_LIMIT: usize = MAX_LISTING_BYTES.div_ceil(LISTING_ENTRY_OVERHEAD);
 
 /// The most refs in one `ListRefs` reply. A request for more gets this many.
 /// Even 1,000 names of the longest length fit one frame, as the check below

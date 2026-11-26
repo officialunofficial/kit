@@ -475,15 +475,12 @@ fn seed_long_refs(fx: &Fixture, range: std::ops::Range<usize>) {
         .unwrap();
     let wire = std::fs::read(&seed).unwrap();
     std::fs::remove_file(&seed).unwrap();
-    let first = "x".repeat(250);
-    let second = "y".repeat(MAX_REF_NAME_BYTES - "refs/heads/0000/".len() - first.len() - 1);
+    let heads = fx.root().join("refs/heads");
+    let first_tail = "x".repeat(246);
+    let second = "y".repeat(MAX_REF_NAME_BYTES - "refs/heads/0000/".len() - first_tail.len());
     for i in range {
-        let dir = fx
-            .root()
-            .join("refs/heads")
-            .join(format!("{i:04}"))
-            .join(&first);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = heads.join(format!("{i:04}{first_tail}"));
+        std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join(&second), &wire).unwrap();
     }
 }
