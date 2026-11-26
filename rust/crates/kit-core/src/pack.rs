@@ -162,8 +162,9 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
 /// tiny packs that claim more than that ratio runs out after about 570 of
 /// them. The floor is high so that the packs of older writers, which paired a
 /// changed same-path blob of any size as a delta, do not run an honest fetch
-/// out: such a pack drains a gigabyte at most, and a fetch holds a few hundred
-/// of them at the very most.
+/// out: each such delta over a base of 1 GiB drains about 1 GiB, so a fetch
+/// would need over a thousand of them, over a TiB of stored merged blobs that
+/// were each cut short.
 const FETCH_DECODED_FLOOR: u64 = 1 << 40;
 
 /// What each wire byte of a pack adds to the budget of its fetch: 2 Mi
@@ -174,7 +175,7 @@ const FETCH_DECODED_FLOOR: u64 = 1 << 40;
 /// expands at most 9,362 times, since a COPY of 65,535 bytes takes 7 (SPEC-DELTA §7),
 /// and the planner deltas results of at most 16 MiB (`ManifestBudget::each`,
 /// `MAX_PAIRED_BLOB`) against bases of at most 16 MiB. The most a pack counts per wire byte is
-/// then a zstd delta entry of 256 COPYs of one 64 KiB block, whose stream
+/// then a zstd delta entry of 256 COPYs of one 64 KiB block of its base, whose stream
 /// zstd packs into a few dozen bytes, with the result and the base read from
 /// the store counted: about 32 MiB of decoded bytes for about 70 bytes of
 /// pack, or 480,000 times. The test `a_pack_a_kit_writer_makes_fits_the_fetch_ratio` builds
