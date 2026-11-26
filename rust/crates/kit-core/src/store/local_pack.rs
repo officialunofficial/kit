@@ -731,6 +731,53 @@ impl Read for Contents {
     }
 }
 
+/// Keep the failure of one pair so the others can still be checked. A newer
+/// format or a busy repair lock is about the whole store, not one pair, and
+/// ends the check at once.
+fn keep_going<T>(
+    result: StoreResult<T>,
+    problems: &mut Vec<StoreError>,
+    done: impl FnOnce(T),
+) -> StoreResult<()> {
+    match result {
+        Ok(value) => done(value),
+        Err(error) if is_store_wide(&error) => return Err(error),
+        Err(error) => problems.push(error),
+    }
+    Ok(())
+}
+
+fn is_store_wide(error: &StoreError) -> bool {
+    match error {
+        StoreError::IncompatibleRepoFormat { .. } => true,
+        StoreError::Io(e) => e.kind() == io::ErrorKind::WouldBlock,
+        _ => false,
+    }
+}
+
+/// One error for every problem found. A single problem is returned as it is.
+/// Several become one damage report that names each pack, led by the first
+/// damaged one, so the caller still sees damage and the repair hint.
+fn report_all(mut problems: Vec<StoreError>) -> StoreError {
+    if problems.len() == 1 {
+        return problems.remove(0);
+    }
+    let lead = problems
+        .iter()
+        .position(|e| matches!(e, StoreError::LocalPackDamaged { .. }))
+        .unwrap_or(0);
+    let first = problems.remove(lead);
+    let others: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    let others = format!("{} more: {}", others.len(), others.join("; "));
+    match first {
+        StoreError::LocalPackDamaged { pack, reason } => StoreError::LocalPackDamaged {
+            pack,
+            reason: format!("{reason}; and {others}").into(),
+        },
+        other => StoreError::Io(io::Error::other(format!("{other}; and {others}"))),
+    }
+}
+
 fn visit_pairs(dir: &Path, mut visit: impl FnMut(Pair) -> StoreResult<()>) -> StoreResult<()> {
     visit_pairs_until(dir, |pair| {
         visit(pair)?;
@@ -985,41 +1032,54 @@ impl ObjectStore {
         }
         let dir = self.pack_dir();
         let mut rebuilt = 0;
-        let mut first_error = None;
+        let mut problems = Vec::new();
         if repair {
             // A pack that lost its index is invisible. Verify it whole, then
             // give it back its index. This goes first, so that a damaged live
-            // pair does not leave a lone pack without its index; a failed lone
-            // pack does not stop the other lone packs either.
+            // pair does not leave a lone pack without its index.
             for pair in list_pairs(&dir)? {
                 if lacks_index(&pair)? {
-                    match self.rebuild_index(&dir, &pair, true) {
-                        Ok(done) => rebuilt += usize::from(done),
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                        }
-                    }
+                    keep_going(
+                        self.rebuild_index(&dir, &pair, true),
+                        &mut problems,
+                        |done| rebuilt += usize::from(done),
+                    )?;
                 }
             }
         }
-        visit_pairs(&dir, |pair| {
-            pair.check_versions()?;
-            let rows = scan_pair(&pair)?;
-            if matching_index(&pair, &rows)? {
-                return Ok(());
+        // One damaged pair does not stop the check or the repair of the
+        // others: every problem is kept and reported together.
+        for pair in list_pairs(&dir)? {
+            if !pair_is_live(&pair)? {
+                continue;
             }
-            if !repair {
-                return Err(pair.index_error("index does not match verified pack"));
-            }
-
-            drop(rows);
-            rebuilt += usize::from(self.rebuild_index(&dir, &pair, false)?);
-            Ok(())
-        })?;
-        if let Some(error) = first_error {
-            return Err(error);
+            keep_going(
+                self.check_live_pair(&dir, &pair, repair),
+                &mut problems,
+                |done| {
+                    rebuilt += usize::from(done);
+                },
+            )?;
         }
-        Ok(rebuilt)
+        match problems.len() {
+            0 => Ok(rebuilt),
+            _ => Err(report_all(problems)),
+        }
+    }
+
+    /// Check one live pair; in repair mode, give it a verified index. Says
+    /// whether an index was rebuilt.
+    fn check_live_pair(&self, dir: &Path, pair: &Pair, repair: bool) -> StoreResult<bool> {
+        pair.check_versions()?;
+        let rows = scan_pair(pair)?;
+        if matching_index(pair, &rows)? {
+            return Ok(false);
+        }
+        if !repair {
+            return Err(pair.index_error("index does not match verified pack"));
+        }
+        drop(rows);
+        self.rebuild_index(dir, pair, false)
     }
 
     /// Write the index of `pair` from its verified pack. `lone` says the pack

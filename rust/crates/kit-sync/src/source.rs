@@ -771,6 +771,7 @@ mod tests {
             false,
             &mut crate::apply::ChainApplied::default(),
             &store.prune_guard().unwrap(),
+            &mut kit_core::pack::FetchDecodeBudget::new(),
             |_| Ok(()),
         )
         else {

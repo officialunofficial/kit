@@ -9,7 +9,7 @@ pub mod kit {
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
         pub mod v1 {
             use super::*;
-            include!(concat!(env!("OUT_DIR"), "/kit.common.v1.mod.rs"));
+            include!("kit.common.v1.mod.rs");
         }
     }
     #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
@@ -18,21 +18,21 @@ pub mod kit {
         #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
         pub mod v1 {
             use super::*;
-            include!(concat!(env!("OUT_DIR"), "/kit.rpc.v1.mod.rs"));
+            include!("kit.rpc.v1.mod.rs");
             #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
             pub mod signer {
                 use super::*;
-                include!(concat!(env!("OUT_DIR"), "/kit.rpc.v1.signer.mod.rs"));
+                include!("kit.rpc.v1.signer.mod.rs");
             }
             #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
             pub mod ssh {
                 use super::*;
-                include!(concat!(env!("OUT_DIR"), "/kit.rpc.v1.ssh.mod.rs"));
+                include!("kit.rpc.v1.ssh.mod.rs");
             }
             #[allow(non_camel_case_types, dead_code, unused_imports, unused_qualifications, clippy::derivable_impls, clippy::match_single_binding, clippy::uninlined_format_args, clippy::doc_lazy_continuation, clippy::module_inception)]
             pub mod verify {
                 use super::*;
-                include!(concat!(env!("OUT_DIR"), "/kit.rpc.v1.verify.mod.rs"));
+                include!("kit.rpc.v1.verify.mod.rs");
             }
         }
     }

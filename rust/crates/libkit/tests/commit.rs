@@ -386,6 +386,76 @@ fn a_commit_that_concludes_a_merge_has_two_parents_and_clears_the_merge() {
 }
 
 #[test]
+fn a_merge_state_over_its_own_merge_commit_is_no_merge() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    let other = f.loose_commit("other", vec![]);
+    let state = start_merge(&f, other);
+    f.stage("b.txt", "merged\n");
+    let pending = f.begin(false).unwrap();
+    let merged = f.make("Merge branch 'other'", false, &pending).unwrap();
+    // A stop after the branch moved and before the state was cleared.
+    conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
+    assert!(conflict_state::is_merge_in_progress(&f.layout));
+
+    // The state has no message to offer, and an amend is no amend of a merge.
+    let pending = f.begin(false).unwrap();
+    assert_eq!(pending.default_message(), None);
+    assert!(f.begin(true).is_ok());
+    f.stage("c.txt", "later\n");
+    let later = f.make("later", false, &pending).unwrap();
+    assert_eq!(
+        later.parents,
+        vec![merged.commit],
+        "no sibling of the merge"
+    );
+    assert_eq!(f.head(), Some(later.commit));
+    assert_eq!(f.read(&later.commit).parents, vec![merged.commit]);
+    assert!(!conflict_state::is_merge_in_progress(&f.layout));
+}
+
+#[test]
+fn an_amend_over_a_merge_state_that_a_stop_left_replaces_the_merge_commit() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    let other = f.loose_commit("other", vec![]);
+    let state = start_merge(&f, other);
+    f.stage("b.txt", "merged\n");
+    let pending = f.begin(false).unwrap();
+    let merged = f.make("Merge branch 'other'", false, &pending).unwrap();
+    conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
+
+    let pending = f.begin(true).unwrap();
+    let amended = f.make("amended", false, &pending).unwrap();
+    assert_eq!(
+        amended.parents, merged.parents,
+        "the merge keeps both parents"
+    );
+    assert!(!conflict_state::is_merge_in_progress(&f.layout));
+}
+
+#[test]
+fn a_merge_state_over_another_head_is_still_a_merge() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    let first = f.commit("first");
+    let other = f.loose_commit("other", vec![]);
+    start_merge(&f, other);
+    // A commit with the same parents in another order is not the merge.
+    let reversed = f.loose_commit("reversed", vec![other, first.commit]);
+    refs::write_ref(&f.layout, "main", &reversed).unwrap();
+
+    let pending = f.begin(false).unwrap();
+    assert_eq!(
+        pending.default_message().as_deref(),
+        Some("Merge branch 'other'")
+    );
+    assert!(matches!(f.begin(true), Err(Error::AmendDuringMerge)));
+}
+
+#[test]
 fn an_amend_is_refused_while_a_merge_is_in_progress() {
     let mut f = Fixture::new();
     f.stage("a.txt", "one\n");
@@ -641,7 +711,7 @@ fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_m
 }
 
 #[test]
-fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
+fn a_stale_conflict_list_cannot_commit_an_interrupted_merge() {
     let mut f = Fixture::new();
     f.stage("a.txt", "one\n");
     f.commit("first");
@@ -658,8 +728,8 @@ fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
         ours_hash: None,
         theirs_hash: None,
     }];
-    conflict_state::write_merge_state(&f.layout, &state, &conflicts).unwrap();
-    fs::remove_file(f.layout.conflicts_file()).unwrap();
+    conflict_state::write_conflicts(f.layout.worktree_state_dir(), &conflicts).unwrap();
+    conflict_state::begin_merge_state(&f.layout, &state).unwrap();
     f.stage("b.txt", "merged\n");
     let before = f.head();
 

@@ -323,13 +323,26 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(None) => return emit_err("no revert in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read revert state: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(e) = conflict_state::ensure_conflict_list(layout) {
-        return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR);
-    }
     let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
+    // A stop after the commit moved the branch and before the state was
+    // cleared leaves the state over a finished revert. A second commit would
+    // repeat it.
+    if let Some(commit) = super::finished_pick(layout, store, state.orig_head, &records) {
+        let tree_hash = match load_tree_hash(store, commit) {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+        if let Err(e) = conflict_state::clear_revert_state(layout) {
+            return emit_err(&format!("clear revert state: {e}"), exit::GENERAL_ERROR);
+        }
+        return report_continued(&state, &commit, &tree_hash, json);
+    }
+    if let Err(e) = conflict_state::ensure_conflict_list(layout) {
+        return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR);
+    }
     match libkit::conflict::first_unresolved_marker(layout.worktree_root(), &records) {
         Ok(Some(path)) => {
             return emit_err(
@@ -377,21 +390,25 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
     if let Err(e) = conflict_state::clear_revert_state(layout) {
         return emit_err(&format!("clear revert state: {e}"), exit::GENERAL_ERROR);
     }
+    report_continued(&state, &commit_hash, &tree_hash, json)
+}
+
+fn report_continued(state: &RevertState, commit: &Hash, tree: &Hash, json: bool) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
         stderr,
         "reverted {} as {}",
         format::short_hash(&state.revert_head, 8),
-        format::short_hash(&commit_hash, 8),
+        format::short_hash(commit, 8),
     );
     drop(stderr);
     if json {
         let mut obj = JsonObject::new();
         obj.field_bool("ok", true)
             .field_str("kind", "commit")
-            .field_hash("hash", &commit_hash)
+            .field_hash("hash", commit)
             .field_hash("reverted", &state.revert_head)
-            .field_hash("tree", &tree_hash);
+            .field_hash("tree", tree);
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
@@ -412,20 +429,35 @@ fn abort(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(code) = restore_to(layout, store, state.orig_head, &records) {
+    // A stop after the commit moved the branch and before the state was
+    // cleared leaves the state over a finished revert. `HEAD` is the only ref
+    // that holds the commit, so the abort only clears the state.
+    let kept = super::finished_pick(layout, store, state.orig_head, &records);
+    if kept.is_none()
+        && let Err(code) = restore_to(layout, store, state.orig_head, &records)
+    {
         return code;
     }
     if let Err(e) = conflict_state::clear_revert_state(layout) {
         return emit_err(&format!("clear revert state: {e}"), exit::GENERAL_ERROR);
     }
+    let head = kept.unwrap_or(state.orig_head);
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "revert aborted; HEAD restored");
+    let _ = writeln!(
+        stderr,
+        "{}",
+        if kept.is_some() {
+            "revert already committed; state cleared, HEAD kept"
+        } else {
+            "revert aborted; HEAD restored"
+        }
+    );
     drop(stderr);
     if json {
         let mut obj = JsonObject::new();
         obj.field_bool("ok", true)
             .field_str("kind", "aborted")
-            .field_hash("hash", &state.orig_head);
+            .field_hash("hash", &head);
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
@@ -444,9 +476,13 @@ fn restore_to(
     let op_result = conflict_state::read_result_tree(layout.worktree_state_dir())
         .ok()
         .flatten();
-    if let Err(e) =
-        libkit::conflict::ensure_abort_safe(layout, store, records, target_tree, op_result)
-    {
+    if let Err(e) = libkit::conflict::ensure_operation_abort_safe(
+        layout,
+        store,
+        records,
+        target_tree,
+        op_result,
+    ) {
         return Err(super::fail(e));
     }
     if let Err(e) = libkit::conflict::reset_paths(layout, store, records, target_tree, op_result) {

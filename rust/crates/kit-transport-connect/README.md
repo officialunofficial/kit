@@ -27,12 +27,12 @@ Connect-code mapping (the client direction is `src/error.rs`), and the
 `generated`; its native runtime features stay here. Both the client and server
 use the canonical `<repo-root>/proto/kit/transport/v1/transport.proto`.
 
-- **Default path**: `kit-rpc` stages committed sources from
-  `generated/transport/` into `$OUT_DIR`; consumers and docs.rs need no `protoc`.
+- **Default path**: `kit-rpc` compiles the committed sources in
+  `generated/transport/`; consumers and docs.rs need no `protoc`.
 - **Regeneration path**: run `scripts/regen-transport-proto.sh` from the repo
-  root (requires `protoc >= 27` on `PATH`, or via `PROTOC`). It enables
-  `KIT_TRANSPORT_CODEGEN=1` for the owning crate and refreshes the single
-  shared tree. Commit that output after editing the canonical proto.
+  root (requires `protoc >= 27` on `PATH`, or via `PROTOC`). It runs the
+  `kit-rpc-codegen` tool and refreshes the single shared tree. Commit that
+  output after editing the canonical proto.
 
 ## Native and wasm
 
