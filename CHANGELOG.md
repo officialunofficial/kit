@@ -24,6 +24,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit shortlog` groups the commits that `kit log` shows by author, with `-s`, `-n`, `-e`, `--format=json`, the revision and path rules of `kit log`, and `kit log` text on standard input, as git reads it.
 - `kit range-diff` shows how each commit of a series changed between two versions of it, with the `=`, `!`, `<` and `>` lines of git and the diff of each changed pair. It pairs the commits by git's least-cost assignment, takes the ranges in git's three forms and `--creation-factor`, and bounds each side at 1,000 commits.
 
+### Fixed
+
+- The line diff joins two runs of changed lines that can slide together into one hunk, as git does, instead of printing them apart: `l4 l0 l5 l5` to `l5` now removes the first three lines.
+
 ### Breaking
 
 - `libkit::diff::Request::renames` is an `Option<RenameOptions>` instead of a `bool`, and `libkit::diff::between_trees` takes the rename options as a fourth argument. `kit_core::ops::DiffEntry` gains `similarity`, `libkit::diff::FileStat` gains `old_path` and `libkit::status::Record` gains `similarity`.

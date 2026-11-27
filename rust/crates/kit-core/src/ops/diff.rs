@@ -786,6 +786,52 @@ pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHu
     )
 }
 
+/// The changed regions between two texts, with no context: for each, the
+/// 0-based half-open line range it covers on the old side and on the new
+/// side, in order. An insertion has an empty old range at the line it goes
+/// before, and a deletion an empty new range. The diff is the one of
+/// [`unified_hunks`], binary content included, compared line by line.
+#[must_use]
+pub fn changed_line_spans(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
+    let script = edit_script(
+        &old_lines,
+        &new_lines,
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let mut out = Vec::new();
+    let (mut old_at, mut new_at) = (0, 0);
+    let mut open: Option<(usize, usize)> = None;
+    for op in &script.ops {
+        match *op {
+            DiffOp::Equal(o, n) => {
+                if let Some((os, ns)) = open.take() {
+                    out.push((os..old_at, ns..new_at));
+                }
+                old_at = o + 1;
+                new_at = n + 1;
+            }
+            DiffOp::Delete(o) => {
+                open.get_or_insert((old_at, new_at));
+                old_at = o + 1;
+            }
+            DiffOp::Insert(n) => {
+                open.get_or_insert((old_at, new_at));
+                new_at = n + 1;
+            }
+        }
+    }
+    if let Some((os, ns)) = open {
+        out.push((os..old_at, ns..new_at));
+    }
+    out
+}
+
 fn to_patch_hunk(hunk: &Hunk<'_>, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> PatchHunk {
     let lines = hunk
         .ops
@@ -1267,8 +1313,7 @@ fn edit_script(
     max_edits: usize,
 ) -> EditScript {
     let mut changes = myers_changed(old, new, mode, max_edits);
-    compact_changes(old, &mut changes.old, mode);
-    compact_changes(new, &mut changes.new, mode);
+    compact_changes(old, new, &mut changes.old, &mut changes.new, mode);
     EditScript {
         ops: script_from_flags(old, new, &changes.old, &changes.new),
         minimal: changes.minimal,
@@ -1536,35 +1581,179 @@ fn stopped_search_end(
     (step, x, y, tail(x, y))
 }
 
-/// Slide each maximal run of changed lines downward while the line leaving the
-/// top of the run equals the line entering at the bottom — git's
-/// `xdl_change_compact` canonical placement, so a change among identical
-/// neighbours lands where git puts it.
-fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool], mode: WhitespaceMode) {
-    let n = lines.len();
-    let mut i = 0;
-    while i < n {
-        if !changed[i] {
-            i += 1;
-            continue;
-        }
-        // [start, end) is a run of changed lines.
-        let start = i;
-        let mut end = i;
-        while end < n && changed[end] {
+/// A run of changed lines of one side, `[start, end)`. An empty run marks
+/// the place between two unchanged lines where the other side has a run.
+#[derive(Debug, Clone, Copy)]
+struct Group {
+    start: usize,
+    end: usize,
+}
+
+/// One side of the diff as git's `xdl_change_compact` sees it: its lines and
+/// which of them changed.
+struct Side<'s, 'l> {
+    lines: &'s [DiffLine<'l>],
+    changed: &'s mut [bool],
+    mode: WhitespaceMode,
+}
+
+impl Side<'_, '_> {
+    fn is_changed(&self, i: usize) -> bool {
+        self.changed.get(i).copied().unwrap_or(false)
+    }
+
+    /// The first group, which may be empty at line 0.
+    fn first_group(&self) -> Group {
+        let mut end = 0;
+        while self.is_changed(end) {
             end += 1;
         }
-        // Slide down: the line at `start` leaves the run and the line at
-        // `end` joins it, valid only when they are identical.
-        let (mut s, mut e) = (start, end);
-        while e < n && lines_equal(&lines[s], &lines[e], mode) {
-            changed[s] = false;
-            changed[e] = true;
-            s += 1;
-            e += 1;
-        }
-        i = e;
+        Group { start: 0, end }
     }
+
+    /// Move to the next group; `false` at the last one.
+    fn next_group(&self, g: &mut Group) -> bool {
+        if g.end == self.lines.len() {
+            return false;
+        }
+        g.start = g.end + 1;
+        g.end = g.start;
+        while self.is_changed(g.end) {
+            g.end += 1;
+        }
+        true
+    }
+
+    /// Move to the previous group; `false` at the first one.
+    fn previous_group(&self, g: &mut Group) -> bool {
+        if g.start == 0 {
+            return false;
+        }
+        g.end = g.start - 1;
+        g.start = g.end;
+        while g.start > 0 && self.is_changed(g.start - 1) {
+            g.start -= 1;
+        }
+        true
+    }
+
+    /// Slide the group down one line, joining the group below when they
+    /// meet; `false` when the lines do not allow it.
+    fn slide_down(&mut self, g: &mut Group) -> bool {
+        if g.end < self.lines.len()
+            && lines_equal(&self.lines[g.start], &self.lines[g.end], self.mode)
+        {
+            self.changed[g.start] = false;
+            self.changed[g.end] = true;
+            g.start += 1;
+            g.end += 1;
+            while self.is_changed(g.end) {
+                g.end += 1;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Slide the group up one line, joining the group above when they meet;
+    /// `false` when the lines do not allow it.
+    fn slide_up(&mut self, g: &mut Group) -> bool {
+        if g.start > 0 && lines_equal(&self.lines[g.start - 1], &self.lines[g.end - 1], self.mode) {
+            g.start -= 1;
+            g.end -= 1;
+            self.changed[g.start] = true;
+            self.changed[g.end] = false;
+            while g.start > 0 && self.is_changed(g.start - 1) {
+                g.start -= 1;
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Place the changed lines of `side` the way git's `xdl_change_compact`
+/// does, without the indent heuristic: each group slides up and down over
+/// identical lines, joining the groups it meets, then rests at the lowest
+/// place where it lines up with a change of `other`, or at the bottom when
+/// there is none. Two groups that can join therefore print as one hunk, as
+/// in git.
+fn compact_side(side: &mut Side<'_, '_>, other: &Side<'_, '_>) {
+    let mut g = side.first_group();
+    let mut go = other.first_group();
+    loop {
+        if g.end != g.start {
+            let mut earliest_end;
+            let mut end_matching_other;
+            loop {
+                let group_len = g.end - g.start;
+                end_matching_other = None;
+                while side.slide_up(&mut g) {
+                    other.previous_group(&mut go);
+                }
+                earliest_end = g.end;
+                if go.end > go.start {
+                    end_matching_other = Some(g.end);
+                }
+                while side.slide_down(&mut g) {
+                    other.next_group(&mut go);
+                    if go.end > go.start {
+                        end_matching_other = Some(g.end);
+                    }
+                }
+                if group_len == g.end - g.start {
+                    break;
+                }
+            }
+            if g.end != earliest_end && end_matching_other.is_some() {
+                while go.end == go.start {
+                    if !side.slide_up(&mut g) || !other.previous_group(&mut go) {
+                        break;
+                    }
+                }
+            }
+        }
+        if !side.next_group(&mut g) {
+            break;
+        }
+        other.next_group(&mut go);
+    }
+}
+
+/// Run [`compact_side`] on the old side, then on the new one, as git does.
+fn compact_changes(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    old_changed: &mut [bool],
+    new_changed: &mut [bool],
+    mode: WhitespaceMode,
+) {
+    {
+        let mut a = Side {
+            lines: old,
+            changed: old_changed,
+            mode,
+        };
+        let b = Side {
+            lines: new,
+            changed: new_changed,
+            mode,
+        };
+        compact_side(&mut a, &b);
+    }
+    let mut b = Side {
+        lines: new,
+        changed: new_changed,
+        mode,
+    };
+    let a = Side {
+        lines: old,
+        changed: old_changed,
+        mode,
+    };
+    compact_side(&mut b, &a);
 }
 
 /// Build the `DiffOp` sequence from the per-side changed flags, in git's
@@ -1921,6 +2110,18 @@ mod tests {
     use super::*;
     use crate::object::{Blob, Tree};
     use crate::serialize;
+
+    /// Two runs that can slide together join into one, as in git:
+    /// `l4 l0 l5 l5` to `l5` removes the first three lines, not lines 1, 2
+    /// and 4.
+    #[test]
+    fn runs_that_can_meet_join_into_one_hunk() {
+        assert_eq!(
+            changed_line_spans(b"l4\nl0\nl5\nl5\n", b"l5\n"),
+            [(0..3, 0..0)]
+        );
+        assert!(changed_line_spans(b"a\nx\nb\n", b"a\nx\nb\n").is_empty());
+    }
     use tempfile::TempDir;
 
     #[test]
