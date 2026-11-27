@@ -322,6 +322,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   the rebased branch and reports the refs it could not update. kit moves
   only local branches; an `update-ref` line must name `refs/heads/<branch>`
   of an existing branch other than the rebased one.
+- **`describe`.** A name reads `<tag>-<n>-k<id>` where git writes
+  `g<id>`, so it never passes for a git name. kit counts `<n>` exactly over
+  the whole history and picks the smallest, where git stops its walk after
+  ten candidates. With no tag kit exits 1 where git exits 128. There is no
+  `--contains`, `--all`, `--first-parent` or `--candidates`.
 - **`grep`.** Patterns use Rust's `regex` syntax: there is no `-P` and no
   backreference, and `-G` reads a pattern as `-E` does instead of as a basic
   regular expression. Symlinks are not searched. There are no context,

@@ -478,6 +478,22 @@ History / commits:
   of the log, a pruned record and a malformed number are errors. `kit gc`
   keeps every listed commit until its record expires (SPEC-GC, "Recovery
   log").
+- `kit describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]]
+  [--match <glob>]... [--exclude <glob>]... [<rev>]` &mdash; name `<rev>`
+  (default `HEAD`) after the nearest tag that reaches it, as
+  `<tag>-<n>-k<short id>`. `<n>` is the number of commits that `<rev>`
+  reaches and the tag does not, as `rev-list <tag>..<rev>` counts them. The
+  tag with the smallest `<n>` wins, and between equals the newest: the date
+  of an annotated tag, or of the commit a lightweight tag names. Only
+  annotated tags count, unless `--tags`. kit writes `k` where git writes
+  `g`, so a kit name is never mistaken for a git one. A tag on `<rev>`
+  itself prints alone, unless `--long`. `--abbrev=<n>` sets the length of
+  the id (default 7), and `--abbrev=0` prints the tag alone. `--match` and
+  `--exclude` keep or drop tags whose names match a glob, as `branch
+  --list` reads it. With no tag, `--always` prints the short id, and
+  otherwise kit prints `no names found` and exits 1. `--dirty` appends
+  `-dirty`, or `<mark>`, when a tracked file differs from `HEAD` in the
+  index or the worktree; it takes no `<rev>`.
 - `kit grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F | -E | -G] [-e <pattern>]...
   [<pattern>] [--cached | <rev>...] [[--] <path>...]` &mdash; print the lines
   of tracked files that match a pattern, as `<path>:<line>`, with `-n` as
