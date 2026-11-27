@@ -30,6 +30,7 @@ pub(crate) const LIST_REFS_LIMIT: usize = 2 * 1024 * 1024;
 const CHALLENGE_TYPE: &str = <crate::proto::AdmissionChallenge as buffa::MessageName>::FULL_NAME;
 const PENDING_TYPE: &str = "kit.transport.v1.PendingVerification";
 const MEMBERSHIP_TYPE: &str = "kit.transport.v1.MembershipNotVisible";
+const WITHHELD_TYPE: &str = <crate::proto::ContentWithheld as buffa::MessageName>::FULL_NAME;
 
 /// Injectable HTTP channel. Bound the response while receiving it, refuse
 /// redirects, and retain the exact request for any ambiguous retry. Transport
@@ -537,6 +538,12 @@ pub enum Error {
     /// `unavailable` with a `Retry-After` hint, clamped to 1-60 s.
     #[error("retry after {ms} ms")]
     RetryAfter { ms: u64 },
+    /// The caller may read the repository, but part of its content is
+    /// withheld (`permission_denied` with a `ContentWithheld` detail).
+    /// Permanent for the caller's current view: an unchanged retry fails the
+    /// same way.
+    #[error("Part of this Kit is withheld.")]
+    ContentWithheld { ref_name: String },
     #[error("object sink: {0}")]
     Sink(String),
     #[error("object {id} rejected: {reason}")]
@@ -558,6 +565,9 @@ impl Error {
         };
         if let Some(retry_after) = pending_delay(&error) {
             return Self::PendingVerification { retry_after };
+        }
+        if let Some(ref_name) = content_withheld(&error) {
+            return Self::ContentWithheld { ref_name };
         }
         if error.code == "unavailable" {
             if membership_lag(&error) {
@@ -1716,6 +1726,34 @@ pub(crate) fn membership_lag(error: &RemoteError) -> bool {
                 .unwrap_or(&detail.type_url)
                 == MEMBERSHIP_TYPE
         })
+}
+
+/// The ref named by a `permission_denied` answer carrying exactly one valid
+/// `ContentWithheld` detail. A missing, malformed, oversized or repeated
+/// detail stays an ordinary refusal.
+pub(crate) fn content_withheld(error: &RemoteError) -> Option<String> {
+    if error.code != "permission_denied" {
+        return None;
+    }
+    let mut details = error
+        .details
+        .iter()
+        .filter(|detail| strip_type(&detail.type_url) == WITHHELD_TYPE);
+    let detail = details.next()?;
+    if details.next().is_some() {
+        return None;
+    }
+    let encoded = detail.value.as_deref().unwrap_or_default();
+    if encoded.len() > 88_836 {
+        return None;
+    }
+    let bytes = STANDARD_NO_PAD
+        .decode(encoded)
+        .or_else(|_| STANDARD.decode(encoded))
+        .ok()?;
+    let decoded = crate::proto::ContentWithheld::decode_from_slice(&bytes).ok()?;
+    let ref_name = decoded.ref_name.unwrap_or_default();
+    (ref_name.len() <= kit_core::refs::MAX_REF_NAME_BYTES).then_some(ref_name)
 }
 
 pub(crate) fn pending_delay(error: &RemoteError) -> Option<Duration> {

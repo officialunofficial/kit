@@ -342,6 +342,62 @@ fn membership_lag_is_classified_by_the_typed_detail_alone() {
     }
 }
 
+fn withheld(code: &str, ref_name: &str) -> RemoteError {
+    use base64::Engine as _;
+    use buffa::Message as _;
+    let value = base64::engine::general_purpose::STANDARD.encode(
+        crate::proto::ContentWithheld {
+            ref_name: Some(ref_name.into()),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+    );
+    RemoteError {
+        code: code.into(),
+        message: "never shown".into(),
+        details: vec![Detail {
+            type_url: "kit.transport.v1.ContentWithheld".into(),
+            value: Some(value),
+        }],
+        status: 403,
+        headers: HeaderMap::new(),
+    }
+}
+
+#[test]
+fn one_valid_withheld_detail_on_permission_denied_is_typed() {
+    let error = Error::Remote(Box::new(withheld(
+        "permission_denied",
+        "refs/kit/packmap/main",
+    )))
+    .typed();
+    assert!(matches!(
+        &error,
+        Error::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
+    ));
+    assert_eq!(error.to_string(), "Part of this Kit is withheld.");
+}
+
+#[test]
+fn every_other_withheld_shape_stays_the_raw_remote_error() {
+    let raw =
+        |error: RemoteError| matches!(Error::Remote(Box::new(error)).typed(), Error::Remote(_));
+    // Another code.
+    assert!(raw(withheld("not_found", "refs/heads/main")));
+    assert!(raw(withheld("unavailable", "refs/heads/main")));
+    // No detail, two details, a malformed value, an oversized ref name.
+    let mut none = withheld("permission_denied", "refs/heads/main");
+    none.details.clear();
+    assert!(raw(none));
+    let mut two = withheld("permission_denied", "refs/heads/main");
+    two.details.push(two.details[0].clone());
+    assert!(raw(two));
+    let mut malformed = withheld("permission_denied", "refs/heads/main");
+    malformed.details[0].value = Some("%%%".into());
+    assert!(raw(malformed));
+    assert!(raw(withheld("permission_denied", &"r".repeat(513))));
+}
+
 #[test]
 fn membership_lag_needs_unavailable_and_a_matching_signal() {
     for error in [
