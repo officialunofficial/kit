@@ -33,8 +33,17 @@ jobs:
         run: cargo build --release --locked -p kit-bin --bin kit
       - name: Bench
         run: |
-          scripts/bench-vs-git.sh rust/target/release/kit bench-results | tee bench.log
-          { echo '```'; sed -n '/== summary/,$p' bench.log; cat bench-results/sizes.txt bench-results/provenance.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          for i in 1 2; do
+            scripts/bench-vs-git.sh rust/target/release/kit "bench-results/run$i" | tee "bench-$i.log"
+            python3 - "bench-results/run$i" <<'PY'
+          import glob, json, os, sys
+          for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
+              for r in json.load(open(path))["results"]:
+                  s = r.get("summary", {}).get("time_wall_clock", r)
+                  print("EXACT", os.path.basename(path)[:-5], repr(s["mean"]), repr(s["stddev"]), len(r["times"]))
+          PY
+            { echo '```'; sed -n '/== summary/,$p' "bench-$i.log"; cat "bench-results/run$i/sizes.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: bench-results-${{ matrix.os }}
