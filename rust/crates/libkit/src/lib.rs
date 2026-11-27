@@ -40,6 +40,7 @@ mod error;
 #[cfg_attr(docsrs, doc(cfg(feature = "git-bridge")))]
 pub mod git;
 pub mod grants;
+pub mod grep;
 pub mod head;
 pub mod identity;
 pub mod keys;

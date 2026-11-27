@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect rerere gc sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc grep sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -167,6 +167,16 @@ complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l author -d "Override the author identity" -r
+complete -c kit -n "__fish_seen_subcommand_from grep" -s i -l ignore-case -d "Ignore case"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s w -l word-regexp -d "Match whole words"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s v -l invert-match -d "Select lines that do not match"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s n -l line-number -d "Print line numbers"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s l -l files-with-matches -d "Print only paths"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s c -l count -d "Print counts"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s q -l quiet -d "Print nothing"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s F -l fixed-strings -d "Literal patterns"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s e -d "A pattern" -r
+complete -c kit -n "__fish_seen_subcommand_from grep" -l cached -d "Search the staged content"
 complete -c kit -n "__fish_seen_subcommand_from blame" \
     -l format -d "Output format (default|json)" -r -a "default json"
 complete -c kit -n "__fish_seen_subcommand_from blame" \

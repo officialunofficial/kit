@@ -302,6 +302,9 @@ commands:
                     (--fork-audit re-derives referenced content)
   git status         Show bridge state dirs: direction, endpoints, key, refs
   git format-patch <range>  Render native commits as `git am`-able patches
+  grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]
+                    Print lines of tracked files that match a pattern;
+                    exit 0 on a match, 1 on none
   blame [--format=json|--porcelain|--line-porcelain] [-w] [-M[<num>]] [-C[<num>]] [--ignore-rev <rev>] [--ignore-rev-precise] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
                     Show line-level commit attribution; -L limits to a line
                     range, -w ignores whitespace, -M/-C detect moved/copied

@@ -146,6 +146,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
         "rerere" => commands::rerere::run(&rest),
+        "grep" => commands::grep::run(&rest),
         "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "worktree" => commands::worktree::run(&rest),

@@ -1488,6 +1488,37 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
+.It Cm grep Oo Fl i Oc Oo Fl w Oc Oo Fl v Oc Oo Fl n Oc Oo Fl l | Fl c | Fl q Oc Oo Fl F | Fl E | Fl G Oc Oo Fl e Ar pattern Oc Ar ... Oo Ar pattern Oc Oo Fl Fl cached | Ar rev ... Oc Oo Oo Fl Fl Oc Ar path ... Oc
+Print the lines of tracked files that match a pattern, as
+.Ar path : Ns Ar line ,
+or with
+.Fl n
+as
+.Ar path : Ns Ar number : Ns Ar line .
+It searches the tracked files in the worktree, the staged content with
+.Fl Fl cached ,
+or the tree of each
+.Ar rev ,
+whose name goes before each path. Untracked files and symlinks are never
+searched.
+.Fl i
+ignores case,
+.Fl w
+keeps whole words,
+.Fl v
+selects lines that do not match,
+.Fl l
+prints the paths,
+.Fl c
+prints a count for each file and
+.Fl q
+prints nothing. Patterns use the syntax of Rust's
+.Sy regex
+crate;
+.Fl F
+takes them literally. A binary file prints
+.Dq Binary file Ar path Li matches .
+The exit status is 0 when a line was selected and 1 when none was.
 .It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl Fl ignore-rev-precise Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file

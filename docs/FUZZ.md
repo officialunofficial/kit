@@ -146,6 +146,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
 | `kit_core::ops::parse_rename_score`, the span signature of `kit_core::ops::detect_renames` | `rename_score` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
+| The patterns of `libkit::grep::Matcher` | None. The user types them, the `regex` crate parses them in linear time and refuses an invalid one, and the searched files are read through the existing blob readers. Unit tests and a property test cover the line scanner. |
 | `libkit::branch::glob_match` | `branch_glob` |
 | `libkit::push::parse_refspec` | `push_refspec` |
 | `libkit::pathspec::index_path_for_arg` | `index_path_arg` |

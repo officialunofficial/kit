@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -81,7 +82,7 @@ fn ignore_case_word_invert_files_and_count() {
     );
     assert_eq!(
         grep(&repo, &["-v", "a"]).1,
-        "dir/b.txt:foo\ndir/sub/c.txt:nothing here\n"
+        "dir/b.txt:foo\ndir/b.txt:qux foo quux\ndir/sub/c.txt:nothing here\n"
     );
     assert_eq!(grep(&repo, &["-l", "foo"]).1, "a.txt\ndir/b.txt\n");
     assert_eq!(grep(&repo, &["-c", "foo"]).1, "a.txt:1\ndir/b.txt:2\n");
@@ -313,8 +314,10 @@ fn naive(path: &str, body: &str, needle: &str) -> String {
     body.lines()
         .enumerate()
         .filter(|(_, l)| l.contains(needle))
-        .map(|(i, l)| format!("{path}:{}:{l}\n", i + 1))
-        .collect()
+        .fold(String::new(), |mut acc, (i, l)| {
+            let _ = writeln!(acc, "{path}:{}:{l}", i + 1);
+            acc
+        })
 }
 
 proptest! {
@@ -333,7 +336,10 @@ proptest! {
         let mut expected = String::new();
         for (name, lines) in &files {
             let rel = format!("{name}.txt");
-            let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+            let body: String = lines.iter().fold(String::new(), |mut acc, l| {
+                let _ = writeln!(acc, "{l}");
+                acc
+            });
             repo.write(&rel, body.as_bytes());
             repo.ok(&["add", &rel]);
             expected.push_str(&naive(&rel, &body, &needle));
@@ -341,6 +347,6 @@ proptest! {
         repo.ok(&["commit", "-m", "files"]);
         let (code, out) = grep(&repo, &["-F", "-n", "-e", &needle]);
         prop_assert_eq!(&out, &expected);
-        prop_assert_eq!(code, Some(if out.is_empty() { 1 } else { 0 }));
+        prop_assert_eq!(code, Some(i32::from(out.is_empty())));
     }
 }
