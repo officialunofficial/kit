@@ -504,6 +504,56 @@ mod tests {
         assert_eq!((h[0].old_start, h[0].old_lines, h[0].new_start), (2, 0, 2));
     }
 
+    /// Each hunk as its header numbers and its lines, origin first.
+    fn shapes(h: &[RangeHunk]) -> Vec<(usize, usize, usize, usize, Vec<String>)> {
+        h.iter()
+            .map(|h| {
+                let lines = h
+                    .lines
+                    .iter()
+                    .map(|l| format!("{}{}", l.origin as char, String::from_utf8_lossy(&l.text)))
+                    .collect();
+                (h.old_start, h.old_lines, h.new_start, h.new_lines, lines)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_change_that_two_ranges_share_prints_under_each() {
+        // git clips the standard diff to each range in turn, so the lines
+        // of one creation show under both ranges.
+        let h = hunks_of(
+            &[1..3, 4..5],
+            b"",
+            b"header\nfn f() {\n    one();\n}\ntail\n",
+        );
+        assert_eq!(
+            shapes(&h),
+            [
+                (0, 0, 2, 2, vec!["+fn f() {".into(), "+    one();".into()]),
+                (0, 0, 5, 1, vec!["+tail".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_removal_next_to_a_range_prints_with_it() {
+        // A removal just above the range's first line is flushed into the
+        // range, and so is one just below its last line.
+        let h = hunks_of(&[1..2], b"a\nb\nc\n", b"a\nc\n");
+        assert_eq!(shapes(&h), [(2, 2, 2, 1, vec!["-b".into(), " c".into()])]);
+        let h = hunks_of(&[0..1], b"a\nb\nc\n", b"a\nc\n");
+        assert_eq!(shapes(&h), [(1, 2, 1, 1, vec![" a".into(), "-b".into()])]);
+    }
+
+    #[test]
+    fn a_range_with_only_context_prints_nothing() {
+        // A change outside the range brings context into it, which git
+        // drops.
+        let h = hunks_of(&[0..1], b"a\nb\nc\n", b"a\nb\nC\n");
+        assert!(h.is_empty());
+    }
+
     #[test]
     fn a_repeated_line_aligns_as_blame_does() {
         // Blame matches the old `l5` to the first new `l5`, so the change is
