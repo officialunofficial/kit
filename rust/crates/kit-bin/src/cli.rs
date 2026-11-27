@@ -314,6 +314,8 @@ commands:
                     (--fork-audit re-derives referenced content)
   git status         Show bridge state dirs: direction, endpoints, key, refs
   git format-patch <range>  Render native commits as `git am`-able patches
+  describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]] [--match <glob>] [--exclude <glob>] [<rev>]
+                    Name a commit after the nearest tag: <tag>-<n>-k<id>
   grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]
                     Print lines of tracked files that match a pattern;
                     exit 0 on a match, 1 on none
@@ -454,6 +456,7 @@ mod tests {
             "bisect",
             "rerere",
             "grep",
+            "describe",
             "sparse-checkout",
             "self",
             "serve",

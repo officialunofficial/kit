@@ -188,6 +188,10 @@ fn git(dir: &Path, home: &Path, args: &[&str]) -> Output {
         .env("GIT_AUTHOR_EMAIL", "parity@example.com")
         .env("GIT_COMMITTER_NAME", "parity")
         .env("GIT_COMMITTER_EMAIL", "parity@example.com")
+        // One fixed date, so git's date-ordered walk never depends on
+        // which second a commit lands in.
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
         .output()
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {}", stderr(&out));

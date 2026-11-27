@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect rerere gc grep sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc grep describe sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -167,6 +167,13 @@ complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l author -d "Override the author identity" -r
+complete -c kit -n "__fish_seen_subcommand_from describe" -l tags -d "Count lightweight tags"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l always -d "Fall back to the short id"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l abbrev -d "Id length" -r
+complete -c kit -n "__fish_seen_subcommand_from describe" -l long -d "Always print the long form"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l dirty -d "Mark a changed worktree"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l match -d "Keep tags matching a glob" -r
+complete -c kit -n "__fish_seen_subcommand_from describe" -l exclude -d "Drop tags matching a glob" -r
 complete -c kit -n "__fish_seen_subcommand_from grep" -s i -l ignore-case -d "Ignore case"
 complete -c kit -n "__fish_seen_subcommand_from grep" -s w -l word-regexp -d "Match whole words"
 complete -c kit -n "__fish_seen_subcommand_from grep" -s v -l invert-match -d "Select lines that do not match"

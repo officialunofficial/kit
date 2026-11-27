@@ -78,6 +78,7 @@ _kit() {
         'mcp:Start a Model Context Protocol server on stdio for MCP clients'
         'git:Git-bridge subcommands (git export, feature-gated)'
         'grep:Print lines of tracked files that match a pattern'
+        'describe:Name a commit after the nearest tag'
         'blame:Show line-level commit attribution'
         'prove:Build a disclosure bundle for a path, chunk, or byte range'
         'verify:Verify the signature on a commit'

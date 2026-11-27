@@ -9,6 +9,7 @@ pub(crate) mod chunk_heads;
 // OPS1 — diff / graph / merge / cherry_pick.
 pub mod cherry_pick;
 pub mod conflict_state;
+pub mod describe;
 pub mod diff;
 pub mod gc;
 pub mod graph;

@@ -20,6 +20,7 @@ pub mod closure;
 pub mod commit;
 pub mod config_cmd;
 pub mod conflict;
+pub mod describe;
 pub mod diff;
 pub mod epoch;
 pub mod fetch;

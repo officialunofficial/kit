@@ -1488,6 +1488,32 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
+.It Cm describe Oo Fl Fl tags Oc Oo Fl Fl always Oc Oo Fl Fl abbrev Ns = Ns Ar n Oc Oo Fl Fl long Oc Oo Fl Fl dirty Ns Oo = Ns Ar mark Oc Oc Oo Fl Fl match Ar glob Oc Oo Fl Fl exclude Ar glob Oc Op Ar rev
+Name
+.Ar rev
+.Pq default Cm HEAD
+after the nearest annotated tag that reaches it, or any tag with
+.Fl Fl tags ,
+as
+.Ar tag Ns - Ns Ar n Ns -k Ns Ar id ,
+where
+.Ar n
+counts the commits that
+.Ar rev
+reaches and the tag does not. kit writes
+.Sq k
+where git writes
+.Sq g .
+A tag on
+.Ar rev
+prints alone unless
+.Fl Fl long .
+With no tag,
+.Fl Fl always
+prints the short id; otherwise the exit status is 1.
+.Fl Fl dirty
+appends a mark when a tracked file differs from
+.Cm HEAD .
 .It Cm grep Oo Fl i Oc Oo Fl w Oc Oo Fl v Oc Oo Fl n Oc Oo Fl l | Fl c | Fl q Oc Oo Fl F | Fl E | Fl G Oc Oo Fl e Ar pattern Oc Ar ... Oo Ar pattern Oc Oo Fl Fl cached | Ar rev ... Oc Oo Oo Fl Fl Oc Ar path ... Oc
 Print the lines of tracked files that match a pattern, as
 .Ar path : Ns Ar line ,
