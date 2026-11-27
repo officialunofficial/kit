@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use super::diff::changed_line_spans;
+use super::blame::matched_line_spans;
 
 /// A span of lines: 0-based, end excluded.
 pub type Span = Range<usize>;
@@ -101,7 +101,7 @@ pub struct Change {
 /// The changes from `parent` to `target`, in order.
 #[must_use]
 pub fn changes(parent: &[u8], target: &[u8]) -> Vec<Change> {
-    changed_line_spans(parent, target)
+    matched_line_spans(parent, target)
         .into_iter()
         .map(|(parent, target)| Change { parent, target })
         .collect()
@@ -356,6 +356,16 @@ mod tests {
             .map(|l| format!("{}{}", l.origin as char, String::from_utf8_lossy(&l.text)))
             .collect();
         assert_eq!(text, [" a", "-b", "+B", "+B2"]);
+    }
+
+    #[test]
+    fn a_repeated_line_aligns_as_blame_does() {
+        // Blame matches the old `l5` to the first new `l5`, so the change is
+        // the insertion of `l0` above it and of the second `l5` below.
+        let c = changes(b"l5\n", b"l0\nl5\nl5\n");
+        assert_eq!(c.len(), 2);
+        assert_eq!((c[0].parent.clone(), c[0].target.clone()), (0..0, 0..1));
+        assert_eq!((c[1].parent.clone(), c[1].target.clone()), (1..1, 2..3));
     }
 
     #[test]

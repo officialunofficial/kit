@@ -798,6 +798,34 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 ///
 /// # Errors
 /// - [`BlameError::FileTooLarge`] if either side exceeds [`BLAME_MAX_LINES`].
+/// The changed regions between two texts under blame's line matching, as
+/// 0-based half-open `(old, new)` line ranges in order. `log -L` maps its
+/// ranges with these, so a line that blame credits to an older commit is
+/// one that `log -L` follows into that commit.
+pub(crate) fn matched_line_spans(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
+    let mapping = match_lines(&old_lines, &new_lines);
+    let mut out = Vec::new();
+    let (mut old_at, mut new_at) = (0, 0);
+    for (j, matched) in mapping.iter().enumerate() {
+        if let Some(i) = *matched {
+            if i > old_at || j > new_at {
+                out.push((old_at..i, new_at..j));
+            }
+            old_at = i + 1;
+            new_at = j + 1;
+        }
+    }
+    if old_at < old_lines.len() || new_at < new_lines.len() {
+        out.push((old_at..old_lines.len(), new_at..new_lines.len()));
+    }
+    out
+}
+
 fn match_lines_with_options(
     old_lines: &[Vec<u8>],
     new_lines: &[Vec<u8>],
