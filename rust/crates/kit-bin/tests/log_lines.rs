@@ -34,9 +34,43 @@ fn log(repo: &Repo, args: &[&str]) -> String {
 
 /// Is `line` a line of a diff, rather than a commit line of `--oneline`?
 fn is_diff_line(line: &str) -> bool {
-    ["diff --git ", "--- ", "+++ ", "@@ ", " ", "+", "-", "\\"]
-        .iter()
-        .any(|p| line.starts_with(p))
+    [
+        "diff --git ",
+        "index ",
+        "new file mode ",
+        "--- ",
+        "+++ ",
+        "@@ ",
+        " ",
+        "+",
+        "-",
+        "\\",
+    ]
+    .iter()
+    .any(|p| line.starts_with(p))
+}
+
+/// An `index <old>..<new> [<mode>]` line with the ids dropped, since the
+/// two tools hash differently; any other line as it is.
+fn without_blob_ids(line: &str) -> String {
+    match line.strip_prefix("index ") {
+        Some(rest) => match rest.split_once(' ') {
+            Some((_, mode)) => format!("index {mode}"),
+            None => "index".to_owned(),
+        },
+        None => line.to_owned(),
+    }
+}
+
+/// Whether `git log -L` prints the `index` and `new file mode` lines of
+/// the standard diff output, as git 2.55 and later do.
+fn git_prints_file_headers() -> bool {
+    let out = Command::new("git").arg("--version").output().unwrap();
+    let text = stdout(&out);
+    let version = text.trim().trim_start_matches("git version ");
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (2, 55)
 }
 
 /// `--oneline` output with the ids dropped: each commit line becomes its
@@ -98,18 +132,37 @@ fn a_function_lists_the_commits_that_changed_it() {
 fn each_commit_shows_the_hunk_of_the_range() {
     let repo = function_history();
     let out = log(&repo, &["--oneline", "-L", "5,8:f.rs"]);
-    let text = strip_ids(&out).join("\n");
+    let text: Vec<String> = strip_ids(&out)
+        .iter()
+        .map(|l| without_blob_ids(l))
+        .collect();
+    let text = text.join("\n");
     assert!(
         text.contains(
-            "edit three\ndiff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n\
+            "edit three\ndiff --git a/f.rs b/f.rs\nindex 100644\n--- a/f.rs\n+++ b/f.rs\n\
              @@ -4,4 +5,4 @@\n fn f() {\n-    two();\n+    four();\n     three();\n }"
         ),
         "{out}"
     );
     assert!(
         text.contains(
-            "create\ndiff --git a/f.rs b/f.rs\n--- /dev/null\n+++ b/f.rs\n@@ -0,0 +2,3 @@"
+            "create\ndiff --git a/f.rs b/f.rs\nnew file mode 100644\nindex\n\
+             --- /dev/null\n+++ b/f.rs\n@@ -0,0 +2,3 @@"
         ),
+        "{out}"
+    );
+    // The ids are short blob ids, as git prints them, and a created file
+    // starts from zeros.
+    let index: Vec<&str> = out.lines().filter(|l| l.starts_with("index ")).collect();
+    assert!(
+        index.iter().any(|l| l.starts_with("index 0000000..")),
+        "{out}"
+    );
+    assert!(
+        index.iter().all(|l| {
+            let ids = l.split(' ').nth(1).unwrap();
+            ids.len() == 16 && ids.contains("..")
+        }),
         "{out}"
     );
 }
@@ -275,10 +328,16 @@ impl Twin {
     fn both(&self, args: &[&str]) -> (Vec<String>, Vec<String>) {
         let mut all = vec!["log", "--oneline"];
         all.extend_from_slice(args);
-        let ours = strip_ids(&stdout(&self.kit.ok(&all)));
+        let ours: Vec<String> = strip_ids(&stdout(&self.kit.ok(&all)))
+            .iter()
+            .map(|l| without_blob_ids(l))
+            .collect();
         let mut gall = vec!["log", "--oneline", "--no-color"];
         gall.extend_from_slice(args);
-        let theirs = strip_ids(&stdout(&git(&self.dir, &self.home, &gall)));
+        let theirs: Vec<String> = strip_ids(&stdout(&git(&self.dir, &self.home, &gall)))
+            .iter()
+            .map(|l| without_blob_ids(l))
+            .collect();
         (ours, theirs)
     }
 }
@@ -303,7 +362,10 @@ fn output_matches_git_log_l() {
         &["-L", "4,-2:g.txt"],
         &["-L", "5,8:f.rs", "HEAD~3"],
     ] {
-        let (ours, theirs) = t.both(args);
+        let (mut ours, theirs) = t.both(args);
+        if !git_prints_file_headers() {
+            ours.retain(|l| !l.starts_with("index ") && !l.starts_with("new file mode "));
+        }
         assert_eq!(ours, theirs, "{args:?}");
     }
 }
