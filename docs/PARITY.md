@@ -322,6 +322,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   the rebased branch and reports the refs it could not update. kit moves
   only local branches; an `update-ref` line must name `refs/heads/<branch>`
   of an existing branch other than the rebased one.
+- **`grep`.** Patterns use Rust's `regex` syntax: there is no `-P` and no
+  backreference, and `-G` reads a pattern as `-E` does instead of as a basic
+  regular expression. Symlinks are not searched. There are no context,
+  color or `--and`/`--or` options, and an invalid pattern or an unknown
+  argument exits 64 where git exits 128.
 - **`rerere`.** kit writes a conflict as whole-file markers, so an entry
   records one whole file and replays only when both sides match exactly,
   where git records each conflicting hunk and merges a resolution into a

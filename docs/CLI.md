@@ -478,6 +478,25 @@ History / commits:
   of the log, a pruned record and a malformed number are errors. `kit gc`
   keeps every listed commit until its record expires (SPEC-GC, "Recovery
   log").
+- `kit grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F | -E | -G] [-e <pattern>]...
+  [<pattern>] [--cached | <rev>...] [[--] <path>...]` &mdash; print the lines
+  of tracked files that match a pattern, as `<path>:<line>`, with `-n` as
+  `<path>:<number>:<line>`. By default kit searches the tracked files in the
+  worktree, with their unstaged edits; untracked and ignored files are never
+  searched. `--cached` searches the staged content, and each `<rev>` searches
+  that revision's tree with `<rev>:` before each path, reading neither the
+  worktree nor the index. A path limits the search to that file or the files
+  below that directory. `-i` ignores case, `-w` keeps matches that are whole
+  words, `-v` selects the lines that do not match, `-l` prints only the
+  paths, `-c` prints `<path>:<count>` for each file with a selected line, and
+  `-q` prints nothing. Patterns use the syntax of Rust's `regex` crate, which
+  runs in linear time and has no backreferences; `-E` is the default, `-G` is
+  read the same way, and `-F` takes the pattern literally. Several `-e`
+  patterns select a line that matches any of them. A file with a NUL byte in
+  its first 8 KiB prints `Binary file <path> matches`. Large files are read a
+  chunk at a time. Exit status 0 means a line was selected, 1 none, and 64 a
+  usage error, an invalid pattern, an argument that is neither a revision nor
+  a path, or `--cached` with a revision.
 - `kit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
   [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
   [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` &mdash;
