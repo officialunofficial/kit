@@ -581,7 +581,7 @@ nor
 .Fl F
 is given. They do not combine with each other or with
 .Fl Fl amend .
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl L Ar start , Ns Ar end : Ns Ar file Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -700,6 +700,25 @@ a path must exist in the worktree and must not also name a revision.
 .Fl Fl follow
 takes exactly one file and continues under its old name when a commit
 renames it with the same content.
+.Pp
+.Fl L Ar start , Ns Ar end : Ns Ar file
+follows the history of a range of lines, as
+.Xr git 1
+does: it lists each commit that changes a line of the range and shows
+the hunk of the range, following the range back through each edit.
+The range takes the forms of
+.Cm blame Fl L
+and may repeat, for more ranges or files.
+It combines with
+.Fl n ,
+.Fl Fl oneline ,
+.Fl Fl first-parent
+and
+.Fl Fl format Ns = Ns Cm json ,
+which adds a
+.Li hunks
+list; it takes at most one revision and no paths.
+Renames are not followed.
 .It Cm reflog Oo Fl Fl recovery Oc Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
 Show a branch's recorded movement history, read-only. Walks the branch
 tip's first-parent chain newest-first, addressing each entry

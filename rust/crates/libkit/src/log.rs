@@ -44,6 +44,7 @@ use kit_core::store::{ObjectStore, StoreError};
 use crate::{Repo, identity, revspec};
 
 pub mod date;
+pub mod lines;
 
 /// The most commits that one walk reads. A walk that would read more fails
 /// with [`Error::TooManyCommits`]. It never returns part of the history.

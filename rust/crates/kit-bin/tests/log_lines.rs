@@ -3,8 +3,10 @@
 //! Fixed cases pin the commits listed, the hunks of each, shift tracking,
 //! several ranges, JSON and the usage errors. Differential cases compare
 //! the commits and the diffs with real `git log -L`, and a property test
-//! checks soundness, agreement with `kit blame -L` and agreement with git
-//! on random histories.
+//! checks soundness and agreement with `kit blame -L` on random histories.
+//! The property test does not compare with git: when a file repeats lines,
+//! several smallest diffs exist, and kit's line diff may pick another one
+//! than git's xdiff, which moves the range onto another copy of a line.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
@@ -310,10 +312,10 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
 
     /// On random histories of one file: every listed commit's hunks change
-    /// a line, every commit that `kit blame -L` credits for the range is
-    /// listed, and the output is git's.
+    /// a line, and every commit that `kit blame -L` credits for the range is
+    /// listed.
     #[test]
-    fn line_log_is_sound_complete_and_matches_git(
+    fn line_log_is_sound_and_complete(
         steps in proptest::collection::vec(
             proptest::collection::vec(0u8..6, 1..9),
             1..6,
@@ -321,13 +323,13 @@ proptest! {
         first in 1usize..4,
         len in 0usize..4,
     ) {
-        let t = Twin::new();
+        let kit = Repo::new();
         let mut last_body = String::new();
         for (i, lines) in steps.iter().enumerate() {
-            let body: String = lines.iter().map(|n| format!("l{n}\n")).collect();
+            let body: String = lines.iter().map(|n| format!("l{n}")).collect::<Vec<_>>().join("\n") + "\n";
             // A step that changes nothing has no commit to make.
             if body != last_body {
-                t.commit("f.txt", &body, &format!("s{i}"));
+                kit.commit_file("f.txt", body.as_bytes(), &format!("s{i}"));
                 last_body = body;
             }
         }
@@ -335,7 +337,7 @@ proptest! {
         let first = first.min(total);
         let last = (first + len).min(total);
         let spec = format!("{first},{last}:f.txt");
-        let out = log(&t.kit, &["--oneline", "-L", &spec]);
+        let out = log(&kit, &["--oneline", "-L", &spec]);
         // Soundness: each commit block holds a changed line.
         let mut blocks: Vec<(String, Vec<String>)> = Vec::new();
         for l in out.lines().filter(|l| !l.is_empty()) {
@@ -356,20 +358,16 @@ proptest! {
         }
         // Completeness against blame.
         let listed: BTreeSet<String> = blocks.iter().map(|b| b.0.clone()).collect();
-        let blame = stdout(&t.kit.ok(&[
+        let blame = stdout(&kit.ok(&[
             "blame", "--format=json", "-L", &format!("{first},{last}"), "f.txt",
         ]));
-        let log_all = stdout(&t.kit.ok(&["log", "--format=json"]));
+        let log_all = stdout(&kit.ok(&["log", "--format=json"]));
         for line in blame.lines() {
             let commit = line.split("\"hash\":\"").nth(1).unwrap().split('"').next().unwrap();
-            let rec = log_all.lines().find(|r| r.contains(commit)).unwrap();
+            let key = format!("\"hash\":\"{commit}\"");
+            let rec = log_all.lines().find(|r| r.contains(&key)).unwrap();
             let title = rec.split("\"title\":\"").nth(1).unwrap().split('"').next().unwrap();
             prop_assert!(listed.contains(title), "{title} credited by blame: {out}");
-        }
-        // Agreement with git.
-        if git_available() {
-            let (ours, theirs) = t.both(&["-L", &spec]);
-            prop_assert_eq!(ours, theirs);
         }
     }
 }

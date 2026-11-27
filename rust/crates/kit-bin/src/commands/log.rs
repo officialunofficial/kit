@@ -72,7 +72,7 @@ use clap::{Parser, ValueEnum};
 use kit_core::Hash;
 use kit_core::object::Commit;
 use kit_core::refs::{self, Head};
-use libkit::log::{self, Filter, Query, RefKind};
+use libkit::log::{self, Filter, Query, RefKind, lines};
 
 use crate::clap_args;
 use crate::exit;
@@ -197,6 +197,18 @@ struct LogOpts {
     #[arg(long, conflicts_with_all = ["patch", "stat"])]
     graph: bool,
 
+    /// Follow the history of the lines `<start>,<end>` of `<file>`, as
+    /// `git log -L`. The range takes the forms of `kit blame -L`. It may
+    /// repeat.
+    #[arg(
+        short = 'L',
+        value_name = "start,end:file",
+        conflicts_with_all = [
+            "stat", "graph", "follow", "all", "author", "grep", "since", "until", "no_merges",
+        ]
+    )]
+    line_ranges: Vec<String>,
+
     /// An optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`)
     /// or symmetric range (`A...B`), then paths. The walk starts at `HEAD`
     /// without a revision; an empty range side means `HEAD`.
@@ -285,6 +297,10 @@ pub fn run(args: &[String]) -> u8 {
         Ok(split) => split,
         Err(code) => return code,
     };
+    if !opts.line_ranges.is_empty() {
+        let has_paths = !paths.is_empty() || explicit.is_some();
+        return run_lines(&opts, &repo, &cwd, start.as_deref(), has_paths);
+    }
     if opts.follow && paths.len() != 1 {
         return emit_err("--follow requires exactly one path", exit::USAGE);
     }
@@ -396,6 +412,169 @@ fn print_entries(
         }
     }
     exit::OK
+}
+
+/// `kit log -L`: follow ranges of lines back through the history.
+fn run_lines(
+    opts: &LogOpts,
+    repo: &libkit::Repo,
+    cwd: &std::path::Path,
+    start: Option<&str>,
+    has_paths: bool,
+) -> u8 {
+    if has_paths {
+        return emit_err("-L does not combine with paths", exit::USAGE);
+    }
+    if start.is_some_and(|s| s.contains("..")) {
+        return emit_err("-L takes one revision, not a range", exit::USAGE);
+    }
+    let root = repo.layout().worktree_root();
+    let mut ranges = Vec::with_capacity(opts.line_ranges.len());
+    for arg in &opts.line_ranges {
+        let Some((spec, file)) = arg
+            .split_once(':')
+            .filter(|(spec, file)| !spec.is_empty() && !file.is_empty())
+        else {
+            let msg = format!("-L argument not '<start>,<end>:<file>': {arg}");
+            return emit_err(&msg, exit::USAGE);
+        };
+        match super::index_path_for_arg(root, &cwd.join(file)) {
+            Ok(path) => ranges.push((spec.to_owned(), path)),
+            Err(e) => return emit_err(&format!("-L {arg}: {e}"), exit::USAGE),
+        }
+    }
+    let request = lines::Request {
+        start,
+        ranges: &ranges,
+        first_parent: opts.first_parent,
+        limit: opts.limit,
+    };
+    let entries = match lines::history(repo, &request) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => {
+            let _ = writeln!(std::io::stderr().lock(), "no commits yet");
+            return exit::OK;
+        }
+        Err(lines::Error::Log(e)) => {
+            let e = libkit::Error::from(e);
+            return emit_err(&exit_map::message(&e), exit_map::exit_code(&e));
+        }
+        Err(e @ (lines::Error::Range(_) | lines::Error::NoSuchPath { .. })) => {
+            return emit_err(&format!("-L: {e}"), exit::USAGE);
+        }
+        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+    };
+    let decorations = if opts.decorate {
+        match decorations(repo) {
+            Ok(map) => map,
+            Err(code) => return code,
+        }
+    } else {
+        HashMap::new()
+    };
+    let (fmt, abbrev) = (opts.render_format(), opts.abbrev_len());
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for entry in &entries {
+        if signal::is_shutdown() {
+            return exit::TEMPFAIL;
+        }
+        if fmt == Format::Json {
+            let message = String::from_utf8_lossy(&entry.commit.message).into_owned();
+            let title = message.lines().next().unwrap_or("");
+            let hunks = hunks_json(&entry.files);
+            emit_json_entry(
+                &mut out,
+                &entry.hash,
+                &entry.commit,
+                title,
+                &message,
+                Some(("hunks", &hunks)),
+            );
+            continue;
+        }
+        let decoration = decorations
+            .get(&entry.hash)
+            .map(|names| format!("({})", names.join(", ")));
+        render_commit(
+            &mut out,
+            fmt,
+            abbrev,
+            (&entry.hash, &entry.commit),
+            decoration.as_deref(),
+        );
+        // A blank line, then the hunks, as git prints them. The default
+        // format already ends the message with a blank line.
+        if fmt == Format::Oneline {
+            let _ = writeln!(out);
+        }
+        for file in &entry.files {
+            write_line_hunks(&mut out, file);
+        }
+        if fmt == Format::Default {
+            let _ = writeln!(out);
+        }
+    }
+    let _ = out.flush();
+    exit::OK
+}
+
+/// The diff of what a commit did to the ranges of one file.
+fn write_line_hunks(out: &mut impl Write, file: &lines::FileHunks) {
+    let path = format::safe_text(&file.path);
+    let _ = writeln!(out, "diff --git a/{path} b/{path}");
+    if file.created {
+        let _ = writeln!(out, "--- /dev/null");
+    } else {
+        let _ = writeln!(out, "--- a/{path}");
+    }
+    let _ = writeln!(out, "+++ b/{path}");
+    for h in &file.hunks {
+        let _ = writeln!(
+            out,
+            "@@ -{},{} +{},{} @@",
+            h.old_start, h.old_lines, h.new_start, h.new_lines
+        );
+        for line in &h.lines {
+            let text = format::safe_text(&String::from_utf8_lossy(&line.text));
+            let _ = writeln!(out, "{}{text}", char::from(line.origin));
+            if !line.newline {
+                let _ = writeln!(out, "\\ No newline at end of file");
+            }
+        }
+    }
+}
+
+/// The `hunks` field of a JSON record: every hunk of every file, in order.
+fn hunks_json(files: &[lines::FileHunks]) -> String {
+    let mut items = Vec::new();
+    for file in files {
+        for h in &file.hunks {
+            let lines: Vec<String> = h
+                .lines
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{}{}",
+                        char::from(l.origin),
+                        String::from_utf8_lossy(&l.text)
+                    )
+                })
+                .collect();
+            let mut obj = format::JsonObject::new();
+            obj.field_str("path", &file.path)
+                .field_u64("old_start", to_u64(h.old_start))
+                .field_u64("old_lines", to_u64(h.old_lines))
+                .field_u64("new_start", to_u64(h.new_start))
+                .field_u64("new_lines", to_u64(h.new_lines))
+                .field_raw("lines", &format::json_string_array(&lines));
+            items.push(obj.finish());
+        }
+    }
+    format!("[{}]", items.join(","))
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 /// Print one commit with the graph in the left margin. The error is the exit
@@ -631,7 +810,7 @@ fn render_commit(
             let _ = writeln!(out);
         }
         Format::Json => {
-            emit_json_entry(out, hash, c, title, &full_message);
+            emit_json_entry(out, hash, c, title, &full_message, None);
         }
     }
 }
@@ -658,6 +837,7 @@ fn emit_json_entry(
     c: &kit_core::object::Commit,
     title: &str,
     full_message: &str,
+    extra: Option<(&str, &str)>,
 ) {
     let _ = out.write_all(b"{");
     let _ = write!(out, "\"hash\":\"{}\"", format::hex_hash(hash));
@@ -682,6 +862,10 @@ fn emit_json_entry(
         ",\"message\":\"{}\"",
         format::json_escape(full_message)
     );
+    // One more field, already JSON.
+    if let Some((key, raw)) = extra {
+        let _ = write!(out, ",\"{key}\":{raw}");
+    }
     let _ = out.write_all(b"}\n");
 }
 
@@ -712,6 +896,7 @@ mod tests {
             graph: false,
             args: Vec::new(),
             follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -737,6 +922,7 @@ mod tests {
             graph: false,
             args: Vec::new(),
             follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Oneline);
     }
@@ -762,6 +948,7 @@ mod tests {
             graph: false,
             args: Vec::new(),
             follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -787,6 +974,7 @@ mod tests {
             graph: false,
             args: Vec::new(),
             follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Json);
     }
@@ -811,6 +999,7 @@ mod tests {
             graph: false,
             args: Vec::new(),
             follow: false,
+            line_ranges: Vec::new(),
         }
     }
 

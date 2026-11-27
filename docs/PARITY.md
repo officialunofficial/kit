@@ -334,7 +334,9 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `:<funcname>:<file>` or `/<regex>/` form, and no `--author`, `--grep`,
   `--since`, `--until`, `--no-merges` or `--stat` with `-L`. Commits come in
   kit's date order, where git uses topological order, so the order of two
-  branches of a merge can differ.
+  branches of a merge can differ. When a file repeats lines, several
+  smallest diffs exist, and kit's line diff may pick another one than
+  git's; the range then follows another copy of a repeated line.
 - **`range-diff`.** kit pairs the commits with git's costs, but it solves
   the assignment with its own Hungarian method, so two pairings of equal
   cost may come out differently. The `## Metadata ##` section names the

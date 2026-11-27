@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 85513796f958a37f8ef5e9fbc8ea49bc7f11548dcff505174c78c6dd1f0a327e # shrinks to steps = [[0]], first = 1, len = 0
+cc 4f579ee966a6901dffced10f6cd621062e8420992d54be8c98f69d5078effec1 # shrinks to steps = [[4, 0, 5, 5], [5]], first = 1, len = 0

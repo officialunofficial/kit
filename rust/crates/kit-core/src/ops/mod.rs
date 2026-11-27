@@ -13,6 +13,7 @@ pub mod describe;
 pub mod diff;
 pub mod gc;
 pub mod graph;
+pub mod line_log;
 pub mod mailbox;
 pub mod merge;
 pub mod patch;
