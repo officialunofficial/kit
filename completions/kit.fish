@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect rerere gc grep shortlog range-diff describe apply am sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc grep shortlog range-diff archive describe apply am sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -171,6 +171,9 @@ complete -c kit -n "__fish_seen_subcommand_from shortlog" -s s -l summary -d "Pr
 complete -c kit -n "__fish_seen_subcommand_from shortlog" -s n -l numbered -d "Sort by count"
 complete -c kit -n "__fish_seen_subcommand_from shortlog" -s e -l email -d "Keep the email or key id"
 complete -c kit -n "__fish_seen_subcommand_from shortlog" -l format -d "Output format" -xa "default json"
+complete -c kit -n "__fish_seen_subcommand_from archive" -l format -d "Archive format" -xa "tar tar.gz"
+complete -c kit -n "__fish_seen_subcommand_from archive" -l prefix -d "Text before every path" -x
+complete -c kit -n "__fish_seen_subcommand_from archive" -s o -l output -d "Write to this file" -r
 complete -c kit -n "__fish_seen_subcommand_from range-diff" -l creation-factor -d "Cost of an unpaired commit, in percent" -x
 complete -c kit -n "__fish_seen_subcommand_from range-diff" -l no-dual-color -d "Accepted for git; kit prints no color"
 complete -c kit -n "__fish_seen_subcommand_from apply" -l index -d "Apply to the worktree and the index"

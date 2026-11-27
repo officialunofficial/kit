@@ -307,6 +307,9 @@ commands:
                     or nothing, never with fuzz
   am <mbox>... | --continue | --skip | --abort
                     Apply a mailbox of patch mails as signed commits
+  archive [--format=tar|tar.gz] [--prefix=<dir>/] [-o <file>] <tree-ish> [<path>...]
+                    Write the tree of a revision as a tar archive, the
+                    same bytes on every machine
   shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]
                     Group commits by author, for release notes
   range-diff [--creation-factor=<n>] <old-base>..<old-tip> <new-base>..<new-tip>

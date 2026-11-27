@@ -23,6 +23,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit am` applies a mailbox of patch mails as signed commits, with the mail's `From:` as the author. A mail that does not apply pauses `am` in `.kit/am/` until `--continue`, `--skip` or `--abort`, and merge, cherry-pick, revert and rebase refuse to start meanwhile.
 - `kit shortlog` groups the commits that `kit log` shows by author, with `-s`, `-n`, `-e`, `--format=json`, the revision and path rules of `kit log`, and `kit log` text on standard input, as git reads it.
 - `kit log -L <start>,<end>:<file>` lists the commits that changed a range of lines, with the hunk of the range for each, and follows the range back through each edit as git does. It may repeat, and combines with `-n`, `--oneline`, `--first-parent` and `--format=json` (a `hunks` list).
+- `kit archive` writes the tree of a revision as a tar or tar.gz archive, with `--prefix`, `-o` and path limits. The bytes depend only on the tree: entries in tree order, uid and gid 0, the commit's time, fixed modes and a pax global header with the commit id, as git writes it. Only the tree is read, and a chunked file streams one chunk at a time.
 - `kit range-diff` shows how each commit of a series changed between two versions of it, with the `=`, `!`, `<` and `>` lines of git and the diff of each changed pair. It pairs the commits by git's least-cost assignment, takes the ranges in git's three forms and `--creation-factor`, and bounds each side at 1,000 commits.
 
 ### Fixed

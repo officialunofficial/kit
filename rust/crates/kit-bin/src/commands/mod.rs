@@ -7,6 +7,7 @@
 pub mod add;
 pub mod am;
 pub mod apply;
+pub mod archive;
 pub mod attest;
 pub mod attest_factory;
 pub mod bisect;

@@ -151,6 +151,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "range-diff" => commands::range_diff::run(&rest),
         "describe" => commands::describe::run(&rest),
         "apply" => commands::apply::run(&rest),
+        "archive" => commands::archive::run(&rest),
         "am" => commands::am::run(&rest),
         "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),

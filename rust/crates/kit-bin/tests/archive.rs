@@ -133,7 +133,7 @@ fn files(items: &BTreeMap<String, Item>) -> BTreeMap<String, Item> {
 /// A big file, over the chunking threshold, with varied content.
 fn big() -> Vec<u8> {
     (0u32..(3 << 19))
-        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13).to_le_bytes()[0])
         .collect()
 }
 
@@ -273,7 +273,15 @@ fn only_the_tree_is_read_not_the_worktree() {
 #[test]
 fn a_tree_id_archives_without_a_commit_header() {
     let repo = sample();
-    let (items, global) = read_tar(&archive(&repo, &["HEAD^{tree}"]));
+    let log = stdout(&repo.ok(&["log", "--format=json", "-n", "1"]));
+    let tree = log
+        .split("\"tree\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let (items, global) = read_tar(&archive(&repo, &[tree]));
     assert_eq!(global, None);
     assert_eq!(files(&items), tree_items(&repo, "HEAD"));
 }
@@ -373,4 +381,19 @@ proptest! {
             prop_assert_eq!(files(&limited), under);
         }
     }
+}
+
+#[test]
+fn long_paths_and_link_targets_round_trip() {
+    let repo = Repo::new();
+    let deep = format!("{}/{}", "d".repeat(120), "f".repeat(60));
+    let long_name = "n".repeat(140);
+    repo.write(&deep, b"deep\n");
+    repo.write(&long_name, b"long\n");
+    std::os::unix::fs::symlink(&deep, repo.path().join("to-deep")).unwrap();
+    repo.ok(&["add", &deep, &long_name, "to-deep"]);
+    repo.ok(&["commit", "-m", "long"]);
+    let (items, _) = read_tar(&archive(&repo, &["HEAD"]));
+    assert_eq!(files(&items), tree_items(&repo, "HEAD"));
+    assert!(items.contains_key(&format!("{}/", "d".repeat(120))));
 }
