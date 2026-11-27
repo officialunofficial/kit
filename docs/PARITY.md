@@ -52,8 +52,10 @@ These divergences stay while kit uses BLAKE3.
   takes one branch or tag, never an empty `<src>`.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
-- Shallow clone. `clone --depth` is a usage error. A clone holds the full
-  history, so every commit verifies with its ancestors.
+- Shallow clone. `clone --depth` is a usage error, and a clone holds the full
+  history. A design is in draft ([SPEC-SHALLOW](specs/SPEC-SHALLOW.md)): a
+  window of commits whose tree and parent IDs the hash chain fixes, with no
+  commit beyond the boundary reported as verified.
 - `.git` on-disk interop and SHA-1 objects.
 - Shadowing the `git` binary on `PATH`.
 

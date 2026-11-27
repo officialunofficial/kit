@@ -31,6 +31,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-RERERE](SPEC-RERERE.md) &mdash; draft local cache of recorded conflict resolutions (`rr-cache/`).
 - [SPEC-PATCH](SPEC-PATCH.md) &mdash; draft patch text, application and mailbox rules for `kit apply` and `kit am`.
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
+- [SPEC-SHALLOW](SPEC-SHALLOW.md) &mdash; draft design of shallow clone: the hash-anchored history boundary, `.kit/shallow`, and the window request.
 - [SPEC-SIGNING](SPEC-SIGNING.md) &mdash; commit / remix / tag signing hashes and verification.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.
 - [SPEC-TRANSPORT](SPEC-TRANSPORT.md) &mdash; transport verbs and wire protocols (file, SSH, HTTP via SPEC-TRANSPORT-CONNECT, S3, memory).
