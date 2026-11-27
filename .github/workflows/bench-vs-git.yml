@@ -40,7 +40,7 @@ jobs:
           for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.json"))):
               for r in json.load(open(path))["results"]:
                   s = r.get("summary", {}).get("time_wall_clock", r)
-                  print("EXACT", os.path.basename(path)[:-5], repr(s["mean"]), repr(s["stddev"]), len(r["times"]))
+                  print("EXACT", os.path.basename(path)[:-5], repr(s["mean"]), repr(s["stddev"]), len(r.get("times", [])), sorted(r))
           PY
             { echo '```'; sed -n '/== summary/,$p' "bench-$i.log"; cat "bench-results/run$i/sizes.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done

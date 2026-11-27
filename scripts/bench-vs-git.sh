@@ -139,7 +139,7 @@ mkdir -p clone-src/kit clone-src/git remotes/kit
   && "$KIT" add . >/dev/null && "$KIT" commit -m bench >/dev/null 2>&1 \
   && "$KIT" remote add origin "kit+file://$WORK/remotes/kit" >/dev/null && "$KIT" push origin >/dev/null 2>&1)
 (cd clone-src/git && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$F/small10k/" . \
-  && git add . && git commit -q -m bench && git clone -q --bare . "$WORK/remotes/git.git")
+  && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$WORK/remotes/git.git")
 
 # Clone once outside hyperfine, so a broken setup fails with its own message.
 "$KIT" clone "kit+file://$WORK/remotes/kit" clone-check >/dev/null && rm -rf clone-check
