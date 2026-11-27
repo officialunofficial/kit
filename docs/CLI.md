@@ -517,6 +517,26 @@ History / commits:
   `{"author":...,"count":...,"subjects":[...]}`. With no revision and
   standard input that is not a terminal, kit reads `kit log` output from
   it, as git does.
+- `kit archive [--format=tar|tar.gz] [--prefix=<dir>/] [-o <file>] <tree-ish>
+  [<path>...]` &mdash; write the tree of `<tree-ish>` as a tar archive, for
+  release builds. Only the tree is read, never the worktree. The format is
+  `tar` unless `--format` names `tar.gz` (or `tgz`) or `-o` names a file
+  ending in `.tar.gz` or `.tgz`; any other `--format`, or an `-o` file with
+  another extension than `.tar`, is a usage error (exit `64`). Without
+  `-o` the archive goes to standard output, which must not be a terminal.
+  The output depends only on the tree: entries follow the order of the
+  tree, each directory before what it holds; every entry has uid and gid
+  0, user and group `root`, and the commit's time as its mtime (0 for a
+  tree); files have mode 0644 or 0755, directories 0755, and symlinks are
+  symlinks. When `<tree-ish>` names a commit, the archive starts with a pax
+  global header whose `comment` is the full commit id, as git writes it.
+  Paths longer than the ustar fields take a pax header. The archive ends
+  with two zero blocks and fills whole records of 10,240 bytes. The gzip
+  stream has mtime 0 and no file name. `--prefix` is put before every
+  path; it must be relative and must not hold `..`. Each `<path>`, relative
+  to the current directory, keeps only that file or directory and the
+  directories above it; a path that matches nothing is a usage error. A
+  chunked file is streamed one chunk at a time.
 - `kit range-diff [--creation-factor=<n>] [--no-dual-color] <old-base>..<old-tip>
   <new-base>..<new-tip>` &mdash; show how each commit of a series changed
   between two versions of it, such as a branch before and after a rebase.

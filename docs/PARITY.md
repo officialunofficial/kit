@@ -329,6 +329,12 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   commit date is the time of the commit, and the applier signs it. It reads
   no `-s`, `-k`, `--3way`, `--interactive` or `--quoted-cr`, and refuses a
   base64 or quoted-printable mail.
+- **`archive`.** The formats are `tar` and `tar.gz`; there is no `zip`,
+  no `--remote`, no `--add-file` and no `export-ignore` or `export-subst`
+  attributes. File modes are 0644 and 0755 where git applies its umask
+  (0664 and 0775 by default), and a tree id gives mtime 0 where git uses
+  the current time, so the bytes differ from `git archive` while the files
+  are the same.
 - **`log -L`.** kit does not follow a renamed file: the range ends at
   the commit that creates the file under its name. There is no
   `:<funcname>:<file>` or `/<regex>/` form, and no `--author`, `--grep`,
