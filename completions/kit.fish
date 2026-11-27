@@ -92,6 +92,12 @@ complete -c kit -n "__fish_seen_subcommand_from diff" \
     -s U -l unified -d "Context lines around each hunk (default 3)"
 complete -c kit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -s M -l find-renames -d "Detect renames at a similarity threshold (default 50%)"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -l no-renames -d "Turn off rename detection"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -s l -d "Rename candidate limit (default 1000, 0 for none)"
 complete -c kit -n "__fish_seen_subcommand_from cat-file" \
     -s t -d "Print object type"
 complete -c kit -n "__fish_seen_subcommand_from cat-file" \
@@ -143,6 +149,10 @@ complete -c kit -n "__fish_seen_subcommand_from status" \
     -s s -l short -d "Short format; alias for --porcelain=v1"
 complete -c kit -n "__fish_seen_subcommand_from status" \
     -s z -d "NUL-terminate records; raw unquoted paths"
+complete -c kit -n "__fish_seen_subcommand_from status" \
+    -l find-renames -d "Detect renames at a similarity threshold (default 50%)"
+complete -c kit -n "__fish_seen_subcommand_from status" \
+    -l no-renames -d "Turn off rename detection"
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c kit -n "__fish_seen_subcommand_from commit" \

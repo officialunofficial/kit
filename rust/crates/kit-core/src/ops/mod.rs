@@ -14,6 +14,7 @@ pub mod gc;
 pub mod graph;
 pub mod merge;
 pub mod revert;
+pub mod similarity;
 
 // OPS2 — rebase / bisect / blame / stash / restore.
 pub mod bisect;
@@ -51,6 +52,10 @@ pub use restore::{
     restore_tree_to_worktree_observed, restore_tree_to_worktree_with,
 };
 pub use revert::{RevertError, RevertResult, revert};
+pub use similarity::{
+    DEFAULT_MIN_SCORE, DEFAULT_RENAME_LIMIT, MAX_SCORE, RenameOptions, RenameReport,
+    detect_renames, parse_rename_score,
+};
 
 #[cfg(test)]
 mod test_store;

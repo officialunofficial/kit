@@ -10,6 +10,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `kit log [<rev>] [--] <path>...` shows only the commits that change the paths, with git's default history simplification at merges. `--follow` continues the history of one file under its old name across a rename. `-p` and `--stat` show only the files at the paths.
+- `diff`, `status`, `show` and `log -p`/`--stat` detect renames by similarity, as git does. A deleted and an added file at least 50% alike pair into one rename, scored with git's method, so the scores match git's (`R090`, `similarity index 90%`, `R90` in `status --porcelain=v2`). `-M[<n>]`/`--find-renames[=<n>]` takes git's threshold grammar, `--no-renames` turns detection off, and `-l<n>` sets the candidate limit (default 1000) past which only identical content pairs, with git's warning. `--stat` names both sides of a rename (`dir/{a.txt => b.txt}`), and a rename's patch now carries its mode lines and hunks.
+
+### Breaking
+
+- `libkit::diff::Request::renames` is an `Option<RenameOptions>` instead of a `bool`, and `libkit::diff::between_trees` takes the rename options as a fourth argument. `kit_core::ops::DiffEntry` gains `similarity`, `libkit::diff::FileStat` gains `old_path` and `libkit::status::Record` gains `similarity`.
+- `libkit::log::Query` gains `paths` and `follow`, and `libkit::log::Entry` gains `paths`.
 
 ## [0.11.1] - 2026-11-26
 

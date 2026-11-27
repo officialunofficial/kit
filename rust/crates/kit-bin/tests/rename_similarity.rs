@@ -24,6 +24,14 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// One `<prefix><n>` line for each number.
+fn numbered(prefix: &str, range: std::ops::RangeInclusive<u32>) -> String {
+    range.fold(String::new(), |mut s, n| {
+        let _ = writeln!(s, "{prefix}{n}");
+        s
+    })
+}
+
 /// `1\n` to `20\n`.
 fn twenty() -> String {
     (1..=20).fold(String::new(), |mut s, n| {
@@ -88,22 +96,18 @@ fn a_mode_change_prints_mode_lines_before_the_similarity() {
     repo.ok(&["add", "b.txt"]);
     let text = stdout(&repo.ok(&["diff", "--cached"]));
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(
-        lines[..7].iter().map(|l| &l[..l.len().min(16)]).collect::<Vec<_>>(),
-        [
-            "diff --git a/a.t",
-            "old mode 100644",
-            "new mode 100755",
-            "similarity index",
-            "rename from a.tx",
-            "rename to b.txt",
-            "index ",
-        ]
-        .iter()
-        .map(|l| &l[..l.len().min(16)])
-        .collect::<Vec<_>>(),
-        "{text}"
-    );
+    let expected = [
+        "diff --git a/a.txt b/b.txt",
+        "old mode 100644",
+        "new mode 100755",
+        "similarity index 90%",
+        "rename from a.txt",
+        "rename to b.txt",
+        "index ",
+    ];
+    for (line, want) in lines.iter().zip(expected) {
+        assert!(line.starts_with(want), "{want:?} in {text}");
+    }
     // The `index` line has no mode when the modes differ.
     assert!(!lines[6].ends_with("100644"), "{text}");
     assert!(!lines[6].ends_with("100755"), "{text}");
@@ -145,7 +149,10 @@ fn stat_shortens_a_rename_to_the_changed_part() {
 fn status_porcelain_v2_carries_the_score() {
     let repo = moved_and_edited();
     let text = stdout(&repo.ok(&["status", "--porcelain=v2"]));
-    assert!(text.starts_with("2 R. N... 100644 100644 100644 "), "{text}");
+    assert!(
+        text.starts_with("2 R. N... 100644 100644 100644 "),
+        "{text}"
+    );
     assert!(text.ends_with(" R90 b.txt\ta.txt\n"), "{text}");
 }
 
@@ -170,8 +177,15 @@ fn a_threshold_above_the_score_splits_the_pair() {
 #[test]
 fn a_threshold_at_or_below_the_score_keeps_the_pair() {
     let repo = moved_and_edited();
-    // git reads `-M9` as 0.9 and `-M100` as 0.100.
-    for flag in ["-M", "-M90%", "-M9", "-M100", "--find-renames", "--find-renames=90"] {
+    // git reads a bare 9 as 0.9 and 100 as 0.100.
+    for flag in [
+        "-M",
+        "-M90%",
+        "--find-renames=9",
+        "-M100",
+        "--find-renames",
+        "--find-renames=90",
+    ] {
         let text = stdout(&repo.ok(&["diff", "--cached", "--name-status", flag]));
         assert_eq!(text, "R090\ta.txt\tb.txt\n", "{flag}");
     }
@@ -221,8 +235,8 @@ fn content_under_half_similar_is_not_a_rename() {
 fn each_source_pairs_with_its_best_destination() {
     // Two sources, two destinations, each destination closest to one source.
     let repo = Repo::new();
-    let left: String = (1..=20).map(|n| format!("left {n}\n")).collect();
-    let right: String = (1..=20).map(|n| format!("right {n}\n")).collect();
+    let left: String = numbered("left ", 1..=20);
+    let right: String = numbered("right ", 1..=20);
     repo.write("l.txt", left.as_bytes());
     repo.write("r.txt", right.as_bytes());
     repo.ok(&["add", "l.txt", "r.txt"]);
@@ -235,8 +249,14 @@ fn each_source_pairs_with_its_best_destination() {
     let mut lines: Vec<&str> = text.lines().collect();
     lines.sort_unstable();
     assert_eq!(lines.len(), 2, "{text}");
-    assert!(lines[0].starts_with('R') && lines[0].ends_with("\tl.txt\tx.txt"), "{text}");
-    assert!(lines[1].starts_with('R') && lines[1].ends_with("\tr.txt\ty.txt"), "{text}");
+    assert!(
+        lines[0].starts_with('R') && lines[0].ends_with("\tl.txt\tx.txt"),
+        "{text}"
+    );
+    assert!(
+        lines[1].starts_with('R') && lines[1].ends_with("\tr.txt\ty.txt"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -247,8 +267,8 @@ fn a_same_basename_match_wins_over_a_closer_file() {
     let repo = Repo::new();
     repo.commit_file("a/foo.txt", twenty().as_bytes(), "add foo");
     repo.ok(&["rm", "a/foo.txt"]);
-    let foo: String = (1..=16).map(|n| format!("{n}\n")).collect::<String>() + "x\ny\nz\nw\n";
-    let bar: String = (1..=18).map(|n| format!("{n}\n")).collect::<String>() + "q\nr\n";
+    let foo: String = numbered("", 1..=16) + "x\ny\nz\nw\n";
+    let bar: String = numbered("", 1..=18) + "q\nr\n";
     repo.write("b/foo.txt", foo.as_bytes());
     repo.write("c/bar.txt", bar.as_bytes());
     repo.ok(&["add", "b/foo.txt", "c/bar.txt"]);
@@ -276,7 +296,7 @@ fn a_symlink_is_never_a_similarity_rename() {
 fn past_the_rename_limit_only_exact_renames_are_found() {
     let repo = Repo::new();
     for i in 1..=3 {
-        let body: String = (i..=30).map(|n| format!("{n}\n")).collect();
+        let body: String = numbered("", i..=30);
         repo.write(&format!("f{i}"), body.as_bytes());
     }
     repo.write("e1", b"exact\n");
@@ -285,7 +305,7 @@ fn past_the_rename_limit_only_exact_renames_are_found() {
     repo.ok(&["mv", "e1", "e2"]);
     repo.ok(&["rm", "f1", "f2", "f3"]);
     for i in 1..=3 {
-        let body: String = (i..=29).map(|n| format!("{n}\n")).collect::<String>() + "z\n";
+        let body: String = numbered("", i..=29) + "z\n";
         repo.write(&format!("g{i}"), body.as_bytes());
     }
     repo.ok(&["add", "g1", "g2", "g3"]);
@@ -314,7 +334,10 @@ fn show_and_log_patch_detect_the_rename() {
     let repo = moved_and_edited();
     repo.ok(&["commit", "-m", "move a"]);
     let text = stdout(&repo.ok(&["show", "HEAD"]));
-    assert!(text.contains("\nsimilarity index 90%\nrename from a.txt\nrename to b.txt\n"), "{text}");
+    assert!(
+        text.contains("\nsimilarity index 90%\nrename from a.txt\nrename to b.txt\n"),
+        "{text}"
+    );
     let text = stdout(&repo.ok(&["log", "-p", "-n", "1"]));
     assert!(text.contains("\nsimilarity index 90%\n"), "{text}");
     let text = stdout(&repo.ok(&["log", "--stat", "-n", "1"]));
@@ -408,22 +431,23 @@ struct Derived {
 }
 
 fn case() -> impl Strategy<Value = (Vec<Vec<u16>>, Vec<Derived>)> {
-    prop::collection::vec(prop::collection::vec(0u16..5000, 4..24), 1..4).prop_flat_map(
-        |sources| {
-            let n = sources.len();
-            let derived = prop::collection::vec(
-                (0..n, 0usize..24, prop::collection::vec(5000u16..9000, 0..12)).prop_map(
-                    |(source, keep, fresh)| Derived {
-                        source,
-                        keep,
-                        fresh,
-                    },
-                ),
-                1..4,
-            );
-            (Just(sources), derived)
-        },
-    )
+    prop::collection::vec(prop::collection::vec(0u16..5000, 4..24), 1..4).prop_flat_map(|sources| {
+        let n = sources.len();
+        let derived = prop::collection::vec(
+            (
+                0..n,
+                0usize..24,
+                prop::collection::vec(5000u16..9000, 0..12),
+            )
+                .prop_map(|(source, keep, fresh)| Derived {
+                    source,
+                    keep,
+                    fresh,
+                }),
+            1..4,
+        );
+        (Just(sources), derived)
+    })
 }
 
 fn derive(sources: &[Vec<u16>], d: &Derived) -> String {

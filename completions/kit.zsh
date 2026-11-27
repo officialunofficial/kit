@@ -176,6 +176,9 @@ _kit() {
                         '(-b --ignore-space-change)'{-b,--ignore-space-change}'[ignore changes in the amount of whitespace]' \
                         '(-U --unified)'{-U,--unified}'[context lines around each hunk (default 3)]:n:' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
+                        '(-M --find-renames --no-renames)'{-M-,--find-renames=-}'[detect renames at a similarity threshold (default 50%)]::threshold:' \
+                        '(-M --find-renames --no-renames)--no-renames[turn off rename detection]' \
+                        '-l-[rename candidate limit (default 1000, 0 for none)]:n:' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;
@@ -275,6 +278,8 @@ _kit() {
                         '--porcelain=-[machine-readable XY output]::version:(v1 v2)' \
                         '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
                         '-z[NUL-terminate records; raw unquoted paths]' \
+                        '(--find-renames --no-renames)--find-renames=-[detect renames at a similarity threshold (default 50%)]::threshold:' \
+                        '(--find-renames --no-renames)--no-renames[turn off rename detection]' \
                         '--help[show help]'
                     ;;
                 commit)

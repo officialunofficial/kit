@@ -184,8 +184,9 @@ fn show_commit_like(
 /// Non-empty `paths` keep only the files at or below them.
 /// Returns whether the diff has any change, and so wrote output.
 ///
-/// The diff comes from the library that `kit diff` uses, and the renderers
-/// are those of `kit diff`. A blob that cannot be read is an error.
+/// The diff comes from the library that `kit diff` uses, with its default
+/// rename detection, and the renderers are those of `kit diff`. A blob that
+/// cannot be read is an error.
 pub(super) fn write_commit_diff(
     out: &mut impl Write,
     repo: &Repo,
@@ -201,9 +202,11 @@ pub(super) fn write_commit_diff(
         ),
         None => None,
     };
-    let mut diff = libkit::diff::between_trees(repo, parent_tree, Some(tree))
+    let renames = kit_core::ops::RenameOptions::default();
+    let mut diff = libkit::diff::between_trees(repo, parent_tree, Some(tree), Some(&renames))
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
     diff.retain_paths(paths);
+    super::diff::warn_rename_limit(diff.renames());
     if stat {
         let rows = diff
             .stats()

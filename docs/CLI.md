@@ -212,7 +212,7 @@ Working-tree commands:
   executable files pair by similarity; a symlink pairs only when it is
   identical. `-M[<n>]` / `--find-renames[=<n>]` sets the threshold with
   git's grammar: `-M90%` is 90%, while digits without `%` are a decimal
-  fraction, so `-M9` is 90% and `-M100` is 10%. `-M100%` keeps only
+  fraction, so `--find-renames=9` is 90% and `-M100` is 10%. `-M100%` keeps only
   identical content. `--no-renames` turns detection off. A rename prints
   `R<score>` in `--name-status` (`R090`), `old => new` in `--stat`
   (shortened to `dir/{a => b}` around a shared prefix or suffix), and

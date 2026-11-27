@@ -698,7 +698,7 @@ indexes the reachable first-parent chain, so commits superseded by
 .Cm commit --amend
 or a reset are no longer listed. Recovery records are separate. This command
 never mutates refs, ancestry snapshots, or objects.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Fl M Ns Op Ar n | Fl Fl find-renames Ns Op = Ns Ar n | Fl Fl no-renames Oc Oo Fl l Ns Ar n Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -763,7 +763,43 @@ bytes, only comparison changes.
 .Fl U Ar n
 .Pq Fl Fl unified Ns = Ns Ar n
 sets the number of unchanged context lines around each hunk (default 3).
-.It Cm status Oo Fl Fl porcelain Ns Oo = Ns Cm v1 | Cm v2 Oc Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc
+Rename detection is on by default: a deleted and an added file pair into a
+rename when their contents are at least 50% similar, scored as git scores
+them.
+.Fl M Ns Ar n
+.Pq Fl Fl find-renames Ns = Ns Ar n
+sets the threshold in git's grammar
+.Po
+.Ql 90%
+is 90%, while digits without
+.Ql %
+are a fraction, so
+.Ql 9
+is 90%
+.Pc ,
+and
+.Fl Fl no-renames
+turns detection off.
+A rename prints
+.Ql R<score>
+in
+.Fl Fl name-status ,
+.Ql old => new
+in
+.Fl Fl stat ,
+and
+.Ql similarity index ,
+.Ql rename from
+and
+.Ql rename to
+lines in the patch.
+When more than
+.Fl l Ns Ar n
+(default 1000) squared pairs would need a score, only identical-content
+renames are found and a warning goes to stderr;
+.Fl l Ns 0
+removes the limit.
+.It Cm status Oo Fl Fl porcelain Ns Oo = Ns Cm v1 | Cm v2 Oc Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc Oo Fl Fl find-renames Ns Op = Ns Ar n | Fl Fl no-renames Oc
 Show the staged and working-tree changes.
 .Fl s
 .Pq alias Fl Fl short
@@ -778,12 +814,15 @@ NUL-terminates records and emits raw, unquoted paths.
 .Fl Fl porcelain Ns = Ns Cm v2
 emits git's richer per-path format \(em
 .Ql 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
-for tracked changes (octal modes, full object ids; kit emits no rename
-.Ql 2
-lines and is never a submodule, so
+for tracked changes (octal modes, full object ids; kit is never a
+submodule, so
 .Ar sub
 is always
 .Ql N... ) ,
+.Ql 2 <XY> ... R<score> <path> <orig>
+for a staged rename, found by similarity as in
+.Cm diff
+.Pq Fl Fl find-renames Ns = Ns Ar n , Fl Fl no-renames ,
 and
 .Ql ? <path>
 for untracked. Header lines

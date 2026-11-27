@@ -52,6 +52,10 @@ pub struct DiffEntry {
     /// Source path for a [`DiffKind::Renamed`] entry; `None` for every
     /// other kind. `path` always holds the destination (new) path.
     pub old_path: Option<String>,
+    /// Similarity of a [`DiffKind::Renamed`] entry in percent, as git
+    /// prints it (`100` for identical content); `None` for every other
+    /// kind.
+    pub similarity: Option<u8>,
 }
 
 /// Sorted (by path) sequence of [`DiffEntry`].
@@ -159,6 +163,7 @@ fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl
                 old_mode: entries[ri].old_mode,
                 new_mode: entries[ai].new_mode,
                 old_path: Some(entries[ri].path.clone()),
+                similarity: Some(100),
             });
             consumed[ri] = true;
             consumed[ai] = true;
@@ -361,6 +366,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             old_mode: Some(o.mode),
                             new_mode: Some(n.mode),
                             old_path: None,
+                            similarity: None,
                         });
                     }
                 } else if o.object_hash != n.object_hash || o.mode != n.mode {
@@ -372,6 +378,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                         old_mode: Some(o.mode),
                         new_mode: Some(n.mode),
                         old_path: None,
+                        similarity: None,
                     });
                 }
                 i += 1;
@@ -442,6 +449,7 @@ fn walk_removed_entries<S: ObjectSource + ?Sized>(
             old_mode: Some(entry.mode),
             new_mode: None,
             old_path: None,
+            similarity: None,
         });
     }
     Ok(())
@@ -491,6 +499,7 @@ fn walk_added_entries<S: ObjectSource + ?Sized>(
             old_mode: None,
             new_mode: Some(entry.mode),
             old_path: None,
+            similarity: None,
         });
     }
     Ok(())
@@ -1844,6 +1853,7 @@ mod tests {
             old_mode: Some(EntryMode::Blob),
             new_mode: None,
             old_path: None,
+            similarity: None,
         }
     }
     fn added(path: &str, content: &[u8]) -> DiffEntry {
@@ -1855,6 +1865,7 @@ mod tests {
             old_mode: None,
             new_mode: Some(EntryMode::Blob),
             old_path: None,
+            similarity: None,
         }
     }
 
@@ -1888,6 +1899,7 @@ mod tests {
             old_mode: Some(EntryMode::Blob),
             new_mode: Some(EntryMode::Blob),
             old_path: None,
+            similarity: None,
         }];
         let before = es.clone();
         pair_renames(&mut es, |h| h);

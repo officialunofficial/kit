@@ -64,7 +64,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
             ;;
         diff)
-            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -w --ignore-all-space -b --ignore-space-change -U --unified -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -w --ignore-all-space -b --ignore-space-change -U --unified -z -M --find-renames --no-renames -l --help" -- "$cur") )
             ;;
         cat-file)
             COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
@@ -94,7 +94,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "list cat --pattern --help" -- "$cur") )
             ;;
         status)
-            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --find-renames --no-renames --help" -- "$cur") )
             ;;
         commit)
             COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )

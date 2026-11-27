@@ -160,10 +160,10 @@ fn a_rename_threshold_must_be_a_number() {
         renames: true,
         rename_threshold: Some(t),
     };
-    for ok in ["", "50", "50%", "100"] {
+    for ok in ["", "50", "50%", "100", "256", "0.9"] {
         status::compute(&f.layout, &f.root, &request(ok), &NoopObserver).unwrap();
     }
-    for bad in ["x", "-1", "256", "5 0"] {
+    for bad in ["x", "-1", "50%%", "5 0"] {
         let err = status::compute(&f.layout, &f.root, &request(bad), &NoopObserver).unwrap_err();
         assert!(
             matches!(err, Error::InvalidRenameThreshold(ref t) if t == bad),

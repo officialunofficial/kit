@@ -60,8 +60,8 @@
 //! octal file modes in HEAD / index / worktree, and `<hH>/<hI>` are the
 //! HEAD and index object ids (full 64-hex BLAKE3; git's are 40-hex
 //! SHA-1, so the differential harness masks length). Untracked paths are
-//! `? <path>` records, and a rename emits a `2` record (`R100`, exact
-//! content). There are no `--branch` header lines. Path quoting and `-z`
+//! `? <path>` records, and a rename emits a `2` record with git's score
+//! (`R90`). There are no `--branch` header lines. Path quoting and `-z`
 //! semantics match the v1 renderer.
 //!
 //! The logic is in [`libkit::status`]. This module parses the arguments and
@@ -114,9 +114,9 @@ struct StatusOpts {
     #[arg(long = "no-renames")]
     no_renames: bool,
 
-    /// Detect renames, optionally with a similarity threshold. Accepted
-    /// for git familiarity; kit pairs by identical content (exact, 100%),
-    /// so any threshold ≤ 100 selects the same exact matches.
+    /// Detect renames, optionally with a similarity threshold (git's
+    /// grammar: `90%`, or digits read as a fraction, so `9` is 90%).
+    /// Default 50%.
     #[arg(long = "find-renames", value_name = "N", num_args = 0..=1, require_equals = true)]
     find_renames: Option<String>,
 }
@@ -202,7 +202,10 @@ fn warn_unfinished_pull(layout: &RepoLayout) {
 fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
     let disp = super::display_path;
     let mut stdout = std::io::stdout().lock();
-    for Record { xy, path, old_path } in status::records(entries) {
+    for Record {
+        xy, path, old_path, ..
+    } in status::records(entries)
+    {
         // `xy` is two ASCII status columns by construction.
         let code = std::str::from_utf8(&xy).unwrap_or("??");
         match old_path {
@@ -227,8 +230,8 @@ fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
 
 /// `--porcelain=v2` output — git's richer per-path format. Each changed
 /// tracked path is a `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` line, a
-/// rename is a `2 … <Xscore> <new>\t<old>` line (kit pairs exact-content
-/// moves, so the score is always `R100`), and (kit having no submodules)
+/// rename is a `2 … <Xscore> <new>\t<old>` line with git's similarity
+/// score, and (kit having no submodules)
 /// `<sub>` is always `N...`; untracked paths are `? <path>`.
 ///
 /// `<XY>` uses `.` for an unchanged column (vs v1's space). `<mH>`/`<mI>` are
@@ -267,10 +270,11 @@ fn render_porcelain_v2(layout: &RepoLayout, report: &status::Report, z: bool) ->
         );
         if let Some(old) = record.old_path {
             // `2` rename record. The HEAD side (mH/hH) describes the SOURCE
-            // path; the index side (mI/hI) the DESTINATION. Exact content
-            // means hH == hI and the score is `R100`. Verified vs git.
+            // path; the index side (mI/hI) the DESTINATION. The score is
+            // git's unpadded percent (`R90`, `R100`). Verified vs git.
+            let score = record.similarity.unwrap_or(100);
             let prefix =
-                format!("2 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} R100 ");
+                format!("2 {x}{y} N... {m_head} {m_index} {m_work} {h_head} {h_index} R{score} ");
             emit_v2_rename_record(&mut stdout, &prefix, record.path, old, z);
             continue;
         }

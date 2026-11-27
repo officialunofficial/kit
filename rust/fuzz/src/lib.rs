@@ -2485,7 +2485,7 @@ pub fn diff_args_one_iteration(input: &[u8]) {
         let request = Request {
             staged: flags & 1 != 0,
             merge_base: flags & 2 != 0,
-            renames: flags & 4 != 0,
+            renames: (flags & 4 != 0).then(kit_core::ops::RenameOptions::default),
             args: &args,
         };
         if let Ok(result) = diff::compute(repo, &request) {
@@ -2502,7 +2502,7 @@ pub fn diff_args_one_iteration(input: &[u8]) {
             &Request {
                 staged: false,
                 merge_base: false,
-                renames: true,
+                renames: Some(kit_core::ops::RenameOptions::default()),
                 args: &pinned,
             },
         )
@@ -2510,6 +2510,127 @@ pub fn diff_args_one_iteration(input: &[u8]) {
         let paths: Vec<&str> = result.entries().iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["a.txt", "b.txt"]);
     });
+}
+
+/// Rename scores (`rename_score`): `parse_rename_score` never panics, gives
+/// the same answer twice and never passes `MAX_SCORE`, and an integer percent
+/// up to 100 reads as that percent. `detect_renames` on one deleted and one
+/// added blob never panics, makes at most one pair with a score of at most
+/// 100%, pairs identical content at 100%, gives the same pair and score with
+/// the sides swapped, and gives the same answer when the deleted blob is
+/// stored as two chunks.
+pub fn rename_score_one_iteration(input: &[u8]) {
+    use kit_core::object::{Blob, ChunkedBlob, EntryMode, Object};
+    use kit_core::ops::{
+        DiffEntry, DiffKind, MAX_SCORE, RenameOptions, detect_renames, parse_rename_score,
+    };
+    use kit_core::serialize::serialize;
+    use kit_core::store::MemorySource;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((&head, rest)) = input.split_first() else {
+        return;
+    };
+    // The threshold text is the first line; the blobs share the rest.
+    let (line, rest) = match rest.iter().position(|&b| b == b'\n') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, &[][..]),
+    };
+    let text = String::from_utf8_lossy(line);
+    let parsed = parse_rename_score(&text);
+    assert_eq!(
+        parsed,
+        parse_rename_score(&text),
+        "a threshold parses the same twice"
+    );
+    if let Some(score) = parsed {
+        assert!(score <= MAX_SCORE, "a score is at most MAX_SCORE");
+    }
+    if let Some(n) = text.strip_suffix('%').and_then(|d| d.parse::<u32>().ok())
+        && n <= 100
+        && text
+            .bytes()
+            .take(text.len() - 1)
+            .all(|b| b.is_ascii_digit())
+    {
+        assert_eq!(parsed, Some(n * MAX_SCORE / 100), "{text}");
+    }
+
+    let split = usize::from(head) * rest.len() / 256;
+    let (a, b) = rest.split_at(split);
+    let mut store = MemorySource::default();
+    let mut put = |object: &Object| {
+        let bytes = serialize(object).expect("serialize");
+        let id = object.id().expect("id");
+        store.insert(id, bytes).expect("insert");
+        id
+    };
+    let blob = |data: &[u8]| {
+        Object::Blob(Blob {
+            data: data.to_vec(),
+        })
+    };
+    let (ia, ib) = (put(&blob(a)), put(&blob(b)));
+    let cut = a.len() / 2;
+    let (left, right) = (put(&blob(&a[..cut])), put(&blob(&a[cut..])));
+    let chunks: Vec<(kit_core::Hash, u64)> = [(left, cut), (right, a.len())]
+        .into_iter()
+        .filter(|(_, end)| *end > 0)
+        .map(|(id, end)| (id, end as u64))
+        .collect();
+    let chunked = if a.is_empty() {
+        None
+    } else {
+        ChunkedBlob::new(a.len() as u64, 0, chunks)
+            .ok()
+            .map(|m| put(&Object::ChunkedBlob(m)))
+    };
+    let side = |kind: DiffKind, path: &str, id: kit_core::Hash| DiffEntry {
+        path: path.to_owned(),
+        kind,
+        old_hash: (kind == DiffKind::Removed).then_some(id),
+        new_hash: (kind == DiffKind::Added).then_some(id),
+        old_mode: (kind == DiffKind::Removed).then_some(EntryMode::Blob),
+        new_mode: (kind == DiffKind::Added).then_some(EntryMode::Blob),
+        old_path: None,
+        similarity: None,
+    };
+    let pair = |old: kit_core::Hash, new: kit_core::Hash, old_name: &str, new_name: &str| {
+        let mut entries = vec![
+            side(DiffKind::Removed, old_name, old),
+            side(DiffKind::Added, new_name, new),
+        ];
+        entries.sort_by(|x, y| x.path.cmp(&y.path));
+        detect_renames(&store, &mut entries, &RenameOptions::default()).expect("detect");
+        let renamed: Vec<&DiffEntry> = entries
+            .iter()
+            .filter(|e| e.kind == DiffKind::Renamed)
+            .collect();
+        assert!(renamed.len() <= 1, "one source makes at most one pair");
+        assert_eq!(entries.len(), 2 - renamed.len());
+        renamed
+            .first()
+            .map(|e| e.similarity.expect("a rename has a score"))
+    };
+    let forward = pair(ia, ib, "x", "y");
+    if let Some(score) = forward {
+        assert!(score <= 100);
+    }
+    if a == b {
+        assert_eq!(forward, Some(100), "identical content pairs at 100%");
+    }
+    assert_eq!(
+        forward,
+        pair(ib, ia, "y", "x"),
+        "swapped sides keep the score"
+    );
+    if let Some(chunked) = chunked {
+        assert_eq!(
+            forward,
+            pair(chunked, ib, "x", "y"),
+            "chunking keeps the score"
+        );
+    }
 }
 
 /// Blame ranges and revisions (`blame_line_range`): `blame::line_range::parse`
@@ -4077,6 +4198,23 @@ mod tests {
             b"\x04...",
         ] {
             run_one(case, diff_args_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_rename_score() {
+        run_iterated_unit(rename_score_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"\x80",
+            b"\x8050%\n1\n2\n3\n1\n2\nx\n",
+            b"\x80100%\nsame\nsame\n",
+            b"\x00\n\r\n\r\n",
+            b"\xff9\nabc",
+            b"\x40.5%\n\0\0\0\0bin",
+            b"\x80\n\r\r\n\r",
+        ] {
+            run_one(case, rename_score_one_iteration).unwrap();
         }
     }
 

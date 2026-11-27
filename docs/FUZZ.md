@@ -70,6 +70,7 @@ from recurring.
 | `fuzz_targets/revspec_parse.rs` | `libkit::revspec::resolve_revision` (never panics on any text; a resolved hash names a stored object; `HEAD`, `main~2` and `v1^0` keep their answers) |
 | `fuzz_targets/log_parse.rs` | `libkit::log::date::parse` and `libkit::log::history` (a date parses the same twice, and `@<n>` reads as `n`; a walked history has no repeated commit, names only stored commits and never shows a parent before a child) |
 | `fuzz_targets/diff_args.rs` | `libkit::diff::compute` (never panics on any revisions or paths with any flags; the patch body and the change counts of every entry never panic; `HEAD~1 HEAD` keeps its answer) |
+| `fuzz_targets/rename_score.rs` | `kit_core::ops::parse_rename_score` and `detect_renames` (a threshold parses the same twice and stays at most `MAX_SCORE`, and `<n>%` reads as `n`; one deleted and one added blob make at most one pair, at most 100%, identical content at 100%, the same score with the sides swapped and with the blob in two chunks; none panics) |
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
 | `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
 | `fuzz_targets/push_refspec.rs` | `libkit::push::parse_refspec` (never panics on any text; a refspec gives the same answer twice; an accepted refspec has two pushable branch names, no wildcard and no leading `+`, and its names joined by `:` parse back to it) |
@@ -141,6 +142,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::revspec::resolve_revision` | `revspec_parse` |
 | `libkit::log::date::parse`, the selection text of `libkit::log::history` | `log_parse` |
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
+| `kit_core::ops::parse_rename_score`, the span signature of `kit_core::ops::detect_renames` | `rename_score` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
 | `libkit::branch::glob_match` | `branch_glob` |
 | `libkit::push::parse_refspec` | `push_refspec` |

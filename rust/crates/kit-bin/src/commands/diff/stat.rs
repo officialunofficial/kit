@@ -24,9 +24,13 @@ pub(in crate::commands) fn render_stat(
         return Ok(());
     }
     // The display name is C-style quoted (git `core.quotePath`) when needed.
+    // A rename names both sides, as git's `pprint_rename` does.
     let names: Vec<String> = stats
         .iter()
-        .map(|row| super::c_quote_name(&row.path))
+        .map(|row| match &row.old_path {
+            Some(old) => rename_name(old, &row.path),
+            None => super::c_quote_name(&row.path),
+        })
         .collect();
 
     // Column metrics. `max_change` and the count-column width come from
@@ -187,6 +191,56 @@ fn terminal_columns() -> usize {
         .unwrap_or(80)
 }
 
+/// The display name of a rename: `old => new`, with a shared leading
+/// directory and a shared trailing path kept outside braces, as git's
+/// `pprint_rename` prints it (`dir/{a.txt => b.txt}`). A path that needs
+/// C-style quoting prints both sides whole and quoted.
+fn rename_name(old: &str, new: &str) -> String {
+    if super::super::c_quote_path(old).is_some() || super::super::c_quote_path(new).is_some() {
+        return format!(
+            "{} => {}",
+            super::c_quote_name(old),
+            super::c_quote_name(new)
+        );
+    }
+    let (a, b) = (old.as_bytes(), new.as_bytes());
+    // The prefix ends just after a shared `/`.
+    let mut prefix = 0;
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        if x != y {
+            break;
+        }
+        if *x == b'/' {
+            prefix = i + 1;
+        }
+    }
+    // The suffix starts at a shared `/`. With a prefix, the scan may reach
+    // back onto the prefix's slash, as git's does.
+    let floor = prefix.saturating_sub(usize::from(prefix > 0));
+    let mut suffix = 0;
+    let (mut i, mut j) = (a.len(), b.len());
+    while i > floor && j > floor && a[i - 1] == b[j - 1] {
+        i -= 1;
+        j -= 1;
+        if a[i] == b'/' {
+            suffix = a.len() - i;
+        }
+    }
+    let a_mid = a.len().saturating_sub(prefix + suffix);
+    let b_mid = b.len().saturating_sub(prefix + suffix);
+    let mid = |s: &str, len: usize| s[prefix.min(s.len())..(prefix + len).min(s.len())].to_owned();
+    if prefix + suffix == 0 {
+        return format!("{old} => {new}");
+    }
+    format!(
+        "{}{{{} => {}}}{}",
+        &old[..prefix],
+        mid(old, a_mid),
+        mid(new, b_mid),
+        &old[old.len() - suffix..]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,8 +286,24 @@ mod tests {
     fn row(path: &str, change: StatChange) -> FileStat {
         FileStat {
             path: path.to_string(),
+            old_path: None,
             change,
         }
+    }
+
+    #[test]
+    fn a_rename_name_keeps_the_shared_directories_outside_braces() {
+        assert_eq!(rename_name("a.txt", "b.txt"), "a.txt => b.txt");
+        assert_eq!(
+            rename_name("dir/a.txt", "dir/b.txt"),
+            "dir/{a.txt => b.txt}"
+        );
+        assert_eq!(rename_name("a/x.txt", "b/x.txt"), "{a => b}/x.txt");
+        assert_eq!(rename_name("p/a/x", "p/b/x"), "p/{a => b}/x");
+        assert_eq!(rename_name("d/x", "d/e/x"), "d/{ => e}/x");
+        assert_eq!(rename_name("d/e/x", "d/x"), "d/{e => }/x");
+        assert_eq!(rename_name("abc", "abd"), "abc => abd");
+        assert_eq!(rename_name("t\tab", "u"), "\"t\\tab\" => u");
     }
 
     fn rendered(rows: &[FileStat]) -> String {
