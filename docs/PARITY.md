@@ -322,6 +322,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   the rebased branch and reports the refs it could not update. kit moves
   only local branches; an `update-ref` line must name `refs/heads/<branch>`
   of an existing branch other than the rebased one.
+- **`rerere`.** kit writes a conflict as whole-file markers, so an entry
+  records one whole file and replays only when both sides match exactly,
+  where git records each conflicting hunk and merges a resolution into a
+  file whose context changed. `rerere clear` deletes every entry, where
+  git drops only the entries of the conflict in progress. `kit gc` does not
+  run `rerere gc`. `rerere remaining` and `rerere.enabled` turning on by the
+  presence of `rr-cache/` are not supported.
 - **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
   `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
   ort` and `-s recursive`. Other strategies and options, such as

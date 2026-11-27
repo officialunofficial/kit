@@ -28,6 +28,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; packfile and local pack index formats.
 - [SPEC-REFS](SPEC-REFS.md) &mdash; ref names, storage, and CAS update variants.
 - [SPEC-RELEASE-THRESHOLD](SPEC-RELEASE-THRESHOLD.md) &mdash; BLS threshold signatures for release-party attestation.
+- [SPEC-RERERE](SPEC-RERERE.md) &mdash; draft local cache of recorded conflict resolutions (`rr-cache/`).
 - [SPEC-RPC](SPEC-RPC.md) &mdash; shared stdio protobuf framing for subprocess protocols.
 - [SPEC-SIGNING](SPEC-SIGNING.md) &mdash; commit / remix / tag signing hashes and verification.
 - [SPEC-SPARSE-CHECKOUT](SPEC-SPARSE-CHECKOUT.md) &mdash; verifiable server-side sparse checkout over HTTP/S3.

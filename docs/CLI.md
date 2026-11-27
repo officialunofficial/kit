@@ -1182,6 +1182,28 @@ Branches / refs:
   "conflicts":[<path>,...],"error":"..."}` on a conflict pause. Best-effort on the interactive
   (`-i`) editing path and a handful of deep internal errors (for example, signer
   setup), which stay stderr-only.
+- `kit rerere [status | diff | forget <path> | clear | gc]` &mdash; reuse
+  recorded conflict resolutions. With `rerere.enabled = true` in repo or
+  user config, `merge`, `cherry-pick`, `revert` and `rebase` record how
+  each text conflict was resolved when the operation continues or its
+  merge is committed (`Recorded resolution for '<path>'.`), and write the
+  recorded resolution into the file the next time the same conflict
+  appears (`Resolved '<path>' using previous resolution.`). A conflict
+  and the same conflict with its sides swapped match. The resolution is
+  left unstaged, so the operation continues only after `kit add`, unless
+  `rerere.autoUpdate = true` stages it. Binary, delete/modify,
+  file/directory, symlink and executable conflicts are not recorded.
+  `status` lists the paths of the current conflicts that have an entry,
+  and `diff` shows, for each, the change from the conflict with markers
+  to the file now. `forget <path>` drops the recorded resolution of the
+  current conflict at `<path>`. `clear` deletes every entry. `gc` deletes
+  entries resolved more than `gc.rerereResolved` days ago (default 60)
+  and unresolved entries older than `gc.rerereUnresolved` days (default
+  15). With no subcommand, `rerere` does nothing: kit records and replays
+  as part of each operation. The cache lives in `.kit/rr-cache/`, shared by
+  linked worktrees; [SPEC-RERERE](specs/SPEC-RERERE.md) gives its format.
+  An entry that does not match the format is ignored with a warning and
+  never applied.
 - `kit bisect start | good | bad | skip | reset | run <cmd> [args…]` &mdash;
   binary search for a bug. `run` drives the loop automatically: it checks
   out each candidate, runs `<cmd>`, and classifies from the exit status
@@ -1302,6 +1324,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
+| `rr-cache/`                   | recorded conflict resolutions, shared by linked worktrees: a `version` file and one directory per conflict id holding `side1`, `side2` and, once recorded, `postimage` (see SPEC-RERERE) |
 | `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X`. An `update-ref <branch>` step in `actions` also takes no commit and needs the version line. `update-refs` holds one line per branch that `--update-refs` moves, `<old> <new> <branch>`, with `-` as `<new>` until its step runs |
 
 Remote / sync:
@@ -2183,6 +2206,10 @@ which routes them to the user scope automatically.
 | `ssh.identity_file` | path | inherit | User-scoped only |
 | `rebase.updateRefs` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase` move the branches stacked on the rebased commits, as `--update-refs` does; `--no-update-refs` overrides it |
 | `rebase.autosquash` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase -i` arrange `fixup!` and `squash!` commits as `--autosquash` does; `--no-autosquash` overrides it. It does not apply to a rebase without `-i`, as in git 2.44 and later |
+| `rerere.enabled` | `true` / `false` | `false` | Repo or user config. `true` records conflict resolutions and replays them; see `kit rerere` |
+| `rerere.autoUpdate` | `true` / `false` | `false` | Repo or user config. `true` stages a replayed resolution as well as writing it |
+| `gc.rerereResolved` | days | `60` | Repo or user config. `kit rerere gc` deletes entries whose resolution is older |
+| `gc.rerereUnresolved` | days | `15` | Repo or user config. `kit rerere gc` deletes unresolved entries that are older |
 | `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
