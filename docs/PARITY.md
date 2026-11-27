@@ -470,7 +470,10 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `HEAD` detached.
 - **`reflog`.** `reflog` lists the first-parent chain of a branch. It does not
   record operations, and it omits commits that `commit --amend` or `reset`
-  replaced.
+  replaced. `reflog --recovery` lists those replaced commits, and
+  `recovery@{N}` names them, where Git uses `HEAD@{N}` from the reflog of
+  `HEAD`. The recovery log records only the commits that a rewrite replaced,
+  not every move of `HEAD`.
 - **`blame` output.** The default line is `<short id>\t<line>\t<text>`.
   `--porcelain` follows the Git header fields. The author fields hold the kit
   identity, and kit prints no `previous` line.

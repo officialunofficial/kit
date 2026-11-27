@@ -449,6 +449,26 @@ History / commits:
   `--format=json` emits JSONL with keys `ref`, `selector`, `index`, `hash`,
   `title`, `ancestry_verified` (`true`/`false`/`null`). Superseded commits after
   amend/reset are outside this reachable chain; recovery records are separate.
+- `kit reflog --recovery [<branch>] [--format=json] [-n N]` &mdash; **read-only**
+  list of the recovery log: the commits that `commit --amend`, `reset`,
+  `rebase` and `stash pop` replaced, newest record first. Each line is
+  `<short id> recovery@{N}: <op> (<branch>): <subject>`, where `<op>` is
+  `amend`, `reset`, `rebase` or `stash-pop`. A record without a branch, such
+  as a detached `HEAD` or a stash, has no `(<branch>)`. A record whose commit
+  is no longer in the store prints `(pruned)` in place of the subject. With
+  `<branch>`, only that branch's records print, and each keeps its number in
+  the full list. `-n` caps the lines. `--format=json` emits JSONL with keys
+  `index`, `selector`, `hash`, `op`, `branch`, `time` (Unix seconds),
+  `title` and `pruned`. A last line that a crash cut short is ignored, and any
+  other malformed line is an error (exit `65`). The command writes nothing.
+  `recovery@{N}` names the commit of the N-th record, counted from 0, in
+  every revision argument, so `kit reset --hard recovery@{0}` undoes the last
+  amend, reset or rebase (with the data-loss guard of `reset --hard`), and
+  `kit switch -c rescue recovery@{1}` keeps an older one on a new branch.
+  Suffix steps work after it, as in `recovery@{0}~1`. A number past the end
+  of the log, a pruned record and a malformed number are errors. `kit gc`
+  keeps every listed commit until its record expires (SPEC-GC, "Recovery
+  log").
 - `kit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
   [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
   [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` &mdash;
