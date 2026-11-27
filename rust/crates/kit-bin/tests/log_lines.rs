@@ -62,15 +62,16 @@ fn without_blob_ids(line: &str) -> String {
     }
 }
 
-/// Whether `git log -L` prints the `index` and `new file mode` lines of
-/// the standard diff output, as git 2.55 and later do.
+/// Whether `git log -L` prints the `index` and `new file mode` lines and
+/// the function line of the standard diff output, as git 2.54 and later
+/// do.
 fn git_prints_file_headers() -> bool {
     let out = Command::new("git").arg("--version").output().unwrap();
     let text = stdout(&out);
     let version = text.trim().trim_start_matches("git version ");
     let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
     let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    (major, minor) >= (2, 55)
+    (major, minor) >= (2, 54)
 }
 
 /// `--oneline` output with the ids dropped: each commit line becomes its
@@ -163,6 +164,19 @@ fn each_commit_shows_the_hunk_of_the_range() {
             let ids = l.split(' ').nth(1).unwrap();
             ids.len() == 16 && ids.contains("..")
         }),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_hunk_header_names_the_function_above_it() {
+    let repo = Repo::new();
+    let body = "int f()\n{\n\ta;\n\tb;\n\tc;\n\td;\n\te;\n}\n";
+    repo.commit_file("f.c", body.as_bytes(), "create");
+    repo.commit_file("f.c", body.replace("\te;", "\tE;").as_bytes(), "edit e");
+    let out = log(&repo, &["--oneline", "-n", "1", "-L", "7,7:f.c"]);
+    assert!(
+        out.contains("\n@@ -7,1 +7,1 @@ int f()\n-\te;\n+\tE;\n"),
         "{out}"
     );
 }
@@ -367,6 +381,11 @@ fn output_matches_git_log_l() {
             ours.retain(|l| {
                 l != "index" && !l.starts_with("index ") && !l.starts_with("new file mode ")
             });
+            for l in &mut ours {
+                if let Some(end) = l.strip_prefix("@@ ").and_then(|r| r.find(" @@ ")) {
+                    l.truncate(end + 6);
+                }
+            }
         }
         assert_eq!(ours, theirs, "{args:?}");
     }

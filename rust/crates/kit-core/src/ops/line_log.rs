@@ -358,6 +358,60 @@ mod tests {
         assert_eq!(text, [" a", "-b", "+B", "+B2"]);
     }
 
+    /// The hunks of `ranges` for the change from `parent` to `target`.
+    fn hunks_of(ranges: &[Span], parent: &[u8], target: &[u8]) -> Vec<RangeHunk> {
+        let (_, touched) = map_across(&set(ranges), &changes(parent, target));
+        hunks(&set(ranges), &touched, parent, target)
+    }
+
+    #[test]
+    fn a_hunk_names_the_function_line_above_it() {
+        // git looks for the line above the context of the standard diff,
+        // with the range's span as the context when it is more than 3.
+        let parent = b"int f()\n{\n\ta;\n\tb;\n\tc;\n\td;\n\te;\n}\n";
+        let target = b"int f()\n{\n\ta;\n\tb;\n\tc;\n\td;\n\tE;\n}\n";
+        let h = hunks_of(&[6..7], parent, target);
+        assert_eq!(h[0].func, b"int f()");
+        // A context that reaches the top of the file leaves nothing above.
+        let h = hunks_of(&[0..7], parent, target);
+        assert!(h[0].func.is_empty());
+    }
+
+    #[test]
+    fn a_later_hunk_keeps_the_function_line_when_none_is_above_it() {
+        // Two hunks of the standard diff: the second looks only down to the
+        // line above the first one's context, finds nothing, and keeps the
+        // first one's name, as git's xdiff does.
+        let mut parent = b"A\n".to_vec();
+        for i in 1..14 {
+            parent.extend_from_slice(format!("\tx{i}\n").as_bytes());
+        }
+        let target = String::from_utf8(parent.clone())
+            .unwrap()
+            .replace("\tx4\n", "\tX4\n")
+            .replace("\tx12\n", "\tX12\n");
+        let h = hunks_of(&[4..5, 12..13], &parent, target.as_bytes());
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].func, b"A");
+        assert_eq!(h[1].func, b"A");
+    }
+
+    #[test]
+    fn a_function_line_is_cut_at_80_bytes_and_trimmed() {
+        let long = format!("f{}  ", "x".repeat(100));
+        let parent = format!("{long}\n\ta\n\tb\n\tc\n\td\n");
+        let target = parent.replace("\td\n", "\tD\n");
+        let h = hunks_of(&[4..5], parent.as_bytes(), target.as_bytes());
+        assert_eq!(h[0].func, long.as_bytes()[..80].to_vec());
+        let short = "g()   \n\ta\n\tb\n\tc\n\td\n";
+        let h = hunks_of(
+            &[4..5],
+            short.as_bytes(),
+            short.replace("\td", "\tD").as_bytes(),
+        );
+        assert_eq!(h[0].func, b"g()");
+    }
+
     #[test]
     fn a_repeated_line_aligns_as_blame_does() {
         // Blame matches the old `l5` to the first new `l5`, so the change is
