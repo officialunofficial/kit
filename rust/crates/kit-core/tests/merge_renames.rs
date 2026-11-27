@@ -165,15 +165,15 @@ fn two_renames_to_different_names_conflict_at_both_paths() {
 
 /// A base of `count` files, the edits of each side as `(file, line)`, and
 /// for the renaming side the file index and the new path.
-fn scenario() -> impl Strategy<
-    Value = (
-        usize,
-        Vec<(usize, usize)>,
-        Vec<(usize, usize)>,
-        usize,
-        String,
-    ),
-> {
+type Scenario = (
+    usize,
+    Vec<(usize, usize)>,
+    Vec<(usize, usize)>,
+    usize,
+    String,
+);
+
+fn scenario() -> impl Strategy<Value = Scenario> {
     (2usize..5).prop_flat_map(|count| {
         (
             Just(count),
@@ -258,4 +258,53 @@ proptest! {
         }
         prop_assert_eq!(merged.len(), count);
     }
+}
+
+#[test]
+fn a_rename_out_of_a_directory_leaves_no_empty_directory() {
+    let (_d, s) = fresh();
+    let base = Files::from([("d/a.txt".into(), body("a", &[]))]);
+    let ours = Files::from([("d/a.txt".into(), body("a", &[(3, "ours".into())]))]);
+    let theirs = Files::from([("b.txt".into(), body("a", &[]))]);
+    let r = merge_trees(
+        &s,
+        Some(tree(&s, &base)),
+        Some(tree(&s, &ours)),
+        Some(tree(&s, &theirs)),
+    )
+    .unwrap();
+    assert!(r.conflicts.is_empty(), "{:?}", r.conflicts);
+    assert_eq!(
+        files(&s, r.tree_hash),
+        Files::from([("b.txt".into(), body("a", &[(3, "ours".into())]))])
+    );
+}
+
+#[test]
+fn a_rename_blocked_by_a_file_on_the_other_side_is_not_followed() {
+    let (_d, s) = fresh();
+    let base = Files::from([("a.txt".into(), body("a", &[]))]);
+    let ours = Files::from([
+        ("a.txt".into(), body("a", &[(3, "ours".into())])),
+        (
+            "new".into(),
+            b"a file where theirs needs a directory\n".to_vec(),
+        ),
+    ]);
+    let theirs = Files::from([("new/b.txt".into(), body("a", &[]))]);
+    let r = merge_trees(
+        &s,
+        Some(tree(&s, &base)),
+        Some(tree(&s, &ours)),
+        Some(tree(&s, &theirs)),
+    )
+    .unwrap();
+    // Without the rename the edit meets a delete at the old path.
+    assert!(
+        r.conflicts
+            .iter()
+            .any(|c| c.path == "a.txt" && c.kind == ConflictKind::DeleteModify),
+        "{:?}",
+        r.conflicts
+    );
 }

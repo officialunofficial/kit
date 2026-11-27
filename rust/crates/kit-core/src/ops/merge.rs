@@ -24,8 +24,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::ops::graph::{AncestorError, read_history_commit};
+use crate::ops::similarity::RenameOptions;
 use crate::serialize;
 use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError, WalkBudget};
+
+mod renames;
 
 /// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,6 +109,40 @@ pub struct Conflict {
     /// Tree mode of the theirs-side entry (`None` when theirs deleted
     /// the path).
     pub theirs_mode: Option<EntryMode>,
+    /// Set when the conflict comes from a rename: a rename against a
+    /// delete, or one of two renames of a file to different paths. `path`
+    /// is the new path, and the conflict has the shape of
+    /// [`ConflictKind::DeleteModify`].
+    pub rename: Option<RenameConflict>,
+}
+
+/// The rename behind a [`Conflict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameConflict {
+    /// The path in the base.
+    pub from: String,
+    /// The path the other side renamed the file to, or `None` when the
+    /// other side deleted it.
+    pub other: Option<String>,
+}
+
+/// What a three-way merge does beyond the path-by-path merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeOptions {
+    /// The side content conflicts resolve to.
+    pub favor: Favor,
+    /// How renames between the base and each side are detected, or `None`
+    /// to merge path by path only.
+    pub renames: Option<RenameOptions>,
+}
+
+impl Default for MergeOptions {
+    fn default() -> Self {
+        Self {
+            favor: Favor::None,
+            renames: Some(RenameOptions::default()),
+        }
+    }
 }
 
 /// Result of [`merge_trees`]. The `tree_hash` is always populated —
@@ -165,12 +202,51 @@ pub fn merge_trees_favoring<S: ObjectSource + ObjectSink + ?Sized>(
     theirs_hash: Option<Hash>,
     favor: Favor,
 ) -> Result<MergeResult, StoreError> {
+    merge_trees_with(
+        store,
+        base_hash,
+        ours_hash,
+        theirs_hash,
+        &MergeOptions {
+            favor,
+            ..MergeOptions::default()
+        },
+    )
+}
+
+/// [`merge_trees`] with [`MergeOptions`].
+///
+/// With rename detection, a file that one side renamed and the other side
+/// kept merges at the new path, and the other side's changes to it go
+/// there. A rename against a delete, and two renames of one file to
+/// different paths, are conflicts at each new path, with
+/// [`Conflict::rename`] set. Conflicts come sorted by path.
+///
+/// # Errors
+///
+/// As [`merge_trees`].
+pub fn merge_trees_with<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
+    base_hash: Option<Hash>,
+    ours_hash: Option<Hash>,
+    theirs_hash: Option<Hash>,
+    options: &MergeOptions,
+) -> Result<MergeResult, StoreError> {
+    let favor = options.favor;
+    let mut conflicts: Vec<Conflict> = Vec::new();
+    let (base_hash, ours_hash, theirs_hash) = match &options.renames {
+        Some(renames) => {
+            let prepared = renames::prepare(store, base_hash, ours_hash, theirs_hash, renames)?;
+            conflicts = prepared.conflicts;
+            (prepared.base, prepared.ours, prepared.theirs)
+        }
+        None => (base_hash, ours_hash, theirs_hash),
+    };
     let base_entries = load_entries(store, base_hash)?;
     let ours_entries = load_entries(store, ours_hash)?;
     let theirs_entries = load_entries(store, theirs_hash)?;
 
     let mut merged: Vec<TreeEntry> = Vec::new();
-    let mut conflicts: Vec<Conflict> = Vec::new();
     merge_entries_recursive(
         store,
         &base_entries,
@@ -185,6 +261,7 @@ pub fn merge_trees_favoring<S: ObjectSource + ObjectSink + ?Sized>(
     )?;
 
     let tree_hash = put_tree(store, merged)?;
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(MergeResult {
         tree_hash,
         conflicts,
@@ -805,6 +882,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: Some(o.mode),
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     // Ours wins in the merged tree.
                     add_entry(merged, min_name, o.mode, o.object_hash);
@@ -849,6 +927,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: Some(o.mode),
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -865,6 +944,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: None,
                         ours_mode: Some(o.mode),
                         theirs_mode: None,
+                        rename: None,
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -881,6 +961,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: None,
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     add_entry(merged, min_name, t.mode, t.object_hash);
                 }

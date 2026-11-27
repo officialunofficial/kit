@@ -727,6 +727,7 @@ fn a_stale_conflict_list_cannot_commit_an_interrupted_merge() {
         base_hash: None,
         ours_hash: None,
         theirs_hash: None,
+        rename: None,
     }];
     conflict_state::write_conflicts(f.layout.worktree_state_dir(), &conflicts).unwrap();
     conflict_state::begin_merge_state(&f.layout, &state).unwrap();

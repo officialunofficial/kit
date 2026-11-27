@@ -256,7 +256,15 @@ fn follow_continues_under_the_old_name_of_a_renamed_file() {
 #[test]
 fn follow_continues_through_a_rename_with_an_edit() {
     let repo = Repo::new();
-    let lines: String = (0..10).map(|i| format!("line {i} of the file\n")).collect();
+    let lines: String = (0..10)
+        .flat_map(|i| {
+            [
+                "line ".to_owned(),
+                i.to_string(),
+                " of the file\n".to_owned(),
+            ]
+        })
+        .collect();
     repo.commit_file("old.txt", lines.as_bytes(), "add old");
     repo.ok(&["mv", "old.txt", "new.txt"]);
     let edited = lines.replace("line 4 of", "line four of");

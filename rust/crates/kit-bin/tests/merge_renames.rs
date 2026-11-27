@@ -12,6 +12,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -23,7 +24,9 @@ fn body(edits: &[(usize, &str)]) -> Vec<u8> {
     for i in 0..12 {
         match edits.iter().find(|(n, _)| *n == i) {
             Some((_, text)) => out.push_str(text),
-            None => out.push_str(&format!("line {i} of the file that moves")),
+            None => {
+                let _ = write!(out, "line {i} of the file that moves");
+            }
         }
         out.push('\n');
     }
@@ -206,10 +209,13 @@ fn git(dir: &Path, home: &Path, args: &[&str]) -> Output {
     out
 }
 
+/// Tracked files and their content, in path order.
+type Listing = Vec<(String, Vec<u8>)>;
+
 /// The tracked files and their content after the same history in git and
 /// in kit: `main` edits a line, `side` renames into a new directory and
 /// edits another line, and `verb` brings `side` into `main`.
-fn files_after(verb: &str) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+fn files_after(verb: &str) -> (Listing, Listing) {
     let base = body(&[]);
     let ours = body(&[(1, "edited on main")]);
     let theirs = body(&[(10, "edited on side")]);
@@ -254,7 +260,7 @@ fn files_after(verb: &str) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
         _ => drop(g(&["cherry-pick", "side"])),
     }
 
-    let listed = |root: &Path, out: &Output| -> Vec<(String, Vec<u8>)> {
+    let listed = |root: &Path, out: &Output| -> Listing {
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(|p| (p.to_owned(), std::fs::read(root.join(p)).unwrap()))

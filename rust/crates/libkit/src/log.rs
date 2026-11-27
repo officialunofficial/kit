@@ -37,7 +37,8 @@ use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, EntryMode, Object};
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::find_merge_base_strict;
-use kit_core::ops::{DiffKind, detect_content_renames, diff_trees};
+use kit_core::ops::similarity::{RenameOptions, detect_renames};
+use kit_core::ops::{DiffKind, diff_trees};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -938,7 +939,8 @@ impl<'s> PathLimit<'s> {
         let mut changes = diff_trees(self.store, Some(parent_tree), Some(commit.tree_hash))
             .map_err(Error::RenameDetection)?
             .entries;
-        detect_content_renames(self.store, &mut changes).map_err(Error::RenameDetection)?;
+        detect_renames(self.store, &mut changes, &RenameOptions::default())
+            .map_err(Error::RenameDetection)?;
         let old = changes
             .into_iter()
             .find(|change| change.kind == DiffKind::Renamed && change.path == *path)

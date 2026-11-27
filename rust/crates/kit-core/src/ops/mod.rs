@@ -49,8 +49,9 @@ pub use graph::{
     check_closure_present_above_from, children, reachable_objects, reachable_snapshot,
 };
 pub use merge::{
-    Conflict, ConflictKind, Favor, MergeResult, find_merge_base, find_merge_base_strict,
-    is_ancestor, is_ancestor_strict, merge_trees, merge_trees_favoring,
+    Conflict, ConflictKind, Favor, MergeOptions, MergeResult, RenameConflict, find_merge_base,
+    find_merge_base_strict, is_ancestor, is_ancestor_strict, merge_trees, merge_trees_favoring,
+    merge_trees_with,
 };
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{

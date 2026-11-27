@@ -198,11 +198,9 @@ pub(super) fn start(
             // The git-shaped conflict lines, then the hint for the resumable
             // flow.
             for rec in &conflicts {
-                let _ = writeln!(
-                    stderr,
-                    "CONFLICT (content): Merge conflict in {}",
-                    super::display_path(&rec.path)
-                );
+                if let Some(line) = super::conflict_line(rec) {
+                    let _ = writeln!(stderr, "{line}");
+                }
             }
             let _ = writeln!(
                 stderr,

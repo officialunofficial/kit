@@ -451,6 +451,37 @@ pub(crate) fn display_path(path: &str) -> String {
     c_quote_path(path).unwrap_or_else(|| path.to_string())
 }
 
+/// The git-shaped `CONFLICT` line for a conflict record, or `None` for the
+/// second record of a rename/rename pair, which the first line covers.
+pub(crate) fn conflict_line(rec: &kit_core::ops::conflict_state::ConflictRecord) -> Option<String> {
+    let Some(rename) = &rec.rename else {
+        return Some(format!(
+            "CONFLICT (content): Merge conflict in {}",
+            display_path(&rec.path)
+        ));
+    };
+    let ours = rec.ours_hash.is_some();
+    let (renamer, deleter) = if ours {
+        ("ours", "theirs")
+    } else {
+        ("theirs", "ours")
+    };
+    match &rename.other {
+        None => Some(format!(
+            "CONFLICT (rename/delete): {} renamed to {} in {renamer}, but deleted in {deleter}",
+            display_path(&rename.from),
+            display_path(&rec.path)
+        )),
+        Some(other) if ours => Some(format!(
+            "CONFLICT (rename/rename): {} renamed to {} in ours and to {} in theirs",
+            display_path(&rename.from),
+            display_path(&rec.path),
+            display_path(other)
+        )),
+        Some(_) => None,
+    }
+}
+
 /// Resolve a CLI path argument to a repo-relative, `/`-separated index
 /// path, validating it. Shared by `rm` and `mv` so both resolve and
 /// validate pathspecs identically. The rules are in
