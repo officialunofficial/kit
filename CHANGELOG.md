@@ -7,6 +7,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `kit log [<rev>] [--] <path>...` shows only the commits that change the paths, with git's default history simplification at merges. `--follow` continues the history of one file under its old name across a rename. `-p` and `--stat` show only the files at the paths.
+
 ## [0.11.1] - 2026-11-26
 
 ### Added
