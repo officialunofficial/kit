@@ -39,9 +39,10 @@ Set `KIT_BENCH_PROVENANCE_ONLY=1` to print the provenance and stop.
 | `rehash-unchanged` | Run `touch` on a committed 100 MiB file. Add it again. |
 | `status-unchanged` | Run `status` with a committed 100 MiB file and a warm stat cache. |
 | `checkout-100m` | Switch to a branch that appends 1 MiB to a 100 MiB file. |
+| `clone-small-files` | Clone one commit of 10,000 files of 1 KiB from a remote on the same disk. |
 
-The size rows cover 100 small files, one 100 MiB file, and the growth after a
-1 MiB append. Git growth shows both the loose store and the store after
+The size rows cover 100 small files, a clone of the 10,000 small files, one
+100 MiB file, and the growth after a 1 MiB append. Git growth shows both the loose store and the store after
 `git gc`.
 
 ## Method
@@ -53,6 +54,9 @@ The size rows cover 100 small files, one 100 MiB file, and the growth after a
   The time includes process start.
 - `hyperfine` runs a `--prepare` command before each run. The command resets the
   work tree to a known state.
+- kit clones from a `kit+file://` remote. Git clones from a `file://` URL, so it
+  copies a pack as it would from another machine. A clone of a plain local path
+  would hardlink the git objects instead.
 - The script runs in a temporary directory. It sets `HOME` and the `XDG_*`
   variables to that directory. It removes the directory on exit.
 
