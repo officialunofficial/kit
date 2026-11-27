@@ -317,6 +317,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   prefix needs 4 or more hex digits and names a commit of the range only.
   `commit --fixup=amend:` and `--fixup=reword:`, and `amend!` subjects,
   are not supported.
+- **`rebase --update-refs`.** If a stacked branch moved during the rebase,
+  kit moves no branch and keeps the rebase in progress, where git updates
+  the rebased branch and reports the refs it could not update. kit moves
+  only local branches; an `update-ref` line must name `refs/heads/<branch>`
+  of an existing branch other than the rebased one.
 - **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
   `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
   ort` and `-s recursive`. Other strategies and options, such as

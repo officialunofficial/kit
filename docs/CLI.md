@@ -1094,7 +1094,7 @@ Branches / refs:
   `ours` is the current branch and `theirs` the text before the reverted
   commit. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--autosquash|--no-autosquash] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--autosquash|--no-autosquash] [--update-refs|--no-update-refs] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   `--onto <newbase> <upstream> [<branch>]` replays the commits of
@@ -1154,6 +1154,25 @@ Branches / refs:
   `--autosquash` on for `-i`, and `--no-autosquash` turns it off.
   `--autosquash` does not combine with `--continue`, `--skip` or
   `--abort`.
+  `--update-refs` keeps a stack of branches stacked: every other local
+  branch that points at a commit being replayed moves to that commit's
+  replacement, or to the folded commit when a squash or fixup folds into
+  it. With `-i` the todo list holds an `update-ref refs/heads/<branch>`
+  line (`u`) after that commit. Delete the line to leave the branch, move
+  it, or type one for another local branch; the branch moves to the
+  commit before the line. The rebased branch is never listed, and a
+  branch checked out in another worktree is left out with a warning.
+  Branches move only when the rebase finishes, just before the rebased
+  branch, and each one moves only if it still points where it pointed
+  when the rebase started. If one has moved, no branch moves: the rebase
+  stops with exit 1 and stays in progress, so `--abort` restores
+  everything, or put the branch back and run `--continue`. `--abort`
+  moves no branch. The old tip of each moved branch goes to the recovery
+  log, as the rebased branch's does. `rebase.updateRefs = true` in repo
+  or user config turns it on, and `--no-update-refs` turns it off. The
+  text output lists the moved branches on standard error, and
+  `--format=json` adds `"updated_refs":[<branch>,...]` to the `rebased`
+  outcome.
   `--format=json` emits one JSON object to stdout on the top-level
   outcomes: `{"ok":true,"kind":"up-to-date"|"rebased"|"aborted",...}` on
   success, `{"ok":true,"kind":"stopped","commit":"<hex>"}` at an `edit`
@@ -1282,7 +1301,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X` |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X`. An `update-ref <branch>` step in `actions` also takes no commit and needs the version line. `update-refs` holds one line per branch that `--update-refs` moves, `<old> <new> <branch>`, with `-` as `<new>` until its step runs |
 
 Remote / sync:
 
@@ -2161,6 +2180,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `rebase.updateRefs` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase` move the branches stacked on the rebased commits, as `--update-refs` does; `--no-update-refs` overrides it |
 | `rebase.autosquash` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase -i` arrange `fixup!` and `squash!` commits as `--autosquash` does; `--no-autosquash` overrides it. It does not apply to a rebase without `-i`, as in git 2.44 and later |
 | `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
