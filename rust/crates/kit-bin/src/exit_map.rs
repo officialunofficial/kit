@@ -165,6 +165,8 @@ fn rebase_exit_code(error: &rebase::Error) -> u8 {
         | rebase::Error::UpdateRefOfRebasedBranch(_) => exit::USAGE,
         // A stacked branch moved under the rebase; nothing moved.
         rebase::Error::StackedBranchMoved(..) => exit::GENERAL_ERROR,
+        // Another tree holds the registry; `--continue` tries again.
+        rebase::Error::Registry(_) => exit::TEMPFAIL,
         rebase::Error::Editor(e) if crate::editor::is_no_terminal(e) => exit::USAGE,
         // An object of the wrong kind, a commit that cannot be encoded, or
         // a `HEAD` that the rebase lost.

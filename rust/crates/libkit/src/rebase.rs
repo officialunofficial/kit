@@ -238,8 +238,12 @@ pub enum Error {
     /// The trees that hold a branch cannot be listed.
     #[error(transparent)]
     OtherTrees(#[from] crate::worktrees::Error),
-    /// The registry lock of the trees cannot be taken.
-    #[error("worktree registry lock: {0}")]
+    /// The registry lock of the trees is held, or cannot be taken. No
+    /// branch moved, and the rebase is still in progress.
+    #[error(
+        "another kit command is changing the worktrees, so no branch was updated; run \
+         `kit rebase --continue` again ({0})"
+    )]
     Registry(kit_core::repo_lock::LockError),
     /// A branch that `--update-refs` moves no longer points where it did
     /// when the rebase started. No branch moved, and the rebase is still in
@@ -1018,7 +1022,10 @@ fn ref_updates_for(
 /// and record their old tips for recovery. Return the branches that moved.
 ///
 /// The worktree registry lock is held throughout, so no tree checks a
-/// branch out meanwhile. A branch that another tree has checked out by now
+/// branch out meanwhile. The caller holds the lock of this tree, and the
+/// global order takes the registry lock first, so this only tries it once:
+/// waiting could stall against a command that holds the registry lock and
+/// waits for this tree. A branch that another tree has checked out by now
 /// stays, with an [`Event::UpdateRefSkipped`]. Every other branch must still
 /// point where it pointed at the start, or nothing moves. Each move is a
 /// compare-and-swap; when one fails, the branches moved before it go back.
@@ -1035,9 +1042,10 @@ fn move_stacked_branches(
     if pending.is_empty() {
         return Ok(Vec::new());
     }
-    let _registry = kit_core::repo_lock::acquire_default(
+    let _registry = kit_core::repo_lock::acquire(
         layout.common_dir(),
         kit_core::repo_lock::WORKTREES_REGISTRY_LOCK,
+        std::time::Duration::ZERO,
     )
     .map_err(Error::Registry)?;
     let mut moves = Vec::with_capacity(pending.len());

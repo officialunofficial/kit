@@ -1166,8 +1166,9 @@ Branches / refs:
   branch, and each one moves only if it still points where it pointed
   when the rebase started. If one has moved, no branch moves: the rebase
   stops with exit 1 and stays in progress, so `--abort` restores
-  everything, or put the branch back and run `--continue`. `--abort`
-  moves no branch. The old tip of each moved branch goes to the recovery
+  everything, or put the branch back and run `--continue`. The same
+  happens, with exit 75, when another command is changing the worktrees
+  at that moment; `--continue` tries again. `--abort` moves no branch. The old tip of each moved branch goes to the recovery
   log, as the rebased branch's does. `rebase.updateRefs = true` in repo
   or user config turns it on, and `--no-update-refs` turns it off. The
   text output lists the moved branches on standard error, and
