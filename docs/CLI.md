@@ -1016,7 +1016,7 @@ Branches / refs:
   - `--format=json` &mdash; on the list form, JSONL with keys `name`, `hash`,
     `annotated`, `signed` (mirroring `branch --format=json`); on
     create/delete, one `{"ok":true,"kind":"…",...}` outcome object.
-- `kit merge [--no-commit] [-m <msg>] [--format=json] <branch> | --continue | --abort` &mdash;
+- `kit merge [--no-commit] [-m <msg>] [-s <strategy>] [-X <option>] [--format=json] <branch> | --continue | --abort` &mdash;
   three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On
@@ -1031,12 +1031,23 @@ Branches / refs:
   every commit of both histories. One that is missing, corrupt or not a
   commit fails the merge with exit `65` and an error that names it, before
   it touches the files, the index or a ref.
+  `-X ours` and `-X theirs` (`--strategy-option=<option>`, also `-Xours`)
+  resolve each conflict in a text file to that side's lines, and a conflict
+  in a binary or large file to that side's whole file. Changes that do not
+  conflict still merge from both sides, and the merge does not stop. An
+  add/add conflict between two files takes that side's file. A
+  modify/delete conflict, a file against a directory and two different
+  modes still stop the merge. `-s ours` records a merge commit whose tree
+  is the tree of `HEAD`: the other branch's changes are discarded. It
+  never fast-forwards. `-s ort` and `-s recursive` name the default merge.
+  Another strategy, another `-X` option and `-s ours` with `-X` are usage
+  errors (exit 64).
   `--format=json` emits one JSON object to stdout for every outcome:
   `{"ok":true,"kind":"up-to-date"|"fast-forward"|"no-commit"|"merge-commit"|"aborted",...}`
   on success, or `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
   "error":"..."}` on a conflict pause (and `{"ok":false,"error":"..."}` for
   any other error).
-- `kit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] [--format=json] <hash> | --continue | --abort`
+- `kit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] [-X <option>] [--format=json] <hash> | --continue | --abort`
   &mdash; apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
@@ -1051,11 +1062,12 @@ Branches / refs:
   when replaying a merge (kit refuses to guess which side to diff
   against) and rejected for a non-merge commit. Note this differs from
   `git commit -m` &mdash; git's `cherry-pick -m` is mainline selection, not a
-  message override.
+  message override. `-X ours` and `-X theirs` resolve conflicts as in
+  `merge`; `ours` is the current branch and `theirs` the picked commit.
   `--format=json` emits one JSON object to stdout, same shape as `merge`
   (`"kind":"commit"|"no-commit"|"aborted"` on success, `"kind":"conflict"`
   with a `conflicts` array on a pause).
-- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [-m|--mainline <parent-number>] [--format=json]` &mdash;
+- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [-m|--mainline <parent-number>] [-X <option>] [--format=json]` &mdash;
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
   `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
@@ -1069,9 +1081,11 @@ Branches / refs:
   relative to that parent, counted from 1, as `cherry-pick -m` picks one. A
   merge without `-m`, a number out of range and `-m` on a commit that is not
   a merge are errors, and `-m` does not combine with `--continue` or
-  `--abort`. `--format=json` emits the same outcome-object shape as
+  `--abort`. `-X ours` and `-X theirs` resolve conflicts as in `merge`;
+  `ours` is the current branch and `theirs` the text before the reverted
+  commit. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [-X <option>] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   `--onto <newbase> <upstream> [<branch>]` replays the commits of
@@ -1086,6 +1100,10 @@ Branches / refs:
   missing, corrupt or not a commit fails the rebase before any change. So
   does a branch with more than 10,000 commits to replay, or a base with
   more than 1,000,000 ancestors, with an error that names the limit.
+  `-X ours` and `-X theirs` resolve the conflicts of every replayed commit
+  as in `merge`. As in git, `ours` is the base being rebased onto and
+  `theirs` the commit being replayed. A paused rebase keeps the option for
+  the commits that `--continue` and `--skip` replay.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line
@@ -1323,7 +1341,7 @@ attestation support warn once per command and skip the log.
   "tag_listing_failed":"..."|null}` on success, with `"ok":false` when a tag
   was refused or the listing failed, or `{"ok":false,"error":"..."}` on
   failure.
-- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--tags | --no-tags]
+- `kit pull [<remote>] [--all] [--rebase | --no-ff] [-X <option>] [--tags | --no-tags]
   [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
   fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
@@ -1345,7 +1363,9 @@ attestation support warn once per command and skip the log.
   then merges the fetched branch into the current branch and always writes a
   merge commit, even when a fast-forward is possible. A conflict pauses the
   merge with the state of `kit merge`; finish it with `kit merge --continue`
-  or `--abort`. `--no-ff` does not combine with `--all` or `--rebase`. The
+  or `--abort`. `--no-ff` does not combine with `--all` or `--rebase`.
+  `-X ours` and `-X theirs` resolve the conflicts of the `--no-ff` merge or
+  the `--rebase` replay as in `merge` and `rebase`; a fast-forward has none. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from

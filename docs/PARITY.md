@@ -304,6 +304,14 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   Git's order depends on its sort. Copy detection (`-C`), break detection
   (`-B`) and the `diff.renames` and `diff.renameLimit` config keys are not
   supported; `show` and `log` have no rename flags and use the default 50%.
+- **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
+  `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
+  ort` and `-s recursive`. Other strategies and options, such as
+  `octopus`, `subtree`, `patience` or `ignore-space-change`, are usage
+  errors. kit merges changes to adjacent lines without a conflict, where
+  Git reports one; under `-X` Git then keeps only the favored side's
+  lines, and kit keeps both changes. A file and a directory at one path,
+  or two different modes, still stop the merge under `-X`.
 - **`log -p` and `--stat`.** A merge commit shows its diff against its
   first parent, as `show` does. Git `log -p` shows no diff for a merge.
   `-p` and `--stat` together are a usage error. Git prints both, with a
