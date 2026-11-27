@@ -35,6 +35,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - The line diff joins two runs of changed lines that can slide together into one hunk, as git does, instead of printing them apart: `l4 l0 l5 l5` to `l5` now removes the first three lines.
+- `kit log -L` prints the `index` line of each file, and `new file mode` for a created file, as git 2.55 and later print them.
 
 ### Breaking
 
@@ -48,6 +49,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `libkit::merge::Request` and `libkit::rebase::Request` gain `rerere`, and `libkit::merge::resume` and `libkit::rebase::resume` take the rerere settings, plus an observer for `merge::resume`. `libkit::conflict::Event` gains `ReusedResolution`, `RecordedPreimage`, `RecordedResolution` and `RerereWarning`, and `libkit::config::Config` gains `rerere_enabled`, `rerere_auto_update`, `gc_rerere_resolved` and `gc_rerere_unresolved`.
 - `kit_core::verify::ClosureManifest` gains `branch` and `bases`; `ClosureManifest::new` builds one without them. `kit_core::verify::VerifyError` gains `ClosureManifestChecksum` and `ClosureExportOptions`. `libkit::transfer::Scheme` gains `Closure`, and `libkit::transfer::Error` gains `Closure`.
 - `kit_core::ops::merge::Conflict` and `kit_core::ops::conflict_state::ConflictRecord` gain `rename`. `merge_trees` and `merge_trees_favoring` detect renames; `merge_trees_with` takes `MergeOptions`, whose `renames: None` merges path by path as before. Conflicts come sorted by path.
+- `libkit::log::lines::FileHunks` gains `old` and `new`, the blob and mode of the file on each side.
 
 ## [0.11.1] - 2026-11-26
 

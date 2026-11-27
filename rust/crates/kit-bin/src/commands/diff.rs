@@ -455,7 +455,7 @@ fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bo
 const ZERO_ABBREV: &str = "0000000";
 
 /// git octal mode string for a [`DiffEntry`] side (`None` → regular file).
-fn git_octal(mode: Option<EntryMode>) -> &'static str {
+pub(super) fn git_octal(mode: Option<EntryMode>) -> &'static str {
     match mode {
         Some(EntryMode::Executable) => "100755",
         Some(EntryMode::Symlink) => "120000",
@@ -465,7 +465,7 @@ fn git_octal(mode: Option<EntryMode>) -> &'static str {
 }
 
 /// Abbreviated blob id for an `index` line side (`None` → all-zero).
-fn abbrev(h: Option<Hash>) -> String {
+pub(super) fn abbrev(h: Option<Hash>) -> String {
     h.map_or_else(|| ZERO_ABBREV.to_string(), |h| format::short_hash(&h, 7))
 }
 

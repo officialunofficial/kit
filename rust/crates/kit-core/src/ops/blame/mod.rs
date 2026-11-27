@@ -659,6 +659,19 @@ pub fn find_blob_in_tree(
     tree_hash: Hash,
     path: &str,
 ) -> BlameOutcome<Option<Hash>> {
+    Ok(find_file_in_tree(store, tree_hash, path)?.map(|(hash, _)| hash))
+}
+
+/// [`find_blob_in_tree`] that also gives the mode of the file: a regular
+/// or an executable file.
+///
+/// # Errors
+/// As [`find_blob_in_tree`].
+pub fn find_file_in_tree(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    path: &str,
+) -> BlameOutcome<Option<(Hash, EntryMode)>> {
     let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
     if components.is_empty() {
         return Ok(None);
@@ -677,7 +690,9 @@ pub fn find_blob_in_tree(
                 matched = true;
                 if is_last {
                     return match entry.mode {
-                        EntryMode::Blob | EntryMode::Executable => Ok(Some(entry.object_hash)),
+                        EntryMode::Blob | EntryMode::Executable => {
+                            Ok(Some((entry.object_hash, entry.mode)))
+                        }
                         _ => Ok(None),
                     };
                 }

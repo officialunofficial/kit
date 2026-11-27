@@ -570,6 +570,43 @@ fn run_lines(
 fn write_line_hunks(out: &mut impl Write, file: &lines::FileHunks) {
     let path = format::safe_text(&file.path);
     let _ = writeln!(out, "diff --git a/{path} b/{path}");
+    // The file header lines of git's diff output, as `log -L` prints them
+    // since git 2.55.
+    let (new_hash, new_mode) = file.new;
+    match file.old {
+        None => {
+            let _ = writeln!(
+                out,
+                "new file mode {}",
+                super::diff::git_octal(Some(new_mode))
+            );
+            let _ = writeln!(
+                out,
+                "index {}..{}",
+                super::diff::abbrev(None),
+                super::diff::abbrev(Some(new_hash))
+            );
+        }
+        Some((old_hash, old_mode)) if old_mode == new_mode => {
+            let _ = writeln!(
+                out,
+                "index {}..{} {}",
+                super::diff::abbrev(Some(old_hash)),
+                super::diff::abbrev(Some(new_hash)),
+                super::diff::git_octal(Some(new_mode))
+            );
+        }
+        Some((old_hash, old_mode)) => {
+            let _ = writeln!(out, "old mode {}", super::diff::git_octal(Some(old_mode)));
+            let _ = writeln!(out, "new mode {}", super::diff::git_octal(Some(new_mode)));
+            let _ = writeln!(
+                out,
+                "index {}..{}",
+                super::diff::abbrev(Some(old_hash)),
+                super::diff::abbrev(Some(new_hash))
+            );
+        }
+    }
     if file.created {
         let _ = writeln!(out, "--- /dev/null");
     } else {

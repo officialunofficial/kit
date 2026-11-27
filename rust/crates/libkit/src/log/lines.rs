@@ -18,8 +18,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::Commit;
-use kit_core::ops::blame::find_blob_in_tree;
+use kit_core::object::{Commit, EntryMode};
+use kit_core::ops::blame::find_file_in_tree;
 use kit_core::ops::line_log::{RangeHunk, RangeSet, changes, hunks, map_across};
 use kit_core::store::ObjectStore;
 use kit_core::worktree::read_blob;
@@ -76,6 +76,11 @@ pub struct FileHunks {
     pub path: String,
     /// Whether the commit creates the file.
     pub created: bool,
+    /// The blob and mode of the file in the first parent, or `None` when
+    /// the commit creates the file.
+    pub old: Option<(Hash, EntryMode)>,
+    /// The blob and mode of the file in the commit.
+    pub new: (Hash, EntryMode),
     /// The hunks, one for each range of the file that the commit changes.
     pub hunks: Vec<RangeHunk>,
 }
@@ -115,7 +120,7 @@ pub fn history(repo: &Repo, request: &Request<'_>) -> Result<Option<Vec<LineEntr
                 path: path.clone(),
                 commit: tip,
             })?;
-        let total = line_count(&read(store, &blob, path)?);
+        let total = line_count(&read(store, &blob.0, path)?);
         let (first, last) = line_range::parse(spec, total, path)?;
         let set = start.entry(path.clone()).or_default();
         *set = set.union(&RangeSet::new(std::iter::once(first - 1..last)));
@@ -201,15 +206,17 @@ fn carry(
         files: Vec::new(),
     };
     for (path, set) in ranges {
-        let Some(target_blob) = blob_at(store, commit.tree_hash, path)? else {
+        let Some(target_file) = blob_at(store, commit.tree_hash, path)? else {
             // The file is not in this commit; nothing to diff.
             step.ranges.insert(path.clone(), set.clone());
             continue;
         };
-        let parent_blob = match parent_tree {
+        let target_blob = target_file.0;
+        let parent_file = match parent_tree {
             Some(tree) => blob_at(store, tree, path)?,
             None => None,
         };
+        let parent_blob = parent_file.map(|(hash, _)| hash);
         if parent_blob == Some(target_blob) {
             step.ranges.insert(path.clone(), set.clone());
             continue;
@@ -225,6 +232,8 @@ fn carry(
             step.files.push(FileHunks {
                 path: path.clone(),
                 created: parent_blob.is_none(),
+                old: parent_file,
+                new: target_file,
                 hunks: hunks(set, &touched, &parent_text, &target),
             });
         }
@@ -242,8 +251,12 @@ fn give(pending: &mut HashMap<Hash, Ranges>, parent: Hash, ranges: Ranges) {
 }
 
 /// The blob at `path` in `tree`, if there is one.
-fn blob_at(store: &ObjectStore, tree: Hash, path: &str) -> Result<Option<Hash>, Error> {
-    find_blob_in_tree(store, tree, path).map_err(|e| Error::ReadFile {
+fn blob_at(
+    store: &ObjectStore,
+    tree: Hash,
+    path: &str,
+) -> Result<Option<(Hash, EntryMode)>, Error> {
+    find_file_in_tree(store, tree, path).map_err(|e| Error::ReadFile {
         path: path.to_owned(),
         message: e.to_string(),
     })

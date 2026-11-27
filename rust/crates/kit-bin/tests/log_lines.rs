@@ -364,7 +364,9 @@ fn output_matches_git_log_l() {
     ] {
         let (mut ours, theirs) = t.both(args);
         if !git_prints_file_headers() {
-            ours.retain(|l| !l.starts_with("index ") && !l.starts_with("new file mode "));
+            ours.retain(|l| {
+                l != "index" && !l.starts_with("index ") && !l.starts_with("new file mode ")
+            });
         }
         assert_eq!(ours, theirs, "{args:?}");
     }
