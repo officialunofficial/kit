@@ -32,9 +32,9 @@ use buffa::Message as _;
 use connectrpc::{ConnectError, ErrorCode};
 use kit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportError};
 
-use crate::proto::kit::transport::v1::{AdmissionChallenge, ContentWithheld};
 #[cfg(test)]
 use crate::proto::kit::transport::v1::PendingVerification;
+use crate::proto::kit::transport::v1::{AdmissionChallenge, ContentWithheld};
 use crate::status::STATUS_MARKER;
 
 // Known gap: use kit_core::admission bounds once the server admission bundle lands.
@@ -632,10 +632,7 @@ mod tests {
 
     #[test]
     fn a_withheld_detail_maps_to_a_typed_permanent_refusal() {
-        let error = map_connect_error(
-            withheld_error("refs/kit/packmap/main"),
-            ErrorContext::Ref,
-        );
+        let error = map_connect_error(withheld_error("refs/kit/packmap/main"), ErrorContext::Ref);
         assert!(matches!(
             &error,
             TransportError::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
@@ -669,9 +666,8 @@ mod tests {
         malformed.details[0].value = Some("%%%".into());
         assert!(matches!(denied(malformed), TransportError::AccessDenied));
         let mut garbage = withheld_error("refs/heads/main");
-        garbage.details[0].value = Some(
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode([0x0a, 0xff, 0xff]),
-        );
+        garbage.details[0].value =
+            Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode([0x0a, 0xff, 0xff]));
         assert!(matches!(denied(garbage), TransportError::AccessDenied));
         let mut oversized = withheld_error("refs/heads/main");
         oversized.details[0].value = Some("A".repeat(88_837));
@@ -692,7 +688,8 @@ mod tests {
             challenges: vec![challenge("ok", "v")],
             ..Default::default()
         });
-        both.details.extend(withheld_error("refs/heads/main").details);
+        both.details
+            .extend(withheld_error("refs/heads/main").details);
         assert!(matches!(
             map_connect_error(both, ErrorContext::Ref),
             TransportError::AdmissionRequired(_)

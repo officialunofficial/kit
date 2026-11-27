@@ -547,7 +547,9 @@ mod tests {
             Error::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
         ));
         assert!(matches!(
-            Error::from(TransportError::ContentWithheld { ref_name: "r".into() }),
+            Error::from(TransportError::ContentWithheld {
+                ref_name: "r".into()
+            }),
             Error::ContentWithheld { .. }
         ));
         assert!(matches!(Error::from(S::DetachedHead), Error::DetachedHead));

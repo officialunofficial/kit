@@ -889,8 +889,15 @@ fn source_repo_with_one_commit() -> (tempfile::TempDir, String) {
 fn cli_push_uses_begin_upload_and_ticketed_advance() {
     let (src, tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
-    let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::clone(&backend),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+        None,
+    );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -1163,7 +1170,7 @@ fn clone_and_fetch_show_one_line_when_content_is_withheld() {
     assert!(!stderr.contains("never display this"), "{stderr}");
     assert!(!stderr.contains("packmap"), "{stderr}");
     assert!(!stderr.contains("access denied"), "{stderr}");
-    drop(shutdown.send(()));
+    let _ = shutdown.send(());
     handle.join().unwrap();
 }
 
@@ -2056,8 +2063,15 @@ fn signed_transport(url: &str) -> Box<dyn Transport> {
 /// appending case adds a commit on top of it.
 fn run_rebaseline_race(appending: bool) {
     let backend = Arc::new(MemoryTransport::new());
-    let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::clone(&backend),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+        None,
+    );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let competing = signed_transport(&url);
@@ -2165,8 +2179,15 @@ fn connect_appending_force_replans_after_atomic_rebaseline() {
 fn cli_ticketed_push_tags_then_clone_verifies() {
     let (src, _tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
-    let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::clone(&backend),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+        None,
+    );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -2266,8 +2287,15 @@ fn cli_ticketed_push_tags_then_clone_verifies() {
 fn cli_push_delete_removes_a_branch_and_a_tag_with_their_chain_refs() {
     let (src, _tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
-    let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::clone(&backend),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+        None,
+    );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -2424,8 +2452,15 @@ fn check_attestation_push(advertised: bool) {
             )
             .unwrap();
     }
-    let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
+    let (port, shutdown, handle, calls) = spawn_server_options(
+        Arc::clone(&backend),
+        Vec::new(),
+        false,
+        false,
+        true,
+        None,
+        None,
+    );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let local = tempfile::tempdir().unwrap();

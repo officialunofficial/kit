@@ -380,7 +380,8 @@ fn one_valid_withheld_detail_on_permission_denied_is_typed() {
 
 #[test]
 fn every_other_withheld_shape_stays_the_raw_remote_error() {
-    let raw = |error: RemoteError| matches!(Error::Remote(Box::new(error)).typed(), Error::Remote(_));
+    let raw =
+        |error: RemoteError| matches!(Error::Remote(Box::new(error)).typed(), Error::Remote(_));
     // Another code.
     assert!(raw(withheld("not_found", "refs/heads/main")));
     assert!(raw(withheld("unavailable", "refs/heads/main")));
