@@ -322,6 +322,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   the rebased branch and reports the refs it could not update. kit moves
   only local branches; an `update-ref` line must name `refs/heads/<branch>`
   of an existing branch other than the rebased one.
+- **`apply` and `am`.** kit applies a hunk only where its context matches
+  exactly, with no fuzz and no whitespace options, and either the whole
+  patch applies or nothing changes; there is no `--reject` or `-3`. Binary
+  patches, copies and symlinks are refused. `am` keeps no mail date: the
+  commit date is the time of the commit, and the applier signs it. It reads
+  no `-s`, `-k`, `--3way`, `--interactive` or `--quoted-cr`, and refuses a
+  base64 or quoted-printable mail.
 - **`describe`.** A name reads `<tag>-<n>-k<id>` where git writes
   `g<id>`, so it never passes for a git name. kit counts `<n>` exactly over
   the whole history and picks the smallest, where git stops its walk after

@@ -513,6 +513,32 @@ History / commits:
   chunk at a time. Exit status 0 means a line was selected, 1 none, and 64 a
   usage error, an invalid pattern, an argument that is neither a revision nor
   a path, or `--cached` with a revision.
+- `kit apply [--index | --cached] [-R] [--check | --stat] <patch>...` &mdash;
+  apply unified diffs, such as `kit diff`, `git diff` or `git format-patch`
+  write, to the worktree. `--cached` applies to the index alone, and
+  `--index` to both, which needs the worktree file to equal its index entry
+  for every path the patch names. A hunk applies where its old lines match
+  exactly, at the line its header names or the nearest line that matches;
+  kit never applies with fuzz. Creations, deletions, renames and
+  `old mode`/`new mode` lines apply. `-R` applies the patch in reverse,
+  `--check` reports whether it applies and writes nothing, and `--stat`
+  prints a diffstat and writes nothing. Either every file patch applies or
+  nothing changes: a patch that does not apply exits 1 and names the file.
+  A malformed patch, a binary patch, a copy, a symlink and a path that
+  leaves the worktree exit 65 (SPEC-PATCH).
+- `kit am <mbox>... | --continue | --skip | --abort` &mdash; apply each mail
+  of a mailbox, as `git format-patch` writes it, as a commit on the current
+  branch. The author is the mail's `From:` as an opaque identity, the
+  message is its subject without the `[PATCH ...]` prefix followed by its
+  body up to `---`, and the applier signs the commit. When a patch does not
+  apply, kit changes nothing, keeps the mails in `.kit/am/` and
+  exits 1. `--continue` commits the staged result with the stopped mail's
+  message and author, and refuses when nothing is staged. `--skip` drops the
+  stopped mail. `--abort` moves the branch, the index and the worktree back
+  to where `am` started, and refuses when a tracked file holds a change that
+  is not committed. While `am` is paused, merge, cherry-pick, revert, rebase
+  and another `am` refuse to start. A mail with a `Content-Transfer-Encoding`
+  other than `7bit` or `8bit`, or without a patch, exits 65 (SPEC-PATCH).
 - `kit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
   [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
   [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` &mdash;
@@ -1360,6 +1386,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
 | `rr-cache/`                   | recorded conflict resolutions, shared by linked worktrees: a `version` file and one directory per conflict id holding `side1`, `side2` and, once recorded, `postimage` (see SPEC-RERERE) |
+| `am/`                         | paused `kit am` state (`orig-head`, `next`, `last`, and the mails `0001`...) |
 | `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X`. An `update-ref <branch>` step in `actions` also takes no commit and needs the version line. `update-refs` holds one line per branch that `--update-refs` moves, `<old> <new> <branch>`, with `-` as `<new>` until its step runs |
 
 Remote / sync:
