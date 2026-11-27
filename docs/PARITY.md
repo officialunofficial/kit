@@ -288,8 +288,9 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 - **Author and date.** `log` prints the signing identity, for example
   `ed25519:11de6447`, and a UTC date. Git prints `Name <email>` and a local
   date.
-- **`log` filters.** `--author` and `--grep` match a substring. Git matches a
-  regular expression. `--since` and `--until` accept `@<unix>`, `now`,
+- **`log` filters.** `--author` and `--grep` use the Rust `regex` syntax,
+  which is close to git's extended syntax but has no back-references.
+  `--since` and `--until` accept `@<unix>`, `now`,
   `today`, `yesterday`, `<N> <unit> ago`, `YYYY-MM-DD` and
   `YYYY-MM-DD HH:MM:SS`. Git accepts more forms.
 - **`<rev>:<path>`.** `show`, `cat-file` and `rev-parse` resolve

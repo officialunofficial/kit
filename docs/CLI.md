@@ -354,7 +354,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [-L <start>,<end>:<file>]... [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>]... [--grep <pattern>]... [-F] [-i] [--all-match] [--invert-grep] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [-L <start>,<end>:<file>]... [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -431,13 +431,20 @@ History / commits:
   `--no-merges` it is a usage error (exit `64`). A file that does not
   exist at the revision, a range that starts past its end, and an argument
   without `:<file>` exit `64`.
-  `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
-  **substring** match &mdash; `--author` against both the short display form
-  (the `Author:` line) and the full `kind:hex`/`mid:N` form
-  (`--format=json`'s `author` field); `--grep` against the full commit
-  message (title plus body). This is intentionally not a regex: unlike git,
-  kit identities are opaque (Ed25519 keys, `mid:N` numbers, DID keys),
-  not free-text `Name <email>`. `--since <date>`/`--until <date>` bound
+  `--author <pattern>` and `--grep <pattern>` filter the walk by a regular
+  expression, as git does, in the syntax of the Rust `regex` crate
+  (`-E`/`--extended-regexp` is accepted and changes nothing). `--author`
+  matches either the short display form (the `Author:` line) or the full
+  `kind:hex`/`mid:N` form (`--format=json`'s `author` field); `--grep`
+  matches the commit message (title plus body), with `^` and `$` at each
+  line. Both repeat, and a commit passes when any of its patterns match;
+  with `--all-match`, a commit must match every `--grep`. `--invert-grep`
+  keeps the commits whose message does not pass the `--grep` patterns.
+  `-F`/`--fixed-strings` takes every pattern literally, and
+  `-i`/`--regexp-ignore-case` ignores case in both. An invalid pattern, or
+  `--all-match` or `--invert-grep` without `--grep`, is a usage error
+  (exit `64`). A pattern with no regex metacharacters matches as the
+  substring it spells. `--since <date>`/`--until <date>` bound
   the commit timestamp; accepted forms are `@<unix-seconds>`,
   `now`/`today`/`yesterday`, `<N> <unit> ago`
   (second/minute/hour/day/week/month/year), `YYYY-MM-DD` (midnight UTC),
