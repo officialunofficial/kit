@@ -12,7 +12,8 @@
 # For each vector the check:
 #   * compares the manifest and pack bytes with the BLAKE3 values in the
 #     sidecar and in MANIFEST.txt;
-#   * decodes the manifest strictly (magic, version, mode, no trailing byte);
+#   * decodes the manifest strictly (magic, version 1 or 2, mode, no trailing
+#     byte; for version 2 the checksum, the branch and the bases);
 #   * decodes each pack as a raw-only pack and checks its trailer;
 #   * derives every object id with the type-dependent rule; bytes that decode
 #     to no object are unreferenced, never corrupt;
@@ -63,12 +64,38 @@ def varint(r):
     raise Reject("varint too long")
 
 
+def valid_branch(name):
+    """SPEC-REFS section 3 for refs/heads/<name>, at most 255 bytes."""
+    if not name or len(name.encode()) > 255:
+        return False
+    full = "refs/heads/" + name
+    if len(full.encode()) > 512:
+        return False
+    segments = full.split("/")
+    if len(segments) > 32 or segments[-1] == "HEAD":
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    for seg in segments:
+        if not seg or seg.startswith(".") or seg.endswith(".lock"):
+            return False
+        if any(c not in allowed for c in seg):
+            return False
+    return True
+
+
 def decode_manifest(data):
+    """Return (root, mode, packs) of a version 1 or 2 manifest (section 7.3)."""
     try:
         r = o.Reader(data)
         if r.take(4) != MANIFEST_MAGIC:
             raise Reject("bad manifest magic")
-        if r.u8() != 1:
+        version = r.u8()
+        if version == 2:
+            if len(data) < 5 + 32 or blake3(data[:-32]) != data[-32:]:
+                raise Reject("checksum")
+            r = o.Reader(data[:-32])
+            r.take(5)
+        elif version != 1:
             raise Reject("unsupported version")
         root = r.take(32)
         mode = r.u8()
@@ -78,6 +105,28 @@ def decode_manifest(data):
         if count > 65_536:
             raise Reject("too many packs")
         packs = [r.take(32) for _ in range(count)]
+        if version == 2:
+            n = varint(r)
+            if n > 255:
+                raise Reject("branch too long")
+            branch = r.take(n)
+            if n:
+                try:
+                    name = branch.decode("utf-8")
+                except UnicodeDecodeError:
+                    raise Reject("branch is not UTF-8")
+                if not valid_branch(name):
+                    raise Reject("invalid branch")
+            count = varint(r)
+            if count > 256:
+                raise Reject("too many bases")
+            bases = [r.take(32) for _ in range(count)]
+            if any(a >= b for a, b in zip(bases, bases[1:])):
+                raise Reject("bases not sorted")
+            if bases and mode == SNAPSHOT:
+                raise Reject("bases in snapshot mode")
+            if not n and not bases:
+                raise Reject("version 2 without a branch or a base")
         r.end()
     except ValueError as e:
         raise Reject(f"manifest: {e}")

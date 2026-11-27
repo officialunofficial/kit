@@ -23,7 +23,7 @@
 //! | Pack list `KPKL` version 1 | `formats/packlist-*.bin` | here |
 //! | Sparse wire `KSP1` and cache `KSPC` version 2 | `sparse/response_v2.bin`, `formats/sparse-cache.bin` | here (feature `sparse-checkout`) |
 //! | Stash manifest `KSTS`, and a 0.8 stash entry with no scope blob | `formats/stash-list.bin`, `formats/stash-08-*` | here |
-//! | Disclosure bundle `KDPB` version 3, span `KDSP` version 2, closure manifest `KCLM` version 1 | `disclosure/`, `http-objects/`, `closure/` | `golden_disclosure.rs`, `golden_http_objects.rs`, `golden_closure.rs` |
+//! | Disclosure bundle `KDPB` version 3, span `KDSP` version 2, closure manifest `KCLM` versions 1 and 2 | `disclosure/`, `http-objects/`, `closure/` | `golden_disclosure.rs`, `golden_http_objects.rs`, `golden_closure.rs` |
 //! | Chunk offsets, `FastCDC` profiles 1 and 2 | `fastcdc/` | `golden_pack.rs`, `golden_chunk_offsets.rs` |
 //! | Delta stream version 1 | `pack-v2/`, inline pins | `golden_pack.rs` |
 //! | Encrypted key record `KITKSV1` | inline frozen record | `kit-keystore` unit tests, `golden_vectors.rs` |

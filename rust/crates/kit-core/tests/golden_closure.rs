@@ -29,8 +29,8 @@ use kit_core::pack::{PackEntries, PackEntry, PackWriter, pack_key};
 use kit_core::sign::{KeyPair, sign_commit, sign_remix, sign_tag};
 use kit_core::store::ObjectStore;
 use kit_core::verify::{
-    ClosureManifest, ObjectSource, export_closure, verify_closure, verify_closure_manifest,
-    verify_closure_streaming,
+    ClosureManifest, ExportOptions, ObjectSource, export_closure, export_closure_with,
+    verify_closure, verify_closure_manifest, verify_closure_streaming,
 };
 use kit_core::worktree::store_file_object;
 use kit_core::{ClosureMode, reachable_objects, reachable_snapshot};
@@ -331,12 +331,8 @@ fn corrupt_vector(
     objects: &[Vec<u8>],
 ) -> Vector {
     let pack = pack_objects(objects);
-    let manifest = ClosureManifest {
-        root,
-        mode: ClosureMode::Snapshot,
-        packs: vec![pack_key(&pack)],
-    }
-    .encode();
+    let manifest =
+        ClosureManifest::new(root, ClosureMode::Snapshot, vec![pack_key(&pack)]).encode();
     Vector {
         name,
         description: description.into(),
@@ -411,6 +407,99 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
+    // v2_branch, and the version 2 rejects built from it
+    {
+        let options = ExportOptions {
+            branch: Some("main".into()),
+            bases: Vec::new(),
+        };
+        let export = export_closure_with(&f.store, &head, ClosureMode::History, &options).unwrap();
+        let ids = sorted_ids(&f.store, &head, ClosureMode::History);
+        let description = "Version 2 history closure that records the branch main.";
+        v.push(Vector {
+            name: "v2_branch",
+            description: description.into(),
+            json: accept_json(
+                "v2_branch",
+                description,
+                &head,
+                ClosureMode::History,
+                &export.packs,
+                ids.len(),
+                &ids,
+                &[],
+                "accept",
+                None,
+            ),
+            manifest: export.manifest.clone(),
+            packs: export.packs.clone(),
+        });
+        let decoded = ClosureManifest::decode(&export.manifest).unwrap();
+        let mut bad_check = export.manifest.clone();
+        let last = bad_check.len() - 1;
+        bad_check[last] ^= 0x01;
+        // Re-encode with a fresh checksum over a body the encoder would
+        // never write, so only the field rule refuses it.
+        let rechecked = |mut body: Vec<u8>| {
+            let check = hash(&body);
+            body.extend_from_slice(&check);
+            body
+        };
+        let field_reject = |m: &ClosureManifest| {
+            let mut body = m.encode();
+            body.truncate(body.len() - 32);
+            rechecked(body)
+        };
+        let bad_branch = field_reject(&ClosureManifest {
+            branch: Some("a b".into()),
+            ..decoded.clone()
+        });
+        let snapshot_bases = field_reject(&ClosureManifest {
+            mode: ClosureMode::Snapshot,
+            bases: vec![f.commit_id],
+            ..decoded.clone()
+        });
+        for (name, description, bytes, reason) in [
+            (
+                "neg_v2_bad_check",
+                "Version 2 manifest with one bit of its checksum flipped.",
+                bad_check,
+                "checksum",
+            ),
+            (
+                "neg_v2_bad_branch",
+                "Version 2 manifest whose branch has a space, under a correct checksum.",
+                bad_branch,
+                "malformed",
+            ),
+            (
+                "neg_v2_snapshot_bases",
+                "Version 2 snapshot manifest that lists a base, under a correct checksum.",
+                snapshot_bases,
+                "malformed",
+            ),
+        ] {
+            v.push(Vector {
+                name,
+                description: description.into(),
+                json: accept_json(
+                    name,
+                    description,
+                    &head,
+                    ClosureMode::History,
+                    &export.packs,
+                    0,
+                    &[],
+                    &[],
+                    "reject",
+                    Some(reason),
+                ),
+                manifest: bytes,
+                packs: export.packs.clone(),
+            });
+        }
+    }
+
     // tag_root
     let tag_id = tag_for(&f.store, f.commit_id);
     {
@@ -464,12 +553,9 @@ fn build_vectors() -> Vec<Vector> {
                 != Some(drop_id)
         });
         let pack = pack_objects(&objects);
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "neg_missing_chunk",
             description: "One chunk blob dropped from the snapshot export.".into(),
@@ -502,12 +588,9 @@ fn build_vectors() -> Vec<Vector> {
             .expect("shallow blob");
         objects[shallow][1] ^= 0xFF;
         let pack = pack_objects_raw(&objects);
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "neg_corrupt_blob",
             description: DAMAGED_BLOB.into(),
@@ -696,12 +779,9 @@ fn build_vectors() -> Vec<Vector> {
         objects.push(junk);
         let pack = pack_objects_raw(&objects);
         let ids = sorted_ids(&f.store, &f.commit_id, ClosureMode::Snapshot);
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "unreferenced_undecodable_extra",
             description: UNDECODABLE_EXTRA.into(),
@@ -736,12 +816,9 @@ fn build_vectors() -> Vec<Vector> {
         objects.push(extra);
         let pack = pack_objects(&objects);
         let ids = sorted_ids(&f.store, &f.commit_id, ClosureMode::Snapshot);
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "neg_unreferenced_extra",
             description: "An unrelated blob is supplied; still complete.".into(),
@@ -778,12 +855,9 @@ fn build_vectors() -> Vec<Vector> {
         w.push_raw(base_hash, &base).unwrap();
         w.push_delta(&base_hash, &stream).unwrap();
         let pack = w.finish().unwrap();
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "neg_delta_entry",
             description: "A pack written with the normal writer containing a delta entry.".into(),
@@ -821,12 +895,9 @@ fn build_vectors() -> Vec<Vector> {
         let trailer = hash(&buf);
         buf.extend_from_slice(&trailer);
         let pack = buf;
-        let manifest = ClosureManifest {
-            root: f.commit_id,
-            mode: ClosureMode::Snapshot,
-            packs: vec![pack_key(&pack)],
-        }
-        .encode();
+        let manifest =
+            ClosureManifest::new(f.commit_id, ClosureMode::Snapshot, vec![pack_key(&pack)])
+                .encode();
         v.push(Vector {
             name: "neg_compressed_entry",
             description: "A pack written with the normal writer (pack-zstd) so the entry is 0x03."
@@ -923,16 +994,16 @@ fn build_vectors() -> Vec<Vector> {
         });
     }
 
-    // manifest version 2
+    // manifest version 3
     {
         let mut bytes = snap.manifest.clone();
-        bytes[4] = 2;
+        bytes[4] = 3;
         v.push(Vector {
-            name: "neg_manifest_version_2",
-            description: "Manifest version byte is 2.".into(),
+            name: "neg_manifest_version_3",
+            description: "Manifest version byte is 3.".into(),
             json: accept_json(
-                "neg_manifest_version_2",
-                "Manifest version byte is 2.",
+                "neg_manifest_version_3",
+                "Manifest version byte is 3.",
                 &f.commit_id,
                 ClosureMode::Snapshot,
                 &snap.packs,

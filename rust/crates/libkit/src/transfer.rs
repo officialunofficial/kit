@@ -31,7 +31,10 @@ use kit_transport_connect::PENDING_INTERRUPTED_MESSAGE;
 
 pub use error::{Error, PublishedPrefix};
 pub use kit_sync::push::{PushControl, RetryReason, StepAuthority};
-pub use open::{Remote, Scheme, is_connect_url, open, scheme, validate_connect_repository};
+pub use open::{
+    CLOSURE_PREFIX, Remote, Scheme, closure_url, is_connect_url, open, scheme,
+    validate_connect_repository,
+};
 pub use trust::check_endpoint;
 
 /// The chain depth at which a push re-baselines the pack chain of the branch

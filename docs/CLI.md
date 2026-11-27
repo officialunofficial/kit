@@ -2471,7 +2471,7 @@ only. Anything else is hard-rejected:
 
 ```
 error: invalid remote URL '<input>': must start with 'kit+<scheme>://'
-hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://)
+hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://, kit+closure://)
 ```
 
 Accepted schemes:

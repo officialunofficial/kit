@@ -1,0 +1,18 @@
+{
+  "bin": "neg_v2_bad_check.manifest.bin",
+  "blake3": "4a778dc6fccbb94e01c0745b0d5612e3d116128f68dcd73f2c66dbd4bebf3f6b",
+  "description": "Version 2 manifest with one bit of its checksum flipped.",
+  "expect": "reject",
+  "ids": [],
+  "mode": "history",
+  "n_packs": 1,
+  "name": "neg_v2_bad_check",
+  "pack_hashes": [
+    "33f3c84c7837a5764be1673f8d32f0cc4cd0b9bc087f30d19f271e28608c0a9b"
+  ],
+  "reason": "checksum",
+  "root_hex": "d8b978f8cfaf423b5312bc672d2225c1ec36499a2a964d06dd522818ccdbdef7",
+  "size": 109,
+  "unreferenced": [],
+  "verified": 0
+}

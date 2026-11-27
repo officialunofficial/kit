@@ -1,0 +1,18 @@
+{
+  "bin": "neg_v2_bad_branch.manifest.bin",
+  "blake3": "a2d4e5ca97d3b44dd3f0f6f82e1123973f5637136ae8ca1afd2b528268410393",
+  "description": "Version 2 manifest whose branch has a space, under a correct checksum.",
+  "expect": "reject",
+  "ids": [],
+  "mode": "history",
+  "n_packs": 1,
+  "name": "neg_v2_bad_branch",
+  "pack_hashes": [
+    "33f3c84c7837a5764be1673f8d32f0cc4cd0b9bc087f30d19f271e28608c0a9b"
+  ],
+  "reason": "malformed",
+  "root_hex": "d8b978f8cfaf423b5312bc672d2225c1ec36499a2a964d06dd522818ccdbdef7",
+  "size": 108,
+  "unreferenced": [],
+  "verified": 0
+}

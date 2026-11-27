@@ -28,6 +28,9 @@ pub enum Scheme<'a> {
     S3,
     /// `kit+ssh://`: a remote `kit serve` over `ssh(1)`.
     Ssh,
+    /// `kit+closure://<dir>`: a `kit closure export` directory, read-only.
+    /// Holds the path.
+    Closure(&'a str),
 }
 
 /// Decide which transport `url` names.
@@ -47,6 +50,9 @@ pub fn scheme(url: &str) -> Result<Scheme<'_>, Error> {
     }
     if let Some(path) = url.strip_prefix("kit+file://") {
         return Ok(Scheme::File(path));
+    }
+    if let Some(path) = url.strip_prefix(CLOSURE_PREFIX) {
+        return Ok(Scheme::Closure(path));
     }
     if url.starts_with("kit+memory://") {
         return Err(Error::UnsupportedScheme(
@@ -80,6 +86,26 @@ pub fn scheme(url: &str) -> Result<Scheme<'_>, Error> {
         )));
     }
     Err(Error::MalformedUrl(shown(url).to_owned()))
+}
+
+/// The URL prefix of a closure export.
+pub const CLOSURE_PREFIX: &str = "kit+closure://";
+
+/// The `kit+closure://` URL that `arg` names, when it names a closure
+/// export: the URL itself, or a path to an export's `MANIFEST.mkcl`, which
+/// becomes the URL of its directory, made absolute. `None` for anything
+/// else, such as a remote name.
+#[must_use]
+pub fn closure_url(arg: &str) -> Option<String> {
+    if arg.starts_with(CLOSURE_PREFIX) {
+        return Some(arg.to_owned());
+    }
+    let path = std::path::Path::new(arg);
+    if path.file_name()? != "MANIFEST.mkcl" || !path.is_file() {
+        return None;
+    }
+    let dir = std::path::absolute(path).ok()?.parent()?.to_path_buf();
+    Some(format!("{CLOSURE_PREFIX}{}", dir.display()))
 }
 
 /// `url` for a message. A URL that carries user information or a query shows
@@ -166,6 +192,13 @@ pub fn open(url: &str, cfg: &Config) -> Result<Arc<dyn Transport>, Error> {
         ))),
         #[cfg(not(feature = "transport-file"))]
         Scheme::File(_) => Err(unsupported(url, "transport-file")),
+        #[cfg(feature = "transport-file")]
+        Scheme::Closure(path) => Ok(Arc::new(
+            kit_transport_file::ClosureTransport::open(std::path::Path::new(path))
+                .map_err(|e| Error::Closure(e.to_string()))?,
+        )),
+        #[cfg(not(feature = "transport-file"))]
+        Scheme::Closure(_) => Err(unsupported(url, "transport-file")),
         Scheme::Connect => Ok(Arc::new(ConnectTransport::connect_with_signer(url, None)?)),
         #[cfg(feature = "transport-s3")]
         Scheme::S3 => Ok(Arc::new(kit_transport_s3::S3Transport::connect(url)?)),
@@ -340,10 +373,34 @@ mod tests {
     }
 
     #[test]
+    fn closure_url_takes_the_url_or_a_manifest_path_only() {
+        assert_eq!(
+            closure_url("kit+closure:///media/x.closure").as_deref(),
+            Some("kit+closure:///media/x.closure")
+        );
+        assert_eq!(closure_url("origin"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("MANIFEST.mkcl");
+        // Not there yet: a name that only looks like a manifest is no path.
+        assert_eq!(closure_url(manifest.to_str().unwrap()), None);
+        std::fs::write(&manifest, b"KCLM").unwrap();
+        assert_eq!(
+            closure_url(manifest.to_str().unwrap()),
+            Some(format!("kit+closure://{}", dir.path().display()))
+        );
+        // A directory is not taken: the path must name the manifest.
+        assert_eq!(closure_url(dir.path().to_str().unwrap()), None);
+    }
+
+    #[test]
     fn scheme_names_the_transport_of_each_url() {
         assert_eq!(
             scheme("kit+file:///srv/repo").unwrap(),
             Scheme::File("/srv/repo")
+        );
+        assert_eq!(
+            scheme("kit+closure:///media/x.closure").unwrap(),
+            Scheme::Closure("/media/x.closure")
         );
         assert_eq!(
             scheme("kit+s3://s3.example.com/bucket/proj").unwrap(),

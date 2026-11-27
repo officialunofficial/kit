@@ -471,9 +471,11 @@ mode. A version 2 decoder MUST also reject:
 
 - a `check` that is not the BLAKE3 of the bytes before it;
 - a `branch` that is not valid UTF-8 or not a valid branch name
-  (SPEC-REFS §2, the part after `refs/heads/`);
+  (`refs/heads/<branch>` MUST be a valid ref name, SPEC-REFS §3);
 - `bases` that are not sorted ascending without repeats, or that are not
-  empty in snapshot mode.
+  empty in snapshot mode;
+- an empty `branch` together with empty `bases`, which a writer encodes as
+  version 1. So every manifest has one encoding.
 
 A writer MUST write version 1 when there is no branch and no base, so an
 export without them keeps the bytes of version 1. A version 1 decoder

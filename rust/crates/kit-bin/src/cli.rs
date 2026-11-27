@@ -247,7 +247,7 @@ commands:
                     -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
                     `<name>\t<url> (fetch)`/`(push)`; JSON with --format=json)
-  remote add [<name>] <url>  Add a remote (kit+file://, kit+https://, kit+s3://, kit+ssh://)
+  remote add [<name>] <url>  Add a remote (kit+file://, kit+https://, kit+s3://, kit+ssh://, kit+closure://)
   remote set [<name>] <url>  Alias for 'remote add'
   remote remove <name>  Remove a named remote (`default` clears the flat remote)
   remote rename <old> <new>  Rename a named remote
@@ -354,7 +354,7 @@ commands:
   verify-proof <commit-id> <bundle|-> [--expect-path PATH] [--trusted] [--trust-roots PATH] [--format=json] [--payload-out FILE]
                     Verify a disclosure bundle against a trusted 64-hex
                     commit id (does not resolve refs)
-  closure export <rev> [--history] [-o DIR] [--force] [--format=json]
+  closure export <rev> [--history] [--branch <name>] [--since <rev>] [-o DIR] [--force] [--format=json]
                     Export a commit's object-set closure as MANIFEST.mkcl
                     plus raw-only packs (not `kit git export`)
   closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]

@@ -90,7 +90,10 @@ pub fn run(args: &[String]) -> u8 {
     // `.kit/sparse-checkout` after the pack pull lands, and the next
     // `kit checkout` honours them. Sparse fetch over the wire is
     // wired through `kit checkout --sparse` itself.
-    let url = opts.url.as_str();
+    // A path to a closure export's manifest clones as the `kit+closure://`
+    // URL of its directory, and that URL is what the config records.
+    let closure = libkit::transfer::closure_url(&opts.url);
+    let url = closure.as_deref().unwrap_or(&opts.url);
     let origin_name = match validate_clone_inputs(&opts) {
         Ok(name) => name,
         Err(code) => return code,
@@ -216,6 +219,9 @@ pub fn run(args: &[String]) -> u8 {
                 .and_then(|result| result);
             drop(progress);
             outcome
+        }
+        Err(e @ libkit::transfer::Error::Closure(_)) => {
+            return emit_err(&format!("open remote: {e}"), exit::DATAERR);
         }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
@@ -356,7 +362,10 @@ fn clone_init_exit_code(error: &kit_sync::CloneInitError) -> u8 {
 fn derive_dir_from_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let stripped = last.strip_suffix(".kit").unwrap_or(last);
+    let stripped = last
+        .strip_suffix(".kit")
+        .or_else(|| last.strip_suffix(".closure"))
+        .unwrap_or(last);
     if stripped.is_empty() {
         "repo".to_string()
     } else {
@@ -371,6 +380,7 @@ fn scheme_of(url: &str) -> Option<&'static str> {
         ("kit+s3://", "s3"),
         ("kit+ssh://", "ssh"),
         ("kit+memory://", "memory"),
+        ("kit+closure://", "closure"),
     ] {
         if url.starts_with(prefix) {
             return Some(kind);

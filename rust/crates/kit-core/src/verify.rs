@@ -363,11 +363,19 @@ pub enum VerifyError {
     /// header, or the magic bytes are not `"KCLM"`.
     #[error("closure manifest magic is not \"KCLM\"")]
     ClosureManifestBadMagic,
-    /// The manifest's version byte is not `1`.
-    #[error("closure manifest version {0} is not supported (v1 only)")]
+    /// The manifest's version byte is not `1` or `2`.
+    #[error("closure manifest version {0} is not supported (versions 1 and 2 only)")]
     ClosureManifestUnsupportedVersion(u8),
+    /// A version 2 manifest's checksum is not the BLAKE3 of the bytes
+    /// before it: the manifest was damaged.
+    #[error("closure manifest checksum does not match: the manifest is damaged")]
+    ClosureManifestChecksum,
+    /// [`export_closure_with`] was given options it cannot record.
+    #[error("closure export: {0}")]
+    ClosureExportOptions(String),
     /// The manifest body is malformed: truncated, an over-cap pack
-    /// list, an unknown mode byte, or trailing bytes.
+    /// list, an unknown mode byte, trailing bytes or, in version 2, an
+    /// invalid branch or invalid bases.
     #[error(
         "closure manifest body is malformed (bad codec payload, unknown mode, or trailing bytes)"
     )]
@@ -413,9 +421,10 @@ impl From<CodecError> for VerifyError {
 
 mod closure;
 pub use closure::{
-    ClosureExport, ClosureManifest, ClosureReport, Known, MAX_CLOSURE_PACKS, MAX_MANIFEST_BYTES,
-    ObjectSource, export_closure, verify_closure, verify_closure_manifest, verify_closure_packs,
-    verify_closure_store, verify_closure_streaming,
+    ClosureExport, ClosureManifest, ClosureReport, ExportOptions, Known, MAX_CLOSURE_BASES,
+    MAX_CLOSURE_BRANCH_BYTES, MAX_CLOSURE_PACKS, MAX_MANIFEST_BYTES, ObjectSource, export_closure,
+    export_closure_with, valid_branch, verify_closure, verify_closure_manifest,
+    verify_closure_packs, verify_closure_store, verify_closure_streaming,
 };
 mod push;
 pub use push::{PushReport, verify_push};

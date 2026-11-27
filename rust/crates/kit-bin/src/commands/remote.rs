@@ -116,7 +116,7 @@ fn fail(error: remote::Error, scheme_hint: bool) -> u8 {
         )
     {
         message.push_str(
-            "\nhint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://)",
+            "\nhint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://, kit+closure://)",
         );
     }
     emit_err(&message, exit_map::exit_code(&error))

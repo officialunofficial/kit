@@ -1267,10 +1267,25 @@ and
 .Cm fetch Fl Fl prune
 then deletes the remote-tracking refs whose branch is gone from the remote;
 it deletes no local branch and no tag.
+.Cm fetch
+also takes a closure export, as
+.Ql kit+closure:// Ns Ar dir
+or the path of its
+.Pa MANIFEST.mkcl ,
+and writes
+.Pa refs/remotes/closure/ Ns Ar branch .
+
 .It Cm clone Oo Fl Fl sparse ... Oc Oo Fl Fl tags | Fl Fl no-tags Oc Ar url
 Clone a remote into a new working directory, with its tags unless
 .Fl Fl no-tags
 is given.
+.Ar url
+may be a closure export written with
+.Cm closure Cm export Fl Fl history Fl Fl branch ,
+as
+.Ql kit+closure:// Ns Ar dir
+or the path of its
+.Pa MANIFEST.mkcl .
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
 Show or configure remotes. With no subcommand, lists the configured
 remotes.
@@ -1821,7 +1836,7 @@ emits the disclosure result as JSON.
 .Fl Fl payload-out Ar file
 writes the verified payload bytes to
 .Ar file .
-.It Cm closure Cm export Ar rev Op Fl Fl history Oo Fl o | Fl Fl output Ar dir Oc Op Fl Fl force Oo Fl Fl format Ns = Ns Cm json Oc
+.It Cm closure Cm export Ar rev Op Fl Fl history Oo Fl Fl branch Ar name Oc Oo Fl Fl since Ar rev Oc Oo Fl o | Fl Fl output Ar dir Oc Op Fl Fl force Oo Fl Fl format Ns = Ns Cm json Oc
 Export a commit's object-set closure as
 .Pa MANIFEST.mkcl
 plus raw-only v1 packs (default snapshot;
@@ -1841,7 +1856,24 @@ emits
 .Cm root , mode , packs , objects ,
 and
 .Cm manifest
-keys.
+keys, plus
+.Cm branch
+and
+.Cm since
+when given.
+.Fl Fl branch Ar name
+records the branch of the root, a commit, so
+.Cm clone
+and
+.Cm fetch
+read the directory as a
+.Ql kit+closure://
+remote with that branch.
+.Fl Fl since Ar rev
+(history mode only, repeatable) leaves out every object
+.Ar rev
+reaches, for a receiver that holds it.
+Either flag writes manifest version 2.
 .It Cm closure Cm verify Ar commit-id Oo Fl Fl from Ar dir Oc Op Fl Fl history Op Fl Fl show-unreferenced Oo Fl Fl format Ns = Ns Cm json Oc
 With
 .Fl Fl from Ar dir ,
@@ -1863,6 +1895,10 @@ list is checked only when
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
 emits the closure report as JSON.
+With
+.Fl Fl from ,
+the objects an incremental export leaves out count as present when the
+local repository holds them.
 .It Cm closure Cm repair-indexes
 Rebuild damaged local pack indexes beside verified packs.
 Run it from any

@@ -1,0 +1,18 @@
+{
+  "bin": "neg_v2_snapshot_bases.manifest.bin",
+  "blake3": "f70702e3ca8bff389ac9982792082f9dfb11b171f36f2ed9fe799bded5dfdead",
+  "description": "Version 2 snapshot manifest that lists a base, under a correct checksum.",
+  "expect": "reject",
+  "ids": [],
+  "mode": "history",
+  "n_packs": 1,
+  "name": "neg_v2_snapshot_bases",
+  "pack_hashes": [
+    "33f3c84c7837a5764be1673f8d32f0cc4cd0b9bc087f30d19f271e28608c0a9b"
+  ],
+  "reason": "malformed",
+  "root_hex": "d8b978f8cfaf423b5312bc672d2225c1ec36499a2a964d06dd522818ccdbdef7",
+  "size": 141,
+  "unreferenced": [],
+  "verified": 0
+}

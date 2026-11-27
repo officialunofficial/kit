@@ -225,7 +225,7 @@ _kit_complete() {
             else
                 case "${words[2]}" in
                     export)
-                        COMPREPLY=( $(compgen -W "--history -o --output --force --format --help" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--history --branch --since -o --output --force --format --help" -- "$cur") )
                         ;;
                     verify)
                         COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )

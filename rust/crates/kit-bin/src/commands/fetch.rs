@@ -17,6 +17,10 @@ use crate::exit;
 use crate::format::{self, JsonObject};
 use crate::remote_dispatch;
 
+/// The remote name of a fetch from a closure export that no configured
+/// remote names.
+const CLOSURE_REMOTE: &str = "closure";
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FetchFormat {
     Default,
@@ -30,7 +34,9 @@ enum FetchFormat {
 )]
 #[allow(clippy::struct_excessive_bools)] // clap option flags, not a state machine
 struct FetchOpts {
-    /// Named remote to fetch from (default: the flat default remote).
+    /// Named remote to fetch from (default: the flat default remote), or
+    /// a closure export as `kit+closure://<dir>` or the path of its
+    /// `MANIFEST.mkcl`, fetched under the name `closure`.
     remote: Option<String>,
     /// Skip Ed25519 signature verification on newly-fetched commits/
     /// remixes/tags. Verification is ON by default and fails
@@ -134,7 +140,14 @@ fn fetch_one(
 ) -> u8 {
     let json = matches!(opts.format, FetchFormat::Json);
     let quiet = opts.quiet;
-    let Some(resolved) = config::resolve_remote(cfg, remote) else {
+    // A closure export named by its URL or the path of its manifest has no
+    // configured remote: it fetches under the name `closure`.
+    let anonymous = libkit::transfer::closure_url(remote).map(|endpoint| config::ResolvedRemote {
+        name: CLOSURE_REMOTE.to_owned(),
+        endpoint,
+        repo_chosen: false,
+    });
+    let Some(resolved) = anonymous.or_else(|| config::resolve_remote(cfg, remote)) else {
         return emit_err_json(
             &if remote.is_empty() {
                 "no remote configured — use `kit remote add <url>`".to_owned()
@@ -215,6 +228,9 @@ fn fetch_one(
         }
         Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
             emit_err_json(&msg, exit::CONFIG_ERROR, json)
+        }
+        Err(e @ libkit::transfer::Error::Closure(_)) => {
+            emit_err_json(&format!("open remote: {e}"), exit::DATAERR, json)
         }
         Err(e) => emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     }

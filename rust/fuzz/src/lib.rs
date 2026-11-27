@@ -1254,6 +1254,27 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     let _ = verify::verify_closure(&fixture.root, kit_core::ClosureMode::Snapshot, [input]);
     let _ = kit_core::pack::PackEntries::new(input);
 
+    // Raw input as a manifest: any manifest that decodes encodes back to
+    // the same bytes, version 1 or 2.
+    if let Ok(decoded) = verify::ClosureManifest::decode(input) {
+        assert_eq!(decoded.encode(), input, "a decoded manifest re-encodes");
+    }
+    // A version 2 manifest carries a checksum: no flipped byte decodes.
+    if input.len() >= 2 {
+        let mut v2 =
+            verify::ClosureManifest::decode(&fixture.manifest).expect("fixture manifest decodes");
+        v2.branch = Some("main".into());
+        let bytes = v2.encode();
+        assert_eq!(verify::ClosureManifest::decode(&bytes).ok(), Some(v2));
+        let mut flipped = bytes;
+        let pos = usize::from(input[0]) % flipped.len();
+        flipped[pos] ^= input[1].max(1);
+        assert!(
+            verify::ClosureManifest::decode(&flipped).is_err(),
+            "a v2 manifest with a flipped byte decoded"
+        );
+    }
+
     // Feed raw fuzzer input directly as closure pack buffers (not wrapped
     // in valid PackEntries framing), both whole and split into two, so the
     // profile/framing checks in verify_closure_packs and

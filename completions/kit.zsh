@@ -681,6 +681,8 @@ _kit() {
                         export)
                             _arguments \
                                 '--history[full ancestry (history mode)]' \
+                                '--branch[record the branch of the root]:branch:' \
+                                '*--since[leave out what this commit reaches]:revision:' \
                                 '-o[output directory]:dir:_files -/' \
                                 '--output[output directory]:dir:_files -/' \
                                 '--force[overwrite a non-empty directory]' \

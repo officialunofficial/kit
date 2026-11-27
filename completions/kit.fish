@@ -497,6 +497,10 @@ complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_sub
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l history -d "Full ancestry (history mode)"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
+    -l branch -d "Record the branch of the root" -x
+complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
+    -l since -d "Leave out what this commit reaches" -x
+complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -s o -l output -d "Output directory" -r
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l force -d "Overwrite a non-empty directory"

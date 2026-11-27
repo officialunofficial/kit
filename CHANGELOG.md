@@ -24,6 +24,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit shortlog` groups the commits that `kit log` shows by author, with `-s`, `-n`, `-e`, `--format=json`, the revision and path rules of `kit log`, and `kit log` text on standard input, as git reads it.
 - `kit log -L <start>,<end>:<file>` lists the commits that changed a range of lines, with the hunk of the range for each, and follows the range back through each edit as git does. It may repeat, and combines with `-n`, `--oneline`, `--first-parent` and `--format=json` (a `hunks` list).
 - `kit archive` writes the tree of a revision as a tar or tar.gz archive, with `--prefix`, `-o` and path limits. The bytes depend only on the tree: entries in tree order, uid and gid 0, the commit's time, fixed modes and a pax global header with the commit id, as git writes it. Only the tree is read, and a chunked file streams one chunk at a time.
+- `kit clone` and `kit fetch` read a `kit closure export` directory as a read-only `kit+closure://` remote, or from the path of its `MANIFEST.mkcl`, so history can travel on removable media. The fetch checks every pack, the closure and every signature as a network fetch does. `kit closure export` gains `--branch`, which records the branch the fetch publishes, and `--since`, which writes an incremental export for a receiver that holds the base. Either flag writes closure manifest version 2, which adds the branch, the bases and a checksum; an export without them keeps version 1.
 - `kit range-diff` shows how each commit of a series changed between two versions of it, with the `=`, `!`, `<` and `>` lines of git and the diff of each changed pair. It pairs the commits by git's least-cost assignment, takes the ranges in git's three forms and `--creation-factor`, and bounds each side at 1,000 commits.
 
 ### Fixed
@@ -39,6 +40,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `libkit::rebase::Request` gains `autosquash`, and `libkit::config::Config` gains `rebase_autosquash`.
 - `kit_core::ops::rebase::RebaseAction` gains `UpdateRef`, and `RebaseState` gains `update_refs` and `ref_updates`. `libkit::rebase::Request` gains `update_refs`, `Plan` gains `update_refs`, `Outcome::Finished` gains `updated_refs`, and `libkit::config::Config` gains `rebase_update_refs`.
 - `libkit::merge::Request` and `libkit::rebase::Request` gain `rerere`, and `libkit::merge::resume` and `libkit::rebase::resume` take the rerere settings, plus an observer for `merge::resume`. `libkit::conflict::Event` gains `ReusedResolution`, `RecordedPreimage`, `RecordedResolution` and `RerereWarning`, and `libkit::config::Config` gains `rerere_enabled`, `rerere_auto_update`, `gc_rerere_resolved` and `gc_rerere_unresolved`.
+- `kit_core::verify::ClosureManifest` gains `branch` and `bases`; `ClosureManifest::new` builds one without them. `kit_core::verify::VerifyError` gains `ClosureManifestChecksum` and `ClosureExportOptions`. `libkit::transfer::Scheme` gains `Closure`, and `libkit::transfer::Error` gains `Closure`.
 
 ## [0.11.1] - 2026-11-26
 
