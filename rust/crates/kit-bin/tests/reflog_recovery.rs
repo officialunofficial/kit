@@ -59,7 +59,7 @@ fn amend_records_the_replaced_commit_and_recovery_names_it() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(
         lines[0],
-        format!("{} recovery@{{0}}: amend (main): second", &before[..7])
+        format!("{} recovery@{{0}}: amend (main): second", &before[..8])
     );
     assert_eq!(rev(&repo, "recovery@{0}"), before);
     assert_eq!(rev(&repo, "recovery@{0}~1"), rev(&repo, "HEAD~1"));
@@ -116,10 +116,9 @@ fn a_recovered_commit_can_start_a_branch() {
     let repo = two_commits();
     let before = rev(&repo, "HEAD");
     repo.ok(&["commit", "--amend", "-m", "rewritten"]);
-    repo.ok(&["branch", "rescue", "recovery@{0}"]);
-    assert_eq!(rev(&repo, "rescue"), before);
-    repo.ok(&["switch", "-c", "rescue2", "recovery@{0}"]);
+    repo.ok(&["switch", "-c", "rescue", "recovery@{0}"]);
     assert_eq!(rev(&repo, "HEAD"), before);
+    assert_eq!(rev(&repo, "rescue"), before);
 }
 
 #[test]
@@ -241,10 +240,7 @@ fn a_record_whose_commit_is_gone_prints_pruned() {
     let log = repo.kit_dir().join("recovery-log");
     std::fs::write(&log, format!("100\treset\t{missing}\tmain\n")).unwrap();
     let lines = recovery_lines(&repo, &[]);
-    assert_eq!(
-        lines,
-        [format!("abababa recovery@{{0}}: reset (main): (pruned)")]
-    );
+    assert_eq!(lines, ["abababab recovery@{0}: reset (main): (pruned)"]);
     let out = repo.run(&["rev-parse", "recovery@{0}"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("pruned"), "{}", stderr(&out));

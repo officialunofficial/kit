@@ -106,7 +106,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all --follow -n --help" -- "$cur") )
             ;;
         reflog)
-            COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--format -n --recovery --help" -- "$cur") )
             ;;
         pull)
             COMPREPLY=( $(compgen -W "--all --rebase --no-ff --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )

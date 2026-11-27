@@ -337,6 +337,7 @@ _kit() {
                     _arguments \
                         '--format[output format]:format:(default json)' \
                         '-n[limit number of entries]:count:' \
+                        '--recovery[list commits that amend, reset and rebase replaced]' \
                         '--help[show help]' \
                         '1:ref:'
                     ;;

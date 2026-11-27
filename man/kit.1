@@ -675,7 +675,7 @@ a path must exist in the worktree and must not also name a revision.
 .Fl Fl follow
 takes exactly one file and continues under its old name when a commit
 renames it with the same content.
-.It Cm reflog Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
+.It Cm reflog Oo Fl Fl recovery Oc Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
 Show a branch's recorded movement history, read-only. Walks the branch
 tip's first-parent chain newest-first, addressing each entry
 .Ar ref Ns Cm @{ Ns Ar N Ns Cm } ,
@@ -696,8 +696,26 @@ descriptor, binding repository, branch, generation, tip, count and root.
 .Cm @{ Ns Ar N Ns Cm }
 indexes the reachable first-parent chain, so commits superseded by
 .Cm commit --amend
-or a reset are no longer listed. Recovery records are separate. This command
+or a reset are no longer listed. This command
 never mutates refs, ancestry snapshots, or objects.
+.Pp
+.Fl Fl recovery
+lists the recovery log instead: the commits that
+.Cm commit --amend ,
+.Cm reset ,
+.Cm rebase
+and
+.Cm stash pop
+replaced, newest first, as
+.Ql <id> recovery@{N}: <op> (<branch>): <subject> .
+With
+.Ar ref ,
+only that branch's records are listed.
+The revision
+.Cm recovery@{ Ns Ar N Ns Cm }
+names the commit of a record in every command, so
+.Ql kit reset --hard recovery@{0}
+undoes the last rewrite.
 .It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Fl M Ns Op Ar n | Fl Fl find-renames Ns Op = Ns Ar n | Fl Fl no-renames Oc Oo Fl l Ns Ar n Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.

@@ -11,6 +11,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `kit log [<rev>] [--] <path>...` shows only the commits that change the paths, with git's default history simplification at merges. `--follow` continues the history of one file under its old name across a rename. `-p` and `--stat` show only the files at the paths.
 - `diff`, `status`, `show` and `log -p`/`--stat` detect renames by similarity, as git does. A deleted and an added file at least 50% alike pair into one rename, scored with git's method, so the scores match git's (`R090`, `similarity index 90%`, `R90` in `status --porcelain=v2`). `-M[<n>]`/`--find-renames[=<n>]` takes git's threshold grammar, `--no-renames` turns detection off, and `-l<n>` sets the candidate limit (default 1000) past which only identical content pairs, with git's warning. `--stat` names both sides of a rename (`dir/{a.txt => b.txt}`), and a rename's patch now carries its mode lines and hunks.
+- `kit reflog --recovery` lists the commits that `commit --amend`, `reset`, `rebase` and `stash pop` replaced, and the revision `recovery@{N}` names them, so `kit reset --hard recovery@{0}` undoes the last rewrite.
 
 ### Breaking
 

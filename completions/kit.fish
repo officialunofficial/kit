@@ -221,6 +221,8 @@ complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -s n -d "Limit number of entries" -r
+complete -c kit -n "__fish_seen_subcommand_from reflog" \
+    -l recovery -d "List commits that amend, reset and rebase replaced"
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l all -d "Mirror every local branch"
 complete -c kit -n "__fish_seen_subcommand_from push" \

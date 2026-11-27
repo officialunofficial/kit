@@ -20,9 +20,14 @@
 //!   (1-based), and `^` alone means `^1`. `^0` is the commit itself. For
 //!   example `HEAD~2`, `main^` and `<hash>~1^2`.
 //!
+//! - **Recovery record**: `recovery@{n}`, the commit of the n-th record of
+//!   the recovery log, counted from 0 with the newest record first. The
+//!   recovery log holds the commits that `commit --amend`, `reset`, `rebase`
+//!   and `stash pop` replaced. Suffix steps may follow it.
+//!
 //! The grammar has no pathspecs, no `:/text` message search, no reflog
-//! (`@{n}`) syntax and no ranges. A caller splits `A..B` before it passes
-//! each end here.
+//! (`<ref>@{n}`) syntax and no ranges. A caller splits `A..B` before it
+//! passes each end here.
 //!
 //! [`resolve_object`] adds `<rev>:<path>`: the object at `<path>` in the tree
 //! of `<rev>`.
@@ -87,6 +92,16 @@ pub enum Error {
         spec: String,
         /// What went wrong.
         detail: &'static str,
+    },
+    /// `recovery@{n}` does not name a usable record: the number is
+    /// malformed or past the end of the log, the record's commit is no
+    /// longer in the store, or the log cannot be read.
+    #[error("{spec}: {detail}")]
+    Recovery {
+        /// The base that the caller supplied.
+        spec: String,
+        /// What went wrong.
+        detail: String,
     },
     /// The path of `<rev>:<path>` names nothing in the tree of the revision,
     /// or it goes through an entry that is not a tree.
@@ -201,6 +216,46 @@ pub fn resolve_object(store: &ObjectStore, layout: &RepoLayout, spec: &str) -> R
     Ok(current)
 }
 
+/// The start of a recovery record revision, `recovery@{n}`.
+const RECOVERY_PREFIX: &str = "recovery@{";
+
+/// The most digits that the number of `recovery@{n}` may have. The log holds
+/// far fewer records than a nine-digit number counts.
+const MAX_RECOVERY_DIGITS: usize = 9;
+
+/// Resolve `recovery@{n}` to the commit of the n-th recovery record, newest
+/// first.
+fn resolve_recovery(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, Error> {
+    let fail = |detail: String| Error::Recovery {
+        spec: base.to_owned(),
+        detail,
+    };
+    let digits = base
+        .strip_prefix(RECOVERY_PREFIX)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .filter(|d| {
+            !d.is_empty() && d.len() <= MAX_RECOVERY_DIGITS && d.bytes().all(|b| b.is_ascii_digit())
+        })
+        .ok_or_else(|| fail("expected a record number such as recovery@{0}".to_owned()))?;
+    let n: usize = digits
+        .parse()
+        .map_err(|_| fail("bad record number".to_owned()))?;
+    let records = kit_core::ops::recovery::read_all(layout)
+        .map_err(|e| fail(format!("read the recovery log: {e}")))?;
+    let record = records
+        .iter()
+        .rev()
+        .nth(n)
+        .ok_or_else(|| fail(format!("the recovery log has {} record(s)", records.len())))?;
+    if !store.contains(&record.superseded) {
+        return Err(fail(format!(
+            "commit {} was pruned by gc",
+            hash::to_hex(&record.superseded)
+        )));
+    }
+    Ok(record.superseded)
+}
+
 /// Follow tag objects to the first object that is not a tag, so an annotated
 /// or signed tag becomes the object it points at. A non-tag object, an
 /// unreadable object, or a chain longer than 16 tags stops the walk. The
@@ -235,6 +290,9 @@ pub fn tree_of(store: &ObjectStore, h: &Hash) -> Result<Hash, Error> {
 /// Resolve the base token (no `~`/`^` suffix) to a hash: ref, then
 /// full/short hash.
 fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, Error> {
+    if base.starts_with(RECOVERY_PREFIX) {
+        return resolve_recovery(store, layout, base);
+    }
     // 1. HEAD.
     if base == "HEAD" {
         return match refs::resolve_head(layout) {
