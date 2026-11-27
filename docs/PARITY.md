@@ -302,6 +302,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `---` line between the message and the stat. Neither flag combines
   with `--format=json`. A blank line ends each commit, also the last
   one. The diff text is the text of `diff` and `show`.
+- **`log -- <path>`.** kit applies git's default history simplification
+  and no other mode: it has no `--full-history`, `--simplify-merges`,
+  `--dense` or `--sparse`. A path is a file or a directory; globs and
+  pathspec magic are usage errors. `--follow` finds exact renames only, the
+  same content at a new path. Git also finds a rename with an edit.
 - **`log --all`.** The walk starts at `HEAD`, the local branches, the
   remote-tracking refs and the tags. Git also starts at `refs/stash` and at
   other refs. kit leaves out a ref with unreadable content and a ref that ends

@@ -309,7 +309,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -391,6 +391,28 @@ History / commits:
   At a merge, it sorts the region above a shared unread frontier before
   continuing below that frontier. Separate roots or exclusion boundaries
   can require the full remaining graph to preserve the topological order.
+  Paths after the revision limit the output to the commits that change
+  them. A path is relative to the current directory and names a file or a
+  directory. `.` at the top names the whole tree. A glob or pathspec magic
+  (`*`, `?`, `[`, a leading `:`) is a usage error (exit `64`). Without `--`,
+  each path must exist in the worktree and must not also name a revision; an
+  argument that is both is an ambiguity error (exit `64`), as in git. After
+  `--`, any path is accepted. kit compares each commit with its parents at
+  the paths only, by tree entry id, so a subtree outside the paths is never
+  read. A commit without parents shows when its tree holds one of the paths.
+  A commit with one parent shows when an entry at one of the paths differs.
+  A merge that matches one parent at the paths does not show, and the walk
+  follows only that parent (the first such parent), as git's default
+  history simplification does. A merge that matches no parent shows, and
+  the walk follows every parent. With `--first-parent` only the first
+  parent counts. `-p` and `--stat` show only the files at the paths.
+  `--follow` takes exactly one file path and continues the walk under the
+  old name when a commit renames the file. Rename detection is the exact
+  detection of `diff`: the same content at a new path. The name changes
+  when the walk prints the renaming commit, so on a history with merges the
+  walk may follow the old name into a branch that never held the rename.
+  `--follow` with no path or with more than one path is a usage error
+  (exit `64`).
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each
