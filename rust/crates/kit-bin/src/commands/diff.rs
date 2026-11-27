@@ -52,7 +52,7 @@ use crate::exit;
 use crate::exit_map;
 use crate::format;
 
-mod stat;
+pub(super) mod stat;
 pub(super) use stat::render_stat;
 
 #[derive(Debug, Parser)]

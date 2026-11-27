@@ -22,6 +22,9 @@
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod add;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod apply;
 pub mod attest_signer;
 pub mod attestation;
 pub mod blame;

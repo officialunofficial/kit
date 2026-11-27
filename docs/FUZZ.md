@@ -78,6 +78,8 @@ from recurring.
 | `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
 | `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one commit for each step but `exec` and one command for each `exec` and one valid branch for each `update-ref`, names only listed commits, never folds its first commit and holds only one-line commands; a full hash names its commit) |
 | `fuzz_targets/rebase_autosquash.rs` | `kit_core::ops::rebase::autosquash` (never panics on any subjects; arranges every commit once, starts with a pick, keeps the picks in order, makes every plain subject a pick, and gives the same order when it arranges its own result) |
+| `fuzz_targets/patch_parse.rs` | `kit_core::ops::patch::parse` (never panics on any text; a parsed patch names a file, every path is a valid index path, every hunk keeps its counts, reversing twice gives the patch back, and a one-hunk file patch turns its old side into its new side) |
+| `fuzz_targets/mailbox_parse.rs` | `kit_core::ops::mailbox::split` and `parse` (never panic on any text; the mails are slices of the text, and a mail that parses has an author and a patch that parses) |
 | `fuzz_targets/rerere_entry.rs` | `kit_core::ops::rerere::entry_is_valid` (never panics on any name and sides; a valid entry is named by the id of its sorted sides, and the sides of any conflict make a valid entry under their id) |
 | `fuzz_targets/signer_spec_parse.rs` | `libkit::attestation::SignerSpec` (never panics on any text; a spec parses the same twice; an accepted spec names an algorithm and a signer; a refusal names the flag) |
 | `fuzz_targets/secret_hex_parse.rs` | `libkit::keys::parse_secret_hex` (never panics on any text; exactly 64 hex digits in either case are accepted; the secret equals the digits; a refusal never shows the text) |
@@ -156,6 +158,9 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
 | The `fixup!` and `squash!` subjects that `kit_core::ops::rebase::autosquash` reads | `rebase_autosquash` |
 | The `actions` and `update-refs` files that `kit_core::ops::rebase::read_state` reads | None. kit writes them under `.kit/rebase-apply/` for its own paused rebase, and they never come from a peer. They are size-capped, and unit tests cover malformed text, which reads as invalid state. |
+| The patch text that `kit apply` and `kit am` read | `patch_parse` |
+| The mailbox that `kit am` reads | `mailbox_parse` |
+| The `am/` state files that `kit am` reads: `orig-head`, `next` and `last` | None. kit writes them under `.kit/am/` for its own paused `am`, and they never come from a peer. They are read with a 128-byte cap and checked as 64 hex digits or a number of at most four digits. The mails in `am/` are read again by `mailbox_parse`'s parser. |
 | The `rr-cache/` entries that `libkit::rerere` reads: `version`, the entry name, `side1`, `side2` and `postimage` | `rerere_entry` for the name and sides. `version` is compared byte for byte, the files are size-capped, and a `postimage` is copied as it is, never parsed. |
 | `libkit::attestation::SignerSpec` | `signer_spec_parse` |
 | `libkit::keys::parse_secret_hex` | `secret_hex_parse` |

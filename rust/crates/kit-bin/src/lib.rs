@@ -148,6 +148,8 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "rerere" => commands::rerere::run(&rest),
         "grep" => commands::grep::run(&rest),
         "describe" => commands::describe::run(&rest),
+        "apply" => commands::apply::run(&rest),
+        "am" => commands::am::run(&rest),
         "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "worktree" => commands::worktree::run(&rest),

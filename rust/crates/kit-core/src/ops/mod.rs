@@ -13,7 +13,9 @@ pub mod describe;
 pub mod diff;
 pub mod gc;
 pub mod graph;
+pub mod mailbox;
 pub mod merge;
+pub mod patch;
 pub mod revert;
 pub mod similarity;
 

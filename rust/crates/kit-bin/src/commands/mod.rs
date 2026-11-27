@@ -5,6 +5,8 @@
 //! crates; this module is the thin presentation layer.
 
 pub mod add;
+pub mod am;
+pub mod apply;
 pub mod attest;
 pub mod attest_factory;
 pub mod bisect;

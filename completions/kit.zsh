@@ -79,6 +79,8 @@ _kit() {
         'git:Git-bridge subcommands (git export, feature-gated)'
         'grep:Print lines of tracked files that match a pattern'
         'describe:Name a commit after the nearest tag'
+        'apply:Apply patches to the worktree, the index or both'
+        'am:Apply a mailbox of patches as commits'
         'blame:Show line-level commit attribution'
         'prove:Build a disclosure bundle for a path, chunk, or byte range'
         'verify:Verify the signature on a commit'

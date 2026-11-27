@@ -276,7 +276,7 @@ fn malformed_and_unsupported_patches_are_refused() {
     let repo = base();
     let cases = [
         (
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n",
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n",
             "count",
         ),
         (

@@ -1488,6 +1488,43 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
+.It Cm apply Oo Fl Fl index | Fl Fl cached Oc Oo Fl R Oc Oo Fl Fl check | Fl Fl stat Oc Ar patch ...
+Apply unified diffs, as
+.Cm kit diff
+or git writes them, to the worktree;
+.Fl Fl cached
+applies to the index alone and
+.Fl Fl index
+to both, which must agree.
+A hunk applies only where its old lines match exactly, at the line its
+header names or the nearest one; kit never applies with fuzz.
+Either every file patch applies or nothing changes: a patch that does not
+apply exits 1.
+.Fl R
+reverses the patch,
+.Fl Fl check
+writes nothing, and
+.Fl Fl stat
+prints a diffstat.
+A malformed or binary patch, a copy, a symlink and a path outside the
+worktree exit 65.
+.It Cm am Ar mbox ... | Fl Fl continue | Fl Fl skip | Fl Fl abort
+Apply each mail of a mailbox, as
+.Cm git format-patch
+writes it, as a signed commit on the current branch, with the
+.Sy From:
+of the mail as the author.
+When a patch does not apply, kit changes nothing, keeps the mails in
+.Pa .kit/am/
+and exits 1.
+.Fl Fl continue
+commits the staged result,
+.Fl Fl skip
+drops the mail, and
+.Fl Fl abort
+returns to where
+.Cm am
+started.
 .It Cm describe Oo Fl Fl tags Oc Oo Fl Fl always Oc Oo Fl Fl abbrev Ns = Ns Ar n Oc Oo Fl Fl long Oc Oo Fl Fl dirty Ns Oo = Ns Ar mark Oc Oc Oo Fl Fl match Ar glob Oc Oo Fl Fl exclude Ar glob Oc Op Ar rev
 Name
 .Ar rev

@@ -46,9 +46,16 @@ then `--- <old>` and `+++ <new>`, which are absent when the file patch has
 no hunk (a pure rename or mode change). `<old>` and `<new>` are
 `/dev/null`, or a path with one leading component (`a/`, `b/` or any other)
 that kit strips. A path in double quotes uses git's C escapes (`\\`, `\"`,
-`\t`, `\n`, and three octal digits for one byte). A path is refused when,
-after stripping, it is empty, absolute, holds a `.` or `..` component, or
-names the repository directory.
+`\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, and three octal digits for one
+byte). An unquoted path on a `---` or `+++` line ends at the first tab. A
+path is refused when, after stripping, it is empty, absolute, holds an
+empty, `.` or `..` component, or is not a valid index path (SPEC-INDEX),
+which refuses a component that names the repository directory.
+
+On a `diff --git` line two unquoted paths that hold a space are ambiguous.
+kit takes the split that gives the same path on both sides. When none
+does, the paths come from the `rename from` and `rename to` lines or the
+`---` and `+++` lines, and a file patch with none of these is refused.
 
 A hunk is `@@ -<l>[,<s>] +<l>[,<s>] @@[ <text>]` followed by its body. A
 missing `<s>` is 1. Each body line starts with ` ` (context), `-` (removed)
@@ -68,6 +75,7 @@ because kit does not apply them.
 - The patch text is at most 64 MiB.
 - A patch holds at most 100,000 file patches and 1,000,000 hunks.
 - A line number or count is at most 2^31 - 1 and is checked before use.
+- A mailbox is at most 64 MiB and `kit am` takes at most 9,999 mails.
 
 ## 4. Application
 

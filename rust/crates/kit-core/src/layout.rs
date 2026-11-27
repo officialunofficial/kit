@@ -427,6 +427,12 @@ impl RepoLayout {
         self.worktree_state_dir.join(REBASE_DIR)
     }
 
+    /// `am/` — the state of a paused `kit am` (SPEC-PATCH §6).
+    #[must_use]
+    pub fn am_dir(&self) -> PathBuf {
+        self.worktree_state_dir.join("am")
+    }
+
     /// `bisect` — in-progress bisect state.
     #[must_use]
     pub fn bisect_file(&self) -> PathBuf {

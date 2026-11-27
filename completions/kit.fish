@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect rerere gc grep describe sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc grep describe apply am sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -167,6 +167,14 @@ complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l author -d "Override the author identity" -r
+complete -c kit -n "__fish_seen_subcommand_from apply" -l index -d "Apply to the worktree and the index"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l cached -d "Apply to the index only"
+complete -c kit -n "__fish_seen_subcommand_from apply" -s R -l reverse -d "Apply in reverse"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l check -d "Check only; write nothing"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l stat -d "Print a diffstat; write nothing"
+complete -c kit -n "__fish_seen_subcommand_from am" -l continue -d "Commit the staged result and go on"
+complete -c kit -n "__fish_seen_subcommand_from am" -l skip -d "Drop the stopped mail"
+complete -c kit -n "__fish_seen_subcommand_from am" -l abort -d "Return to where am started"
 complete -c kit -n "__fish_seen_subcommand_from describe" -l tags -d "Count lightweight tags"
 complete -c kit -n "__fish_seen_subcommand_from describe" -l always -d "Fall back to the short id"
 complete -c kit -n "__fish_seen_subcommand_from describe" -l abbrev -d "Id length" -r

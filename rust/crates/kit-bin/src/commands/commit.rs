@@ -371,7 +371,7 @@ fn expand_dash_am(args: &[String]) -> Vec<String> {
 
 /// A key that signs objects, with the failure shape that the commands share:
 /// a message and an exit code.
-pub(super) struct CommitSigner(Signer);
+pub(super) struct CommitSigner(pub(super) Signer);
 
 impl CommitSigner {
     pub(super) fn public_key(&self) -> Result<[u8; 32], (String, u8)> {

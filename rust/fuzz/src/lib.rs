@@ -3168,6 +3168,56 @@ pub fn rebase_autosquash_one_iteration(input: &[u8]) {
     assert_eq!(twice, once, "arranging an arrangement changes nothing");
 }
 
+/// Patch text (`patch_parse`): `kit_core::ops::patch::parse` never panics
+/// on any text. A parsed patch names at least one file, every path is a
+/// valid index path, every hunk keeps its counts (the old side less the
+/// removed lines equals the new side less the added lines), reversing twice
+/// gives the patch back, and a file patch with one hunk at line 1 turns its
+/// own old side into its new side.
+pub fn patch_parse_one_iteration(input: &[u8]) {
+    use kit_core::ops::patch::{apply, parse};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(files) = parse(input) else {
+        return;
+    };
+    assert!(!files.is_empty(), "a parsed patch names a file");
+    for f in &files {
+        for p in f.old.iter().chain(&f.new) {
+            assert!(kit_core::index::validate_index_path(p), "{p}");
+        }
+        for h in &f.hunks {
+            assert_eq!(h.old.len() - h.removed, h.new.len() - h.added);
+        }
+        assert_eq!(&f.reversed().reversed(), f);
+        if let [h] = f.hunks.as_slice()
+            && h.old_start <= 1
+            && f.old.is_some()
+            && f.new.is_some()
+        {
+            let old: Vec<u8> = h.old.concat();
+            let new: Vec<u8> = h.new.concat();
+            assert_eq!(apply(Some(&old), f), Ok(Some(new)));
+        }
+    }
+}
+
+/// Mailboxes (`mailbox_parse`): `kit_core::ops::mailbox::split` and
+/// `parse` never panic on any text. The mails of a split are slices of the
+/// text in order, and a mail that parses has an author and a patch that
+/// parses.
+pub fn mailbox_parse_one_iteration(input: &[u8]) {
+    use kit_core::ops::mailbox::{parse, split};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mails = split(input);
+    assert!(mails.iter().map(|m| m.len()).sum::<usize>() <= input.len());
+    for m in mails {
+        if let Ok(mail) = parse(m) {
+            assert!(!mail.author.trim().is_empty());
+            assert!(kit_core::ops::patch::parse(&mail.patch).is_ok());
+        }
+    }
+}
+
 /// Cache entries (`rerere_entry`): `kit_core::ops::rerere::entry_is_valid`
 /// never panics on any entry name and sides. The input is the name, a NUL,
 /// `side1`, a NUL and `side2`. An entry is valid only when its name is the
@@ -4419,6 +4469,32 @@ mod tests {
             b"\xff\nfixup! \xff\n",
         ] {
             run_one(case, rebase_autosquash_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_patch_parse() {
+        run_iterated_unit(patch_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            b"diff --git a/f b/f\nnew file mode 100644\n",
+            b"diff --git a/f b/g\nrename from f\nrename to g\n",
+            b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+a\n",
+        ] {
+            run_one(case, patch_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_mailbox_parse() {
+        run_iterated_unit(mailbox_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"From 0 Mon Sep 17 00:00:00 2001\nFrom: A <a@x>\nSubject: s\n\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            b"From: =?UTF-8?B?w6k=?=\nSubject: [PATCH] x\n\nFrom: B\n\nbody\n",
+        ] {
+            run_one(case, mailbox_parse_one_iteration).unwrap();
         }
     }
 

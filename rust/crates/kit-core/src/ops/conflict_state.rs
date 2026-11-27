@@ -715,11 +715,18 @@ pub fn is_cherry_pick_in_progress(layout: &RepoLayout) -> bool {
     layout.cherry_pick_head_file().exists()
 }
 
-/// `true` when any merge / cherry-pick / rebase is in progress. Used to
+/// `true` when a `kit am` is paused (`am/` present).
+#[must_use]
+pub fn is_am_in_progress(layout: &RepoLayout) -> bool {
+    layout.am_dir().exists()
+}
+
+/// `true` when any merge / cherry-pick / rebase / am is in progress. Used to
 /// refuse starting a second such operation while one is unfinished.
 #[must_use]
 pub fn any_op_in_progress(layout: &RepoLayout) -> bool {
-    is_merge_in_progress(layout)
+    is_am_in_progress(layout)
+        || is_merge_in_progress(layout)
         || is_cherry_pick_in_progress(layout)
         || is_revert_in_progress(layout)
         || crate::ops::rebase::is_rebase_in_progress(layout)
@@ -736,6 +743,8 @@ pub fn in_progress_op_name(layout: &RepoLayout) -> Option<&'static str> {
         Some("revert")
     } else if crate::ops::rebase::is_rebase_in_progress(layout) {
         Some("rebase")
+    } else if is_am_in_progress(layout) {
+        Some("am")
     } else {
         None
     }

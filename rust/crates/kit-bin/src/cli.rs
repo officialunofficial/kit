@@ -314,6 +314,11 @@ commands:
                     (--fork-audit re-derives referenced content)
   git status         Show bridge state dirs: direction, endpoints, key, refs
   git format-patch <range>  Render native commits as `git am`-able patches
+  apply [--index | --cached] [-R] [--check | --stat] <patch>...
+                    Apply patches to the worktree, the index or both; all
+                    or nothing, never with fuzz
+  am <mbox>... | --continue | --skip | --abort
+                    Apply a mailbox of patch mails as signed commits
   describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]] [--match <glob>] [--exclude <glob>] [<rev>]
                     Name a commit after the nearest tag: <tag>-<n>-k<id>
   grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]
@@ -457,6 +462,8 @@ mod tests {
             "rerere",
             "grep",
             "describe",
+            "apply",
+            "am",
             "sparse-checkout",
             "self",
             "serve",
