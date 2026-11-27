@@ -329,6 +329,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   commit date is the time of the commit, and the applier signs it. It reads
   no `-s`, `-k`, `--3way`, `--interactive` or `--quoted-cr`, and refuses a
   base64 or quoted-printable mail.
+- **`shortlog`.** The author is the name `kit log` prints, so a commit
+  made with a signing key groups under its key, not under a name and
+  email. There is no `-c`/`--committer`, `--group`, `-w` or `--format`
+  other than `json`. On standard input kit reads the default `kit log`
+  format only.
 - **`describe`.** A name reads `<tag>-<n>-k<id>` where git writes
   `g<id>`, so it never passes for a git name. kit counts `<n>` exactly over
   the whole history and picks the smallest, where git stops its walk after

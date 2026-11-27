@@ -478,6 +478,19 @@ History / commits:
   of the log, a pruned record and a malformed number are errors. `kit gc`
   keeps every listed commit until its record expires (SPEC-GC, "Recovery
   log").
+- `kit shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]`
+  &mdash; group the commits that `kit log` would show by author, as
+  `<author> (<count>):` followed by each subject, indented six spaces and
+  oldest first, then a blank line. The groups sort by author, or with `-n`
+  by count, largest first, then author. `-s` prints only
+  `<count>\t<author>`, the count right-aligned in six columns. The author
+  is the name that `kit log` prints, without a trailing `<email>`; `-e`
+  keeps the email, and for a key adds the key id, as
+  `<name> <ed25519:<hex>>`. Revisions and paths read as in `kit log`.
+  `--format=json` prints one object per group,
+  `{"author":...,"count":...,"subjects":[...]}`. With no revision and
+  standard input that is not a terminal, kit reads `kit log` output from
+  it, as git does.
 - `kit describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]]
   [--match <glob>]... [--exclude <glob>]... [<rev>]` &mdash; name `<rev>`
   (default `HEAD`) after the nearest tag that reaches it, as
