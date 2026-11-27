@@ -44,8 +44,13 @@ fn pairs(text: &str) -> Vec<String> {
 }
 
 /// A base, an old series `one`, `two`, `three` on it, and a new series on a
-/// later base, where `two` changes its content and the others keep theirs.
+/// later base, where `two` changes one line of eight and the others keep
+/// theirs. One line of eight is a small enough change that the commits
+/// pair rather than show as a drop and an add.
 /// Returns the repo and the id of the old base.
+const B_OLD: &[u8] = b"b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\n";
+const B_NEW: &[u8] = b"b1\nb2\nb3\nB4 changed\nb5\nb6\nb7\nb8\n";
+
 fn rewritten() -> (Repo, String) {
     let repo = Repo::new();
     repo.commit_file("base.txt", b"base\n", "base");
@@ -53,14 +58,14 @@ fn rewritten() -> (Repo, String) {
     repo.ok(&["branch", "old"]);
     repo.ok(&["switch", "old"]);
     repo.commit_file("a.txt", b"a\n", "one");
-    repo.commit_file("b.txt", b"b\n", "two");
+    repo.commit_file("b.txt", B_OLD, "two");
     repo.commit_file("c.txt", b"c\n", "three");
     repo.ok(&["switch", "main"]);
     repo.commit_file("z.txt", b"z\n", "unrelated");
     repo.ok(&["branch", "new"]);
     repo.ok(&["switch", "new"]);
     repo.commit_file("a.txt", b"a\n", "one");
-    repo.commit_file("b.txt", b"B changed\n", "two");
+    repo.commit_file("b.txt", B_NEW, "two");
     repo.commit_file("c.txt", b"c\n", "three");
     (repo, base)
 }
@@ -88,8 +93,8 @@ fn a_changed_commit_shows_bang_and_its_interdiff() {
         out.contains(&format!("2:  {} ! 2:  {} two\n", &old2[..7], &new2[..7])),
         "{out}"
     );
-    assert!(out.contains("    -+b\n"), "{out}");
-    assert!(out.contains("    ++B changed\n"), "{out}");
+    assert!(out.contains("    -+b4\n"), "{out}");
+    assert!(out.contains("    ++B4 changed\n"), "{out}");
 }
 
 #[test]

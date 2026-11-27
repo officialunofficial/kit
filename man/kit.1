@@ -1538,6 +1538,28 @@ keeps the email, or the key id of a key author.
 With no revision and standard input that is not a terminal, kit reads
 .Cm kit log
 output from it.
+.It Cm range-diff Oo Fl Fl creation-factor Ns = Ns Ar n Oc Oo Fl Fl no-dual-color Oc Ar old-base Ns .. Ns Ar old-tip Ar new-base Ns .. Ns Ar new-tip
+Show how each commit of a series changed between two versions of it,
+such as a branch before and after a rebase.
+.Ar old Ns ... Ns Ar new
+takes the merge base as both bases, and
+.Ar base old-tip new-tip
+takes one base for both.
+kit pairs the commits by the assignment of least total cost, as git does,
+and marks each line
+.Sq =
+for the same patch,
+.Sq \&!
+for a changed one, followed by the diff of the two patches,
+.Sq <
+for a dropped commit and
+.Sq >
+for an added one.
+Leaving a commit unpaired costs
+.Ar n Ns %
+.Pq default 60
+of the size of its diff.
+Each side holds at most 1,000 commits.
 .It Cm describe Oo Fl Fl tags Oc Oo Fl Fl always Oc Oo Fl Fl abbrev Ns = Ns Ar n Oc Oo Fl Fl long Oc Oo Fl Fl dirty Ns Oo = Ns Ar mark Oc Oc Oo Fl Fl match Ar glob Oc Oo Fl Fl exclude Ar glob Oc Op Ar rev
 Name
 .Ar rev

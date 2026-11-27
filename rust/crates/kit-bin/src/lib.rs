@@ -148,6 +148,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "rerere" => commands::rerere::run(&rest),
         "grep" => commands::grep::run(&rest),
         "shortlog" => commands::shortlog::run(&rest),
+        "range-diff" => commands::range_diff::run(&rest),
         "describe" => commands::describe::run(&rest),
         "apply" => commands::apply::run(&rest),
         "am" => commands::am::run(&rest),

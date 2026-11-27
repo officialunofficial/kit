@@ -309,6 +309,9 @@ commands:
                     Apply a mailbox of patch mails as signed commits
   shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]
                     Group commits by author, for release notes
+  range-diff [--creation-factor=<n>] <old-base>..<old-tip> <new-base>..<new-tip>
+                    Show how each commit of a series changed between two
+                    versions of it; also <old>...<new> and <base> <old> <new>
   describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]] [--match <glob>] [--exclude <glob>] [<rev>]
                     Name a commit after the nearest tag: <tag>-<n>-k<id>
   grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]

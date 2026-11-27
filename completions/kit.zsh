@@ -79,6 +79,7 @@ _kit() {
         'git:Git-bridge subcommands (git export, feature-gated)'
         'grep:Print lines of tracked files that match a pattern'
         'shortlog:Group commits by author'
+        'range-diff:Compare two versions of a series'
         'describe:Name a commit after the nearest tag'
         'apply:Apply patches to the worktree, the index or both'
         'am:Apply a mailbox of patches as commits'

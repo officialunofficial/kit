@@ -497,14 +497,18 @@ History / commits:
   `<old-tip>...<new-tip>` takes the merge base as both bases, and
   `<base> <old-tip> <new-tip>` takes one base for both. Each range lists
   its commits oldest first, without merges. kit pairs the commits by the
-  assignment of least total cost, where the cost of a pair is the size of
-  the diff between their patches and leaving a commit unpaired costs
-  `<n>`% of its own patch size (default 60), as git does. Each line reads
-  `<n>:  <id> <s> <m>:  <id> <subject>`, where `<s>` is `=` for the same
+  assignment of least total cost, as git does. The cost of a pair is the
+  number of lines of the diff, with three lines of context, between the
+  diff parts of their patches; the messages do not count. Leaving a commit
+  unpaired costs `<n>`% (default 60) of the number of lines of its own diff
+  part. Each line reads
+  `<n>:  <id> <s> <m>:  <id> <subject>`, with the old commit's subject
+  when there is one, where `<s>` is `=` for the same
   patch, `!` for a changed one, `<` for an old commit with no partner and
   `>` for a new one; `-:  -------` stands for the missing side. A `!` line
   is followed by the diff of the two patches, indented four spaces. A
-  patch is the commit message followed by the diff of the commit, with
+  patch is the author and the commit message followed by the diff part:
+  the diff of the commit, with
   each file named on a `## <path> ##` line and no line numbers in the
   hunk headers. A side over 1,000 commits is an error that names the
   limit. kit never prints color, so `--no-dual-color` changes nothing.

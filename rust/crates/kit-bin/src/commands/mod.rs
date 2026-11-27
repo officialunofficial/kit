@@ -55,6 +55,7 @@ pub mod mv;
 pub mod prove;
 pub mod pull;
 pub mod push;
+pub mod range_diff;
 pub mod rebase;
 pub mod ref_cmd;
 pub mod reflog;

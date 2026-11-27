@@ -16,6 +16,7 @@ pub mod graph;
 pub mod mailbox;
 pub mod merge;
 pub mod patch;
+pub mod range_diff;
 pub mod revert;
 pub mod similarity;
 
