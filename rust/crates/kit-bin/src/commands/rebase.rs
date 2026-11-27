@@ -11,6 +11,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
+use kit_core::ops::rebase::is_valid_exec_command;
 use kit_core::store::ObjectStore;
 use libkit::Observer;
 use libkit::rebase::{self, Editor, Event, Outcome, Request};
@@ -42,8 +43,8 @@ struct RebaseOpts {
     #[arg(long, conflicts_with_all = ["cont", "abort", "revisions", "onto"])]
     skip: bool,
     /// Edit the todo list in `$EDITOR` before replaying: reorder lines,
-    /// `drop` (or delete) lines, `reword`, or fold with `squash`/`fixup`.
-    /// (`edit` is not yet supported.)
+    /// `drop` (or delete) lines, `reword`, fold with `squash`/`fixup`, stop
+    /// to amend with `edit`, or run a command with `exec`.
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
     /// Resolve every content conflict to one side: `ours` (the base being
@@ -51,6 +52,11 @@ struct RebaseOpts {
     #[arg(short = 'X', long = "strategy-option",
           conflicts_with_all = ["cont", "abort", "skip"])]
     strategy_option: Option<String>,
+    /// Run a shell command after each replayed commit. A command that
+    /// fails stops the rebase; `--continue` goes on. Repeatable.
+    #[arg(short = 'x', long = "exec", value_name = "CMD",
+          conflicts_with_all = ["cont", "abort", "skip"])]
+    exec: Vec<String>,
     /// Emit a machine-readable JSON result object to stdout describing
     /// the outcome: a finished rebase, a conflict pause
     /// (`"conflicts":[<path>,...]`), or an error. Best-effort on the
@@ -114,7 +120,11 @@ const USAGE: &str = "usage: kit rebase [-i] <revspec> | kit rebase [-i] --onto <
 
 /// The request that the arguments describe, or `None` when they do not fit
 /// one of the forms of [`USAGE`].
-fn request(opts: &RebaseOpts, favor: libkit::merge::Favor) -> Option<Request<'_>> {
+fn request<'a>(
+    opts: &'a RebaseOpts,
+    favor: libkit::merge::Favor,
+    exec: &'a [String],
+) -> Option<Request<'a>> {
     let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
         (None, [onto]) => (onto.as_str(), None, None),
         (Some(onto), [upstream]) => (onto, Some(upstream.as_str()), None),
@@ -127,6 +137,7 @@ fn request(opts: &RebaseOpts, favor: libkit::merge::Favor) -> Option<Request<'_>
         branch,
         interactive: opts.interactive,
         favor,
+        exec,
     })
 }
 
@@ -137,6 +148,13 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, RebaseFormat::Json);
+    let exec: Vec<String> = opts.exec.iter().map(|c| c.trim().to_owned()).collect();
+    if let Some(bad) = exec.iter().find(|c| !is_valid_exec_command(c)) {
+        return super::usage_error(&format!(
+            "--exec takes one non-empty line: '{}'",
+            kit_core::protocol::escape_terminal_text(bad, false)
+        ));
+    }
     let favor = match super::strategy_option(opts.strategy_option.as_deref()) {
         Ok(favor) => favor,
         Err(code) => return code,
@@ -169,7 +187,7 @@ pub fn run(args: &[String]) -> u8 {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
         rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
-    } else if let Some(request) = request(&opts, favor) {
+    } else if let Some(request) = request(&opts, favor, &exec) {
         rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
         return super::usage_error(USAGE);
@@ -195,6 +213,7 @@ pub(super) fn rebase_onto(
         branch: None,
         interactive: false,
         favor,
+        exec: &[],
     };
     let signing = super::signing::Configured;
     match rebase::start(
@@ -210,6 +229,7 @@ pub(super) fn rebase_onto(
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm of the report for each outcome
 pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
     match outcome {
         Outcome::UpToDate { branch, head } => {
@@ -287,6 +307,52 @@ pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
                 let _ = writeln!(stdout, "{}", obj.finish());
             }
             exit::OK
+        }
+        Outcome::Stopped { commit } => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(stderr, "Stopped at {}", format::short_hash(commit, 8));
+            let _ = writeln!(
+                stderr,
+                "You can amend the commit now, with\n\n  kit commit --amend\n\n\
+                 Once you are satisfied with your changes, run\n\n  kit rebase --continue"
+            );
+            drop(stderr);
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", true)
+                    .field_str("kind", "stopped")
+                    .field_hash("commit", commit);
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{}", obj.finish());
+            }
+            exit::OK
+        }
+        Outcome::ExecFailed { command, status } => {
+            let shown = kit_core::protocol::escape_terminal_text(command, false);
+            let mut stderr = std::io::stderr().lock();
+            let _ = match status {
+                Some(code) => writeln!(stderr, "warning: execution failed: {shown} (exit {code})"),
+                None => writeln!(stderr, "warning: execution failed: {shown}"),
+            };
+            let _ = writeln!(
+                stderr,
+                "You can fix the problem, and then run\n\n  kit rebase --continue"
+            );
+            drop(stderr);
+            if json {
+                let mut obj = JsonObject::new();
+                obj.field_bool("ok", false)
+                    .field_str("kind", "exec-failed")
+                    .field_str("command", command);
+                match status {
+                    Some(code) => obj.field_raw("status", &code.to_string()),
+                    None => obj.field_raw("status", "null"),
+                };
+                obj.field_str("error", "rebase stopped: exec command failed");
+                let mut stdout = std::io::stdout().lock();
+                let _ = writeln!(stdout, "{}", obj.finish());
+            }
+            exit::GENERAL_ERROR
         }
         _ => exit::OK,
     }

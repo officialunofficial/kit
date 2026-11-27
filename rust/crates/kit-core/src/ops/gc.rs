@@ -2011,6 +2011,7 @@ mod tests {
             &md,
             &rebase::RebaseState {
                 favor: crate::ops::merge::Favor::None,
+                exec: Vec::new(),
                 head_name: "main".to_owned(),
                 orig_head: kept,
                 onto: kept,
@@ -2191,6 +2192,7 @@ mod tests {
                 md,
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
+                    exec: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: kept,
@@ -2206,6 +2208,7 @@ mod tests {
                 md,
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
+                    exec: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: gone,
@@ -2221,6 +2224,7 @@ mod tests {
                 md,
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
+                    exec: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: gone,
                     onto: kept,

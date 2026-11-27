@@ -7,8 +7,12 @@
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started
 //! - `onto`       : 64-hex BLAKE3 of the rebase target
 //! - `todo`       : newline-separated list of remaining commits
-//! - `actions`    : newline-separated per-commit action parallel to `todo`
-//!   (`pick`/`reword`/`squash`/`fixup`); it has exactly one line per `todo` line
+//! - `actions`    : the steps that remain, one per line. `pick`, `reword`,
+//!   `squash`, `fixup` and `edit` each take the next commit of `todo`;
+//!   `exec <command>` takes none. A plan with only the first four keywords
+//!   is written as them alone, one line per `todo` line. Any other plan
+//!   starts with the line `kit-rebase-actions 2`, which a reader that knows
+//!   only the four keywords refuses as malformed state
 //! - `done`       : newline-separated list of replayed commits
 //! - `strategy-option` : `ours` or `theirs`, the side every replayed
 //!   commit's conflicts resolve to; absent when conflicts stop the rebase
@@ -43,6 +47,8 @@ const ONTO_FILE: &str = "onto";
 const TODO_FILE: &str = "todo";
 const DONE_FILE: &str = "done";
 const ACTIONS_FILE: &str = "actions";
+/// The first line of an `actions` file that holds an `edit` or `exec` step.
+const ACTIONS_V2_HEADER: &str = "kit-rebase-actions 2";
 const STRATEGY_OPTION_FILE: &str = "strategy-option";
 const MAX_STRATEGY_OPTION_BYTES: u64 = 64;
 
@@ -110,6 +116,12 @@ pub enum RebaseAction {
     /// Fold the commit into the previous one, discarding this commit's
     /// message (the previous message is kept).
     Fixup,
+    /// Replay the commit, then stop so the user can amend it or add
+    /// commits.
+    Edit,
+    /// Run a shell command. It takes no commit; its command is the next
+    /// entry of [`RebaseState::exec`].
+    Exec,
 }
 
 impl RebaseAction {
@@ -121,7 +133,16 @@ impl RebaseAction {
             RebaseAction::Reword => "reword",
             RebaseAction::Squash => "squash",
             RebaseAction::Fixup => "fixup",
+            RebaseAction::Edit => "edit",
+            RebaseAction::Exec => "exec",
         }
+    }
+
+    /// `true` for every action but [`RebaseAction::Exec`]: the action
+    /// replays the next commit of the todo list.
+    #[must_use]
+    pub fn takes_commit(self) -> bool {
+        self != RebaseAction::Exec
     }
 
     /// `true` for actions that fold into the previous commit rather than
@@ -131,7 +152,8 @@ impl RebaseAction {
         matches!(self, RebaseAction::Squash | RebaseAction::Fixup)
     }
 
-    /// Parse an action from its persisted keyword.
+    /// Parse an action that takes a commit from its persisted keyword.
+    /// `exec` carries a command and is not a bare keyword.
     #[must_use]
     pub fn from_keyword(s: &str) -> Option<Self> {
         match s {
@@ -139,9 +161,18 @@ impl RebaseAction {
             "reword" => Some(RebaseAction::Reword),
             "squash" => Some(RebaseAction::Squash),
             "fixup" => Some(RebaseAction::Fixup),
+            "edit" => Some(RebaseAction::Edit),
             _ => None,
         }
     }
+}
+
+/// Whether `command` can be an `exec` step: not empty, with no leading or
+/// trailing whitespace, and no line break or NUL, so it fits on one line of
+/// the todo list and of the state.
+#[must_use]
+pub fn is_valid_exec_command(command: &str) -> bool {
+    !command.is_empty() && command.trim() == command && !command.contains(['\n', '\r', '\0'])
 }
 
 /// Persisted rebase state.
@@ -155,9 +186,13 @@ pub struct RebaseState {
     pub onto: Hash,
     /// Remaining commits to replay (oldest-first).
     pub todo: Vec<Hash>,
-    /// Per-commit action, parallel to `todo` (same length). For a
-    /// non-interactive rebase every entry is [`RebaseAction::Pick`].
+    /// The steps that remain, in order. Each action but
+    /// [`RebaseAction::Exec`] takes the next commit of `todo`, so `todo` has
+    /// one commit for each of them. A rebase without `-i` or `--exec` has
+    /// only [`RebaseAction::Pick`].
     pub actions: Vec<RebaseAction>,
+    /// The command of each [`RebaseAction::Exec`] in `actions`, in order.
+    pub exec: Vec<String>,
     /// Commits already replayed.
     pub done: Vec<Hash>,
     /// The side the conflicts of every replayed commit resolve to.
@@ -165,21 +200,36 @@ pub struct RebaseState {
 }
 
 impl RebaseState {
-    /// The action for the commit at the front of `todo` (defaults to
-    /// `Pick` if the parallel actions list is somehow short).
+    /// The next step (defaults to `Pick` if the actions list is somehow
+    /// short).
     #[must_use]
     pub fn front_action(&self) -> RebaseAction {
         self.actions.first().copied().unwrap_or(RebaseAction::Pick)
     }
 
-    /// Drop the front `todo` commit and its parallel action together, so
-    /// the two lists stay aligned as commits are consumed.
-    pub fn consume_front(&mut self) {
-        if !self.todo.is_empty() {
-            self.todo.remove(0);
+    /// The command of the next step when it is an `exec`.
+    #[must_use]
+    pub fn front_exec(&self) -> Option<&str> {
+        if self.actions.first() == Some(&RebaseAction::Exec) {
+            self.exec.first().map(String::as_str)
+        } else {
+            None
         }
+    }
+
+    /// Drop the next step with its commit or its command, so the lists stay
+    /// aligned as steps are consumed.
+    pub fn consume_front(&mut self) {
+        let takes_commit = self.front_action().takes_commit();
         if !self.actions.is_empty() {
             self.actions.remove(0);
+        }
+        if takes_commit {
+            if !self.todo.is_empty() {
+                self.todo.remove(0);
+            }
+        } else if !self.exec.is_empty() {
+            self.exec.remove(0);
         }
     }
 }
@@ -215,7 +265,7 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
     let done = read_hash_list(&dir.join(DONE_FILE))?;
     // The actions file is parallel to todo. A missing file or a length
     // mismatch is corrupt state.
-    let actions = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
+    let (actions, exec) = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
     let favor = read_favor(&dir.join(STRATEGY_OPTION_FILE))?;
 
     Ok(RebaseState {
@@ -224,6 +274,7 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
         onto,
         todo,
         actions,
+        exec,
         done,
         favor,
     })
@@ -256,7 +307,7 @@ pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()>
             with_newline(hash::to_hex(&state.onto).as_bytes()),
         ),
         (TODO_FILE, hash_list_bytes(&state.todo)),
-        (ACTIONS_FILE, actions_bytes(&state.actions)),
+        (ACTIONS_FILE, actions_bytes(&state.actions, &state.exec)),
         (DONE_FILE, hash_list_bytes(&state.done)),
     ];
     let option = state
@@ -413,7 +464,10 @@ fn read_hash_list(path: &Path) -> RebaseResult<Vec<Hash>> {
 
 /// Read the parallel-to-todo action list. The list must have exactly
 /// `todo_len` entries, so the two lists can never desync.
-fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>> {
+/// Read the `actions` file: the steps and the commands of the `exec` steps.
+/// A file without the version line holds only the four keywords of the
+/// first format. The steps that take a commit must number `todo_len`.
+fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<(Vec<RebaseAction>, Vec<String>)> {
     let raw = match read_text_capped(path, MAX_HASH_LIST_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -421,28 +475,66 @@ fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Vec<RebaseAction>>
         }
         Err(e) => return Err(RebaseError::Io(e)),
     };
-    let mut out = Vec::with_capacity(todo_len);
-    for line in trim_trailing(&raw).split('\n') {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let action = RebaseAction::from_keyword(line).ok_or(RebaseError::InvalidRebaseState)?;
-        out.push(action);
-    }
-    if out.len() != todo_len {
-        return Err(RebaseError::InvalidRebaseState);
-    }
-    Ok(out)
+    parse_actions(&raw, todo_len).ok_or(RebaseError::InvalidRebaseState)
 }
 
-fn actions_bytes(actions: &[RebaseAction]) -> Vec<u8> {
+/// The parser of [`read_actions`]. `None` for malformed text.
+fn parse_actions(raw: &str, todo_len: usize) -> Option<(Vec<RebaseAction>, Vec<String>)> {
+    let text = trim_trailing(raw);
+    let mut actions = Vec::with_capacity(todo_len);
+    let mut exec = Vec::new();
+    if let Some(body) = text
+        .strip_prefix(ACTIONS_V2_HEADER)
+        .and_then(|rest| rest.strip_prefix('\n').or(rest.is_empty().then_some("")))
+    {
+        for line in body.split('\n').filter(|l| !l.is_empty()) {
+            if let Some(command) = line.strip_prefix("exec ") {
+                if !is_valid_exec_command(command) {
+                    return None;
+                }
+                actions.push(RebaseAction::Exec);
+                exec.push(command.to_owned());
+            } else {
+                actions.push(RebaseAction::from_keyword(line)?);
+            }
+        }
+    } else {
+        for line in text.split('\n') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match RebaseAction::from_keyword(line)? {
+                RebaseAction::Edit | RebaseAction::Exec => return None,
+                action => actions.push(action),
+            }
+        }
+    }
+    let commits = actions.iter().filter(|a| a.takes_commit()).count();
+    (commits == todo_len).then_some((actions, exec))
+}
+
+/// The `actions` file for `actions` and the commands of their `exec` steps.
+/// A plan of the four first keywords keeps the first format.
+fn actions_bytes(actions: &[RebaseAction], exec: &[String]) -> Vec<u8> {
+    let first_format = actions
+        .iter()
+        .all(|a| !matches!(a, RebaseAction::Edit | RebaseAction::Exec));
     if actions.is_empty() {
         return b"\n".to_vec();
     }
     let mut buf = String::with_capacity(actions.len() * 8);
+    if !first_format {
+        buf.push_str(ACTIONS_V2_HEADER);
+        buf.push('\n');
+    }
+    let mut commands = exec.iter();
     for a in actions {
         buf.push_str(a.keyword());
+        if *a == RebaseAction::Exec {
+            buf.push(' ');
+            buf.push_str(commands.next().map_or("", String::as_str));
+        }
         buf.push('\n');
     }
     buf.into_bytes()
@@ -662,6 +754,7 @@ mod tests {
 
         let state = RebaseState {
             favor: Favor::None,
+            exec: Vec::new(),
             head_name: "feature-branch".to_string(),
             orig_head: hash::hash(b"orig-head"),
             onto: hash::hash(b"onto"),
@@ -692,6 +785,7 @@ mod tests {
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
         let state = RebaseState {
             favor: Favor::None,
+            exec: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -716,6 +810,7 @@ mod tests {
     fn sample_state(todo: &[&[u8]]) -> RebaseState {
         RebaseState {
             favor: Favor::None,
+            exec: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -723,6 +818,83 @@ mod tests {
             actions: vec![RebaseAction::Pick; todo.len()],
             done: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_first_actions_format_reads_as_before() {
+        use RebaseAction::{Fixup, Pick, Reword, Squash};
+        for (text, want, written) in [
+            ("\n", vec![], "\n"),
+            ("pick\n", vec![Pick], "pick\n"),
+            (
+                "pick\nreword\nsquash\nfixup\n",
+                vec![Pick, Reword, Squash, Fixup],
+                "pick\nreword\nsquash\nfixup\n",
+            ),
+            ("pick\n\n  reword \n", vec![Pick, Reword], "pick\nreword\n"),
+        ] {
+            let (actions, exec) = parse_actions(text, want.len()).unwrap();
+            assert_eq!(actions, want, "{text:?}");
+            assert!(exec.is_empty());
+            assert_eq!(
+                actions_bytes(&actions, &exec),
+                written.as_bytes(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_versioned_actions_format_round_trips() {
+        use RebaseAction::{Edit, Exec, Pick};
+        let text = "kit-rebase-actions 2\npick\nexec make test\nedit\nexec true\n";
+        let (actions, exec) = parse_actions(text, 2).unwrap();
+        assert_eq!(actions, [Pick, Exec, Edit, Exec]);
+        assert_eq!(exec, ["make test", "true"]);
+        assert_eq!(actions_bytes(&actions, &exec), text.as_bytes());
+        let header_only = "kit-rebase-actions 2\n";
+        assert_eq!(parse_actions(header_only, 0), Some((vec![], vec![])));
+    }
+
+    #[test]
+    fn malformed_actions_are_refused() {
+        for (text, todo_len) in [
+            ("edit\n", 1),
+            ("exec true\n", 0),
+            ("pick\n", 2),
+            ("kit-rebase-actions 3\npick\n", 1),
+            ("kit-rebase-actions 2\nexec\n", 0),
+            ("kit-rebase-actions 2\nexec  true\n", 0),
+            ("kit-rebase-actions 2\nexec true\0\n", 0),
+            ("kit-rebase-actions 2\nedit\n", 0),
+            ("kit-rebase-actions 2\ndrop\n", 1),
+            ("kit-rebase-actions 2pick\n", 1),
+        ] {
+            assert_eq!(parse_actions(text, todo_len), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn consuming_steps_keeps_the_commits_and_commands_aligned() {
+        let mut state = sample_state(&[b"a", b"b"]);
+        state.actions = vec![
+            RebaseAction::Pick,
+            RebaseAction::Exec,
+            RebaseAction::Edit,
+            RebaseAction::Exec,
+        ];
+        state.exec = vec!["one".to_owned(), "two".to_owned()];
+        state.consume_front();
+        assert_eq!(state.front_exec(), Some("one"));
+        assert_eq!(state.todo, [hash::hash(b"b")]);
+        state.consume_front();
+        assert_eq!(state.front_action(), RebaseAction::Edit);
+        assert_eq!(state.front_exec(), None);
+        state.consume_front();
+        assert!(state.todo.is_empty());
+        assert_eq!(state.front_exec(), Some("two"));
+        state.consume_front();
+        assert!(state.actions.is_empty() && state.exec.is_empty());
     }
 
     #[test]
@@ -882,6 +1054,7 @@ mod tests {
     fn consume_front_keeps_todo_and_actions_aligned() {
         let mut state = RebaseState {
             favor: Favor::None,
+            exec: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -904,6 +1077,7 @@ mod tests {
 
         let state = RebaseState {
             favor: Favor::None,
+            exec: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),

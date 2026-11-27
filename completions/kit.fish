@@ -276,6 +276,8 @@ complete -c kit -n "__fish_seen_subcommand_from rebase" \
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l onto -d "Replay onto this revision" -r
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l exec -s x -d "Run a shell command after each replayed commit" -r
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l skip -d "Skip the current commit"

@@ -1038,7 +1038,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Oo Fl X Ar option Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
 With
@@ -1070,7 +1070,23 @@ previous one with
 cannot be the first line and is rejected before any mutation. Removing every
 line resets the branch to the base.
 .Cm edit
-(stop-to-amend) is not yet supported.
+replays the commit and stops: amend it with
+.Cm kit commit Fl Fl amend
+or add commits, then run
+.Cm kit rebase Fl Fl continue .
+.Cm exec Ar command
+runs the rest of the line with
+.Ql sh -c
+in the worktree root, its output on standard error; a command that fails
+stops the rebase after its line, and
+.Fl Fl continue
+goes on.
+.Fl x Ar cmd
+.Pq Fl Fl exec
+adds an
+.Cm exec Ar cmd
+line after each commit of the plan, or after the last commit of a squash or
+fixup chain; it may repeat.
 .Fl X Cm ours
 and
 .Fl X Cm theirs

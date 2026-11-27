@@ -419,6 +419,7 @@ _kit() {
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
                         '--onto[replay onto this revision instead of the upstream]:newbase:' \
+                        '*'{-x,--exec}'[run a shell command after each replayed commit]:command:' \
                         '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--continue[continue after conflict resolution]' \
                         '--skip[skip the current commit]' \

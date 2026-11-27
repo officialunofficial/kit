@@ -3036,8 +3036,9 @@ pub fn identity_parse_one_iteration(input: &[u8]) {
 
 /// The todo list of an interactive rebase (`rebase_todo_parse`):
 /// `rebase::parse_todo` never panics on any text. It gives the same answer
-/// twice. A result has one action for each commit, names only commits of the
-/// candidate list, and never starts with a squash or a fixup. A line with a
+/// twice. A result has one commit for each step but `exec` and one command
+/// for each `exec`, names only commits of the candidate list, never folds its
+/// first commit, and holds only commands that fit on one line. A line with a
 /// verb and the hash of a candidate reads as that candidate. The first byte
 /// sets the count of candidates, from one to eight. The rest is the text.
 pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
@@ -3058,24 +3059,48 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
         parse_todo(&candidates, text),
         "a todo list reads the same twice"
     );
-    if let Ok((todo, actions)) = first {
-        assert_eq!(todo.len(), actions.len(), "one action for each commit");
+    if let Ok(plan) = first {
+        let commits = plan.actions.iter().filter(|a| a.takes_commit()).count();
+        assert_eq!(
+            plan.todo.len(),
+            commits,
+            "one commit for each step but exec"
+        );
+        assert_eq!(
+            plan.exec.len(),
+            plan.actions.len() - commits,
+            "one command for each exec"
+        );
         assert!(
-            todo.iter().all(|h| candidates.contains(h)),
+            plan.todo.iter().all(|h| candidates.contains(h)),
             "a todo names only candidates"
         );
         assert!(
-            actions.first().is_none_or(|a| !a.folds_into_previous()),
-            "a fold is never first"
+            plan.actions
+                .iter()
+                .find(|a| a.takes_commit())
+                .is_none_or(|a| !a.folds_into_previous()),
+            "a fold is never the first commit"
         );
-        assert!(actions.iter().all(|a| matches!(
+        assert!(
+            plan.exec
+                .iter()
+                .all(|c| kit_core::ops::rebase::is_valid_exec_command(c)),
+            "an exec command fits on one line"
+        );
+        assert!(plan.actions.iter().all(|a| matches!(
             a,
-            RebaseAction::Pick | RebaseAction::Reword | RebaseAction::Squash | RebaseAction::Fixup
+            RebaseAction::Pick
+                | RebaseAction::Reword
+                | RebaseAction::Squash
+                | RebaseAction::Fixup
+                | RebaseAction::Edit
+                | RebaseAction::Exec
         )));
     }
     let line = format!("pick {}\n", kit_core::hash::to_hex(&candidates[0]));
     assert_eq!(
-        parse_todo(&candidates, &line).map(|(todo, _)| todo),
+        parse_todo(&candidates, &line).map(|plan| plan.todo),
         Ok(vec![candidates[0]]),
         "a full hash names its candidate"
     );

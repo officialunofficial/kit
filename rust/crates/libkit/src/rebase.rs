@@ -32,7 +32,7 @@ use kit_core::ops::merge::Favor;
 pub use kit_core::ops::rebase::RebaseAction;
 use kit_core::ops::rebase::{
     RebaseError, RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress,
-    read_state, rebase_dir_path, write_state,
+    is_valid_exec_command, read_state, rebase_dir_path, write_state,
 };
 use kit_core::ops::recovery::{self, RecoveryEntry, RecoveryError};
 use kit_core::protocol::escape_terminal_text;
@@ -61,12 +61,9 @@ pub enum TodoError {
     /// The text is longer than [`MAX_TODO_BYTES`].
     #[error("todo list is longer than {MAX_TODO_BYTES} bytes")]
     TooLong,
-    /// The `edit` command stops to amend a commit. A rebase does not support
-    /// it.
-    #[error(
-        "'edit' (stop to amend) is not yet supported; use pick, reword, squash, fixup, or drop"
-    )]
-    EditUnsupported,
+    /// An `exec` line has no command.
+    #[error("missing command on todo line: '{0}'")]
+    MissingCommand(String),
     /// A line starts with a word that is no command.
     #[error("unknown rebase command '{0}'")]
     UnknownCommand(String),
@@ -99,6 +96,10 @@ pub enum Error {
     /// No rebase is in progress.
     #[error("no rebase in progress")]
     NoRebaseInProgress,
+    /// An `--exec` command is empty, spans lines or has surrounding
+    /// whitespace.
+    #[error("exec command must be one non-empty line: '{0}'")]
+    BadExecCommand(String),
     /// The branch to rebase does not exist.
     #[error("no such branch: {0}")]
     NoSuchBranch(String),
@@ -267,6 +268,21 @@ pub struct Request<'a> {
     /// `-X ours` and `-X theirs`. As in git, ours is the base being rebased
     /// onto and theirs the replayed commit. A paused rebase keeps it.
     pub favor: Favor,
+    /// Commands to run after each replayed commit, or after the last commit
+    /// of a squash or fixup chain, as `--exec` does. Each is one line, with
+    /// no leading or trailing whitespace.
+    pub exec: &'a [String],
+}
+
+/// The steps of a rebase, as [`parse_todo`] reads them from a todo list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// The commits to replay, in order: one for each step but `exec`.
+    pub todo: Vec<Hash>,
+    /// The steps, in order.
+    pub actions: Vec<RebaseAction>,
+    /// The command of each `exec` step, in order.
+    pub exec: Vec<String>,
 }
 
 /// How a rebase has ended or paused.
@@ -286,6 +302,20 @@ pub enum Outcome {
         replaying: Hash,
         /// One record for each conflicting path.
         conflicts: Vec<ConflictRecord>,
+    },
+    /// An `edit` step replayed its commit and stopped. The user amends it or
+    /// adds commits, then runs [`resume`].
+    Stopped {
+        /// The replayed commit, which `HEAD` names.
+        commit: Hash,
+    },
+    /// An `exec` command exited with a failure, or could not start. The
+    /// rebase stopped after its step; [`resume`] goes on with the next one.
+    ExecFailed {
+        /// The command.
+        command: String,
+        /// Its exit code, or `None` when it did not exit with one.
+        status: Option<i32>,
     },
     /// Every commit is replayed and the branch is at the new tip.
     Finished {
@@ -350,6 +380,9 @@ pub fn start(
     if let Some(op) = in_progress_op_name(layout) {
         return Err(Error::InProgress(op));
     }
+    if let Some(bad) = request.exec.iter().find(|c| !is_valid_exec_command(c)) {
+        return Err(Error::BadExecCommand(bad.clone()));
+    }
     let resolve = |spec: &str| {
         revspec::resolve_revision(store, layout, spec).map_err(|source| Error::NoSuchCommit {
             spec: spec.to_owned(),
@@ -393,22 +426,37 @@ pub fn start(
         });
     }
 
-    let (todo, actions) = if request.interactive {
+    let plan = if request.interactive {
         if candidates.is_empty() {
-            (Vec::new(), Vec::new())
+            Plan::default()
         } else {
-            edit_todo(store, &candidates, orig_head, stop, onto, editor)?
+            edit_todo(
+                store,
+                &candidates,
+                orig_head,
+                stop,
+                onto,
+                request.exec,
+                editor,
+            )?
         }
     } else {
-        let actions = vec![RebaseAction::Pick; candidates.len()];
-        (candidates, actions)
+        with_exec(
+            Plan {
+                actions: vec![RebaseAction::Pick; candidates.len()],
+                todo: candidates,
+                exec: Vec::new(),
+            },
+            request.exec,
+        )
     };
     let state = RebaseState {
         head_name,
         orig_head,
         onto,
-        todo,
-        actions,
+        todo: plan.todo,
+        actions: plan.actions,
+        exec: plan.exec,
         done: Vec::new(),
         favor: request.favor,
     };
@@ -450,6 +498,10 @@ pub fn resume(
     let records = conflict_state::read_conflicts(&rebase_dir).map_err(Error::ReadConflicts)?;
 
     if skip {
+        // An `edit` or `exec` stop has no paused commit to drop.
+        if records.is_empty() {
+            return Err(Error::NothingToSkip);
+        }
         skip_paused_commit(layout, store, &rebase_dir, &mut state, &records)?;
     } else if !records.is_empty() {
         commit_resolved_commit(
@@ -618,10 +670,35 @@ fn replay(
     };
     let rebase_dir = rebase_dir_path(layout);
 
-    while let Some(&target) = state.todo.first() {
+    while let Some(&action) = state.actions.first() {
         // A result tree from an earlier conflict is stale now. A later pause
         // must not make an abort or a skip read it.
         conflict_state::clear_result_tree(&rebase_dir);
+        if action == RebaseAction::Exec {
+            // The step is consumed and saved before the command runs, so a
+            // continue after a failure goes on with the next step.
+            let command = state.front_exec().unwrap_or_default().to_owned();
+            state.consume_front();
+            write_state(layout, &state).map_err(Error::PersistState)?;
+            match run_exec(layout, &command) {
+                Ok(status) if status.success() => continue,
+                Ok(status) => {
+                    return Ok(Outcome::ExecFailed {
+                        command,
+                        status: status.code(),
+                    });
+                }
+                Err(_) => {
+                    return Ok(Outcome::ExecFailed {
+                        command,
+                        status: None,
+                    });
+                }
+            }
+        }
+        let Some(&target) = state.todo.first() else {
+            return Err(Error::InconsistentState);
+        };
         // A squash or a fixup folds into a commit that this rebase applied.
         // A skip of a conflicting first pick can leave one as the first step.
         // `done` is empty while nothing is applied, so the check fails before
@@ -686,6 +763,9 @@ fn replay(
         state.done.push(target);
         state.consume_front();
         write_state(layout, &state).map_err(Error::PersistState)?;
+        if action == RebaseAction::Edit {
+            return Ok(Outcome::Stopped { commit: new_hash });
+        }
     }
 
     // `HEAD` is detached for the whole rebase, so it always has a commit
@@ -751,7 +831,8 @@ fn plan_step_commit(
     observer: &dyn Observer<Event>,
 ) -> Result<StepCommit, Error> {
     match action {
-        RebaseAction::Pick => {
+        RebaseAction::Exec => Err(Error::InconsistentState),
+        RebaseAction::Pick | RebaseAction::Edit => {
             let original = read_commit(store, target)?;
             Ok(StepCommit {
                 parent: head_hash,
@@ -887,9 +968,11 @@ fn edit_todo(
     orig_head: Hash,
     stop: Hash,
     onto: Hash,
+    exec: &[String],
     editor: &mut dyn Editor,
-) -> Result<(Vec<Hash>, Vec<RebaseAction>), Error> {
-    // One `pick` line for each candidate, the oldest first.
+) -> Result<Plan, Error> {
+    // One `pick` line for each candidate, the oldest first, each followed
+    // by the `--exec` commands.
     let mut template = String::new();
     for h in candidates {
         let _ = writeln!(
@@ -898,6 +981,9 @@ fn edit_todo(
             abbreviate(h),
             commit_subject(store, *h)
         );
+        for command in exec {
+            let _ = writeln!(template, "exec {command}");
+        }
     }
     let _ = write!(
         template,
@@ -909,10 +995,12 @@ fn edit_todo(
          #   r, reword <commit>  = use the commit, but edit its message\n\
          #   s, squash <commit>  = fold into the previous commit, combining messages\n\
          #   f, fixup  <commit>  = fold into the previous commit, discard this message\n\
+         #   e, edit   <commit>  = use the commit, then stop to amend it\n\
+         #   x, exec   <command> = run the command with sh; a failure stops the rebase\n\
          #   d, drop   <commit>  = remove the commit\n\
          #\n\
          # Reorder lines to reorder commits. Deleting a line drops that commit.\n\
-         # A squash/fixup cannot be the first line. 'edit' is not yet supported.\n\
+         # A squash/fixup cannot be the first line.\n\
          # Removing every line resets the branch to the base.\n",
         abbreviate(&stop),
         abbreviate(&orig_head),
@@ -930,24 +1018,21 @@ fn abbreviate(h: &Hash) -> String {
 /// each with its action.
 ///
 /// A line is a command and a commit. The command is `pick`, `reword`,
-/// `squash`, `fixup` or `drop`, or the first letter. The commit is a prefix of
-/// the hash of one of `candidates`. A blank line and a line that starts with
-/// `#` are ignored. A `drop` line must still name a commit, so a typo is
-/// caught.
+/// `squash`, `fixup`, `edit` or `drop`, or the first letter. The commit is a
+/// prefix of the hash of one of `candidates`. An `exec` or `x` line holds a
+/// shell command instead: the rest of the line. A blank line and a line that
+/// starts with `#` are ignored. A `drop` line must still name a commit, so a
+/// typo is caught.
 ///
 /// # Errors
-/// A [`TodoError`] for text longer than [`MAX_TODO_BYTES`], an unknown or
-/// unsupported command, a squash or fixup as the first line, and a missing,
-/// unknown or ambiguous commit.
-pub fn parse_todo(
-    candidates: &[Hash],
-    edited: &str,
-) -> Result<(Vec<Hash>, Vec<RebaseAction>), TodoError> {
+/// A [`TodoError`] for text longer than [`MAX_TODO_BYTES`], an unknown
+/// command, a squash or fixup as the first commit, an `exec` line with no
+/// command, and a missing, unknown or ambiguous commit.
+pub fn parse_todo(candidates: &[Hash], edited: &str) -> Result<Plan, TodoError> {
     if edited.len() > MAX_TODO_BYTES {
         return Err(TodoError::TooLong);
     }
-    let mut todo = Vec::new();
-    let mut actions = Vec::new();
+    let mut plan = Plan::default();
     for raw in edited.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -960,21 +1045,71 @@ pub fn parse_todo(
             "r" | "reword" => RebaseAction::Reword,
             "s" | "squash" => RebaseAction::Squash,
             "f" | "fixup" => RebaseAction::Fixup,
+            "e" | "edit" => RebaseAction::Edit,
+            "x" | "exec" => {
+                let command = line[verb.len()..].trim();
+                if command.is_empty() {
+                    return Err(TodoError::MissingCommand(line.to_owned()));
+                }
+                plan.actions.push(RebaseAction::Exec);
+                plan.exec.push(command.to_owned());
+                continue;
+            }
             "d" | "drop" => {
                 resolve_todo_hash(candidates, parts.next(), line)?;
                 continue;
             }
-            "e" | "edit" => return Err(TodoError::EditUnsupported),
             other => return Err(TodoError::UnknownCommand(other.to_owned())),
         };
         // A fold needs a commit before it.
-        if todo.is_empty() && action.folds_into_previous() {
+        if plan.todo.is_empty() && action.folds_into_previous() {
             return Err(TodoError::NothingToFoldInto(verb.to_owned()));
         }
-        todo.push(resolve_todo_hash(candidates, parts.next(), line)?);
-        actions.push(action);
+        plan.todo
+            .push(resolve_todo_hash(candidates, parts.next(), line)?);
+        plan.actions.push(action);
     }
-    Ok((todo, actions))
+    Ok(plan)
+}
+
+/// Add an `exec` step for each of `commands` after each commit of `plan`
+/// that a squash or a fixup does not fold into the next.
+fn with_exec(plan: Plan, commands: &[String]) -> Plan {
+    if commands.is_empty() {
+        return plan;
+    }
+    let mut out = Plan {
+        todo: plan.todo,
+        ..Plan::default()
+    };
+    let mut existing = plan.exec.into_iter();
+    for (i, &action) in plan.actions.iter().enumerate() {
+        out.actions.push(action);
+        if action == RebaseAction::Exec {
+            out.exec.extend(existing.next());
+            continue;
+        }
+        let next = plan.actions[i + 1..].iter().find(|a| a.takes_commit());
+        if !next.is_some_and(|a| a.folds_into_previous()) {
+            for command in commands {
+                out.actions.push(RebaseAction::Exec);
+                out.exec.push(command.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Run an `exec` command with `sh -c` in the worktree root. Its output goes
+/// to standard error, so standard output keeps only the report of the
+/// rebase.
+fn run_exec(layout: &RepoLayout, command: &str) -> io::Result<std::process::ExitStatus> {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(layout.worktree_root())
+        .stdout(std::process::Stdio::from(io::stderr()))
+        .status()
 }
 
 /// Find the candidate that `token` names, by a full hash or an unambiguous

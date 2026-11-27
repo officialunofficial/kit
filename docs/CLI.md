@@ -1120,7 +1120,8 @@ Branches / refs:
   changed files that the next commit would overwrite stop the continue,
   so commit them first. After a conflict on an `edit` line, `--continue`
   commits the resolution and goes on without a second stop. `exec`/`x
-  <command>` runs the rest of the line with `sh -c` in the worktree root.
+  <command>` runs the rest of the line with `sh -c` in the worktree root,
+  with its output on standard error.
   A command that exits non-zero, or that cannot start, stops the rebase
   after its line with exit 1; `--continue` goes on with the next line.
   `--skip` at an `edit` or `exec` stop is an error, since no commit is

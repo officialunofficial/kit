@@ -159,7 +159,7 @@ fn rebase_exit_code(error: &rebase::Error) -> u8 {
         rebase::Error::Signing(inner) => signing_exit_code(inner),
         // The todo list contradicts the rules of the command, or a step
         // needs the default editor and there is no terminal for it.
-        rebase::Error::Todo(_) => exit::USAGE,
+        rebase::Error::Todo(_) | rebase::Error::BadExecCommand(_) => exit::USAGE,
         rebase::Error::Editor(e) if crate::editor::is_no_terminal(e) => exit::USAGE,
         // An object of the wrong kind, a commit that cannot be encoded, or
         // a `HEAD` that the rebase lost.
@@ -1020,7 +1020,7 @@ mod tests {
                 exit::CONFIG_ERROR,
             ),
             (
-                rebase::Error::Todo(TodoError::EditUnsupported).into(),
+                rebase::Error::Todo(TodoError::MissingCommand("exec".to_owned())).into(),
                 exit::USAGE,
             ),
             (rebase::Error::HeadMissingAtFinish.into(), exit::DATAERR),
