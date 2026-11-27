@@ -1113,6 +1113,7 @@ struct FailingPack<'a> {
     inner: TransportSource<'a>,
     downloads: Cell<usize>,
     fail_at: usize,
+    error: fn() -> kit_sync::SourceError,
 }
 
 impl RemoteSource for FailingPack<'_> {
@@ -1140,7 +1141,7 @@ impl RemoteSource for FailingPack<'_> {
     ) -> Result<(), kit_sync::SourceError> {
         self.downloads.set(self.downloads.get() + 1);
         if self.downloads.get() == self.fail_at {
-            return Err(kit_sync::SourceError::ConnectionFailed);
+            return Err((self.error)());
         }
         self.inner.download_pack(key, ref_name, sink)
     }
@@ -1163,6 +1164,7 @@ fn a_failed_download_keeps_the_applied_packs_recorded() {
         inner: remote.source(),
         downloads: Cell::new(0),
         fail_at: 2,
+        error: || kit_sync::SourceError::ConnectionFailed,
     };
 
     let err = fetch(
@@ -1198,6 +1200,101 @@ fn a_failed_download_keeps_the_applied_packs_recorded() {
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(fourth)
+    );
+}
+
+#[test]
+fn a_withheld_refusal_keeps_the_fetch_boundary_and_shows_one_line() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let fourth = remote.publish(Some(third), &[("a.txt", b"four\n")], true);
+    let layout = RepoLayout::single(&target);
+    let failing = FailingPack {
+        inner: remote.source(),
+        downloads: Cell::new(0),
+        fail_at: 2,
+        error: || kit_sync::SourceError::ContentWithheld {
+            ref_name: "refs/kit/packmap/main".into(),
+        },
+    };
+
+    let err = fetch(
+        &target,
+        &failing,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    let SyncError::Source(source) = err else {
+        panic!("refusal flattened: {err:?}")
+    };
+    assert_eq!(source.to_string(), "Part of this Kit is withheld.");
+    assert_eq!(source.class(), kit_sync::FailureClass::Refusal);
+    assert!(matches!(
+        &source,
+        kit_sync::SourceError::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
+    ));
+    // The refused ref stays unpublished.
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    // The pack that applied before the refusal stays recorded.
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.packs_already_applied, 2);
+    assert_eq!(report.packs_downloaded, 2);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(fourth)
+    );
+}
+
+#[test]
+fn a_withheld_refusal_on_clone_publishes_nothing() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let failing = FailingPack {
+        inner: remote.source(),
+        downloads: Cell::new(0),
+        fail_at: 1,
+        error: || kit_sync::SourceError::ContentWithheld {
+            ref_name: "refs/kit/packmap/main".into(),
+        },
+    };
+
+    let err = clone(
+        &target,
+        &failing,
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("Part of this Kit is withheld."),
+        "{err}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        None
     );
 }
 

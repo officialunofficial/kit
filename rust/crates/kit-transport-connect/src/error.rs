@@ -32,9 +32,9 @@ use buffa::Message as _;
 use connectrpc::{ConnectError, ErrorCode};
 use kit_core::protocol::{AdmissionChallengeEntry, AdmissionRequired, TransportError};
 
-use crate::proto::kit::transport::v1::AdmissionChallenge;
 #[cfg(test)]
 use crate::proto::kit::transport::v1::PendingVerification;
+use crate::proto::kit::transport::v1::{AdmissionChallenge, ContentWithheld};
 use crate::status::STATUS_MARKER;
 
 // Known gap: use kit_core::admission bounds once the server admission bundle lands.
@@ -44,6 +44,7 @@ const MAX_VALUE: usize = 8_192;
 const MAX_DESCRIPTION: usize = 512;
 const MAX_DETAIL_BASE64: usize = 88_836;
 const CHALLENGE_TYPE: &str = <AdmissionChallenge as buffa::MessageName>::FULL_NAME;
+const WITHHELD_TYPE: &str = <ContentWithheld as buffa::MessageName>::FULL_NAME;
 
 fn visible_header_values(
     err: &ConnectError,
@@ -135,6 +136,37 @@ fn admission_required(err: &ConnectError) -> Option<Result<AdmissionRequired, Tr
             visible_header_values(err, "admission-required")?,
         ))
     })())
+}
+
+/// The ref named by a `permission_denied` answer that carries exactly one
+/// valid `ContentWithheld` detail. A missing, malformed, oversized or
+/// repeated detail keeps the plain `AccessDenied` answer.
+fn content_withheld(err: &ConnectError) -> Option<String> {
+    if err.code != ErrorCode::PermissionDenied {
+        return None;
+    }
+    let mut details = err.details.iter().filter(|detail| {
+        detail
+            .type_url
+            .strip_prefix("type.googleapis.com/")
+            .unwrap_or(&detail.type_url)
+            == WITHHELD_TYPE
+    });
+    let detail = details.next()?;
+    if details.next().is_some() {
+        return None;
+    }
+    let encoded = detail.value.as_deref().unwrap_or("");
+    if encoded.len() > MAX_DETAIL_BASE64 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(encoded)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))
+        .ok()?;
+    let decoded = ContentWithheld::decode_from_slice(&bytes).ok()?;
+    let ref_name = decoded.ref_name.unwrap_or_default();
+    (ref_name.len() <= kit_core::refs::MAX_REF_NAME_BYTES).then_some(ref_name)
 }
 
 /// Recognise only a typed `AdvanceRefs` unavailable response. Malformed
@@ -229,6 +261,9 @@ pub(crate) fn map_connect_error(err: ConnectError, ctx: ErrorContext) -> Transpo
             Ok(required) => TransportError::AdmissionRequired(Box::new(required)),
             Err(error) => error,
         };
+    }
+    if let Some(ref_name) = content_withheld(&err) {
+        return TransportError::ContentWithheld { ref_name };
     }
     let message = || err.message.clone().unwrap_or_default();
     match err.code {
@@ -581,6 +616,84 @@ mod tests {
         let mut prefixed = pending_error(None);
         prefixed.details[0].type_url = PendingVerification::TYPE_URL.to_owned();
         assert!(pending_verification_delay(&prefixed).is_some());
+    }
+
+    fn withheld_error(ref_name: &str) -> ConnectError {
+        ConnectError::permission_denied("never display this secret").with_detail(
+            ErrorDetail::from_message(
+                WITHHELD_TYPE,
+                &ContentWithheld {
+                    ref_name: Some(ref_name.into()),
+                    ..Default::default()
+                },
+            ),
+        )
+    }
+
+    #[test]
+    fn a_withheld_detail_maps_to_a_typed_permanent_refusal() {
+        let error = map_connect_error(withheld_error("refs/kit/packmap/main"), ErrorContext::Ref);
+        assert!(matches!(
+            &error,
+            TransportError::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
+        ));
+        assert_eq!(error.to_string(), "Part of this Kit is withheld.");
+        assert!(!kit_core::protocol::is_retryable(&error));
+        // The `type.googleapis.com/` prefix is accepted too.
+        let mut prefixed = withheld_error("refs/heads/main");
+        prefixed.details[0].type_url = format!("type.googleapis.com/{WITHHELD_TYPE}");
+        assert!(matches!(
+            map_connect_error(prefixed, ErrorContext::Ref),
+            TransportError::ContentWithheld { .. }
+        ));
+    }
+
+    #[test]
+    fn a_withheld_detail_that_is_not_one_valid_detail_stays_access_denied() {
+        let denied = |error: ConnectError| map_connect_error(error, ErrorContext::Ref);
+        // An old-style refusal with no detail.
+        assert!(matches!(
+            denied(ConnectError::permission_denied("no")),
+            TransportError::AccessDenied
+        ));
+        // Two details.
+        let mut two = withheld_error("refs/heads/main");
+        two.details.push(two.details[0].clone());
+        assert!(matches!(denied(two), TransportError::AccessDenied));
+        // Malformed base64, malformed protobuf, an oversized value and an
+        // oversized ref name.
+        let mut malformed = withheld_error("refs/heads/main");
+        malformed.details[0].value = Some("%%%".into());
+        assert!(matches!(denied(malformed), TransportError::AccessDenied));
+        let mut garbage = withheld_error("refs/heads/main");
+        garbage.details[0].value =
+            Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode([0x0a, 0xff, 0xff]));
+        assert!(matches!(denied(garbage), TransportError::AccessDenied));
+        let mut oversized = withheld_error("refs/heads/main");
+        oversized.details[0].value = Some("A".repeat(88_837));
+        assert!(matches!(denied(oversized), TransportError::AccessDenied));
+        assert!(matches!(
+            denied(withheld_error(&"r".repeat(513))),
+            TransportError::AccessDenied
+        ));
+        // Another code never carries it.
+        let mut elsewhere = withheld_error("refs/heads/main");
+        elsewhere.code = ErrorCode::NotFound;
+        assert!(matches!(denied(elsewhere), TransportError::PackNotFound));
+    }
+
+    #[test]
+    fn admission_still_wins_alongside_a_withheld_detail() {
+        let mut both = admission_error(AdmissionChallenge {
+            challenges: vec![challenge("ok", "v")],
+            ..Default::default()
+        });
+        both.details
+            .extend(withheld_error("refs/heads/main").details);
+        assert!(matches!(
+            map_connect_error(both, ErrorContext::Ref),
+            TransportError::AdmissionRequired(_)
+        ));
     }
 
     #[test]
