@@ -137,6 +137,8 @@ struct TestService {
     pending_advance: bool,
     admission_required: bool,
     ticketed: bool,
+    /// A procedure whose every call is refused with a `ContentWithheld` detail.
+    withheld: Option<&'static str>,
     part_buffers: Mutex<PartBuffers>,
     part_gate: Option<Arc<PartGate>>,
 }
@@ -177,6 +179,19 @@ impl TestService {
         }
         if self.not_found.contains(&procedure) {
             return Err(ConnectError::not_found("repository not found"));
+        }
+        if self.withheld == Some(procedure) {
+            return Err(
+                ConnectError::permission_denied("never display this").with_detail(
+                    connectrpc::ErrorDetail::from_message(
+                        "kit.transport.v1.ContentWithheld",
+                        &generated::ContentWithheld {
+                            ref_name: Some("refs/kit/packmap/main".into()),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            );
         }
         Ok(())
     }
@@ -754,6 +769,7 @@ fn spawn_server_admission(
         admission_required,
         false,
         None,
+        None,
     )
 }
 
@@ -764,6 +780,7 @@ fn spawn_server_options(
     admission_required: bool,
     ticketed: bool,
     part_gate: Option<Arc<PartGate>>,
+    withheld: Option<&'static str>,
 ) -> (
     u16,
     tokio::sync::oneshot::Sender<()>,
@@ -798,6 +815,7 @@ fn spawn_server_options(
                 pending_advance,
                 admission_required,
                 ticketed,
+                withheld,
                 part_buffers: Mutex::new(HashMap::new()),
                 part_gate,
             });
@@ -872,7 +890,7 @@ fn cli_push_uses_begin_upload_and_ticketed_advance() {
     let (src, tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -1126,6 +1144,30 @@ fn list_refs_not_found_names_the_repository_and_origin() {
 }
 
 #[test]
+fn clone_and_fetch_show_one_line_when_content_is_withheld() {
+    let (port, shutdown, handle, _) = spawn_server_options(
+        Arc::new(MemoryTransport::new()),
+        Vec::new(),
+        false,
+        false,
+        false,
+        None,
+        Some("ListRefs"),
+    );
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let parent = tempfile::tempdir().unwrap();
+    let cloned = run_in(parent.path(), &["clone", &url, "work"]);
+    assert!(!cloned.status.success());
+    let stderr = String::from_utf8_lossy(&cloned.stderr);
+    assert!(stderr.contains("Part of this Kit is withheld."), "{stderr}");
+    assert!(!stderr.contains("never display this"), "{stderr}");
+    assert!(!stderr.contains("packmap"), "{stderr}");
+    assert!(!stderr.contains("access denied"), "{stderr}");
+    drop(shutdown.send(()));
+    handle.join().unwrap();
+}
+
+#[test]
 fn read_ref_not_found_is_an_absent_ref() {
     let (port, shutdown, handle, calls) =
         spawn_server_with_errors(Arc::new(MemoryTransport::new()), vec!["ReadRef"]);
@@ -1328,6 +1370,7 @@ fn cli_part_upload_interrupts_with_exit_75_and_resumes_from_file_receipts() {
         false,
         true,
         Some(Arc::clone(&gate)),
+        None,
     );
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
@@ -2014,7 +2057,7 @@ fn signed_transport(url: &str) -> Box<dyn Transport> {
 fn run_rebaseline_race(appending: bool) {
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let competing = signed_transport(&url);
@@ -2123,7 +2166,7 @@ fn cli_ticketed_push_tags_then_clone_verifies() {
     let (src, _tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -2224,7 +2267,7 @@ fn cli_push_delete_removes_a_branch_and_a_tag_with_their_chain_refs() {
     let (src, _tip_hex) = source_repo_with_one_commit();
     let backend = Arc::new(MemoryTransport::new());
     let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let config_path = src.path().join(".kit/config");
     let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -2382,7 +2425,7 @@ fn check_attestation_push(advertised: bool) {
             .unwrap();
     }
     let (port, shutdown, handle, calls) =
-        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let local = tempfile::tempdir().unwrap();

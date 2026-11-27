@@ -127,6 +127,8 @@ pub mod __buffa {
         reg.register_json_any(super::__ADMISSION_CHALLENGE_JSON_ANY);
         #[cfg(feature = "json")] reg.register_json_any(super::__CHALLENGE_JSON_ANY);
         #[cfg(feature = "json")]
+        reg.register_json_any(super::__CONTENT_WITHHELD_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__PENDING_VERIFICATION_JSON_ANY);
         #[cfg(feature = "json")]
         reg.register_json_any(super::__MEMBERSHIP_NOT_VISIBLE_JSON_ANY);
@@ -436,6 +438,12 @@ pub use self::__buffa::view::ChallengeView;
 #[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::ChallengeOwnedView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::ContentWithheldView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::ContentWithheldOwnedView;
 #[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::PendingVerificationView;

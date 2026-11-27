@@ -671,6 +671,9 @@ fn map_source_ref(error: &SourceError, upload: bool) -> TransportError {
         SourceError::RefConflict => TransportError::RefConflict,
         SourceError::PackNotFound => TransportError::PackNotFound,
         SourceError::AccessDenied => TransportError::AccessDenied,
+        SourceError::ContentWithheld { ref_name } => TransportError::ContentWithheld {
+            ref_name: ref_name.clone(),
+        },
         _ => TransportError::RemoteError(error.to_string()),
     }
 }
@@ -686,6 +689,7 @@ pub(crate) fn map_source(error: SourceError, upload: bool) -> TransportError {
         ),
         SourceError::PackNotFound => TransportError::PackNotFound,
         SourceError::AccessDenied => TransportError::AccessDenied,
+        SourceError::ContentWithheld { ref_name } => TransportError::ContentWithheld { ref_name },
         SourceError::AdmissionConfiguration(s) => TransportError::AdmissionConfiguration(s),
         SourceError::AdmissionHelperFailed(s) => TransportError::AdmissionHelperFailed(s),
         SourceError::TlsConfiguration(s) => TransportError::TlsConfiguration(s),

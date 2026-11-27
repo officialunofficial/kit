@@ -433,6 +433,7 @@ maps onto a standard Connect code:
 |---|---|---|
 | `PackNotFound` | `not_found` | `DownloadPack` before any chunk is sent; `PackExists` never raises this (it returns `exists = false` instead). |
 | `AccessDenied` | `permission_denied`; a client also maps `unauthenticated` to `AccessDenied`. | Any RPC, when the deployment's write or namespace policy (§7.5) rejects an authenticated caller, or a ticket does not bind to the request (§7.6). |
+| `ContentWithheld{ref_name}` | `permission_denied` with exactly one `ContentWithheld` detail (field 1, `ref_name`, at most 512 bytes). A missing, malformed, oversized or repeated detail maps to `AccessDenied`. A client that predates the detail ignores it and reports `AccessDenied`. | A read of a ref when the caller may read the repository but part of its content is withheld. The refusal is permanent for the caller's current view; an unchanged retry fails the same way. The detail carries only the ref name. Never retried. |
 | `RefConflict` | `failed_precondition` | `UpdateRef` on a CAS mismatch, including deletion of an absent ref (§7.8). `AdvanceRefs` reports its conflicts as typed outcomes (§4), never as this error. |
 | `InvalidRef` | `invalid_argument` | Any RPC taking a ref name that fails SPEC-REFS §3, or (`ReadRef`, `UpdateRef`, either name of `AdvanceRefs`) a name outside `refs/`, which a server does not serve (SPEC-REFS §2); that message starts `ref name must start with refs/`. |
 | `ConnectionFailed` | *(not server-raised &mdash; client-observed transport failure, for example TCP reset, deadline exceeded)* | &mdash; |
@@ -451,6 +452,9 @@ is total in both directions, never a partial match. Before it applies
 the table, a client checks for admission: an HTTP 402 response, or a
 `permission_denied` error that carries an `AdmissionChallenge` detail,
 maps to `AdmissionRequired`, never to `AccessDenied` (§5.1).
+Otherwise a `permission_denied` error with exactly one valid
+`ContentWithheld` detail maps to `ContentWithheld`; any other
+`permission_denied` maps to `AccessDenied`.
 Before the generic `failed_precondition` mapping, a client MUST check
 whether `AdvanceRefs` returned `failed_precondition` with exact public
 message `delta base not available in this repository`. That answer is
