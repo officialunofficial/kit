@@ -566,6 +566,13 @@ message Challenge {
   string value = 2;  // opaque to kit; at most 8,192 bytes
 }
 
+// Detail on a `permission_denied` answer: the caller may read the repository,
+// but part of its content is withheld. The refusal is permanent for the
+// caller's current view; an unchanged retry fails the same way.
+message ContentWithheld {
+  string ref_name = 1; // the ref that cannot be served, e.g. "refs/kit/packmap/main"
+}
+
 // Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 // verification (SPEC-TRANSPORT-CONNECT §7.6).
 message PendingVerification {

@@ -51,6 +51,14 @@ pub enum TransportError {
     /// S3 `SignatureDoesNotMatch`, …).
     #[error("access denied by remote")]
     AccessDenied,
+    /// The caller may read the repository, but part of its content is
+    /// withheld. Permanent for the caller's current view: an unchanged retry
+    /// fails the same way. Carries only the ref that cannot be served.
+    #[error("Part of this Kit is withheld.")]
+    ContentWithheld {
+        /// The ref the remote could not serve.
+        ref_name: String,
+    },
     /// A remote requires admission before this write may proceed.
     #[error("{0}")]
     AdmissionRequired(Box<AdmissionRequired>),
@@ -349,6 +357,7 @@ pub fn pack_key_from_hex(s: &str) -> Result<PackKey, FromHexError> {
 /// Explicitly non-retryable:
 /// - [`TransportError::PackNotFound`]
 /// - [`TransportError::AccessDenied`]
+/// - [`TransportError::ContentWithheld`]
 /// - [`TransportError::AdmissionRequired`] — requires an explicit helper response
 /// - [`TransportError::RefConflict`] (CAS retry is a caller-level policy)
 /// - [`TransportError::InvalidRef`]
