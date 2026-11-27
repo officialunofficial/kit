@@ -497,6 +497,16 @@ mod tests {
     }
 
     #[test]
+    fn an_insertion_at_the_top_counts_from_the_first_old_line() {
+        // git takes the old start from the line the standard diff is at, so
+        // only a file that did not exist starts at 0.
+        let h = hunks_of(&[0..1], b"a\nb\n", b"x\na\nb\n");
+        assert_eq!((h[0].old_start, h[0].old_lines, h[0].new_start), (1, 0, 1));
+        let h = hunks_of(&[1..2], b"a\nb\n", b"a\nx\nb\n");
+        assert_eq!((h[0].old_start, h[0].old_lines, h[0].new_start), (2, 0, 2));
+    }
+
+    #[test]
     fn a_repeated_line_aligns_as_blame_does() {
         // Blame matches the old `l5` to the first new `l5`, so the change is
         // the insertion of `l0` above it and of the second `l5` below.
