@@ -46,6 +46,10 @@ pub enum SourceError {
     PackNotFound,
     #[error("access denied by remote")]
     AccessDenied,
+    /// The caller may read the repository, but part of its content is
+    /// withheld. Permanent for the caller's current view; never retried.
+    #[error("Part of this Kit is withheld.")]
+    ContentWithheld { ref_name: String },
     #[error("admission configuration: {0}")]
     AdmissionConfiguration(String),
     #[error("HTTPS trust configuration: {0}")]
@@ -154,6 +158,7 @@ impl From<TransportError> for SourceError {
         match error {
             TransportError::PackNotFound => Self::PackNotFound,
             TransportError::AccessDenied => Self::AccessDenied,
+            TransportError::ContentWithheld { ref_name } => Self::ContentWithheld { ref_name },
             TransportError::AdmissionConfiguration(value) => Self::AdmissionConfiguration(value),
             TransportError::TlsConfiguration(value) => Self::TlsConfiguration(value),
             TransportError::AdmissionHelperFailed(value) => Self::AdmissionHelperFailed(value),

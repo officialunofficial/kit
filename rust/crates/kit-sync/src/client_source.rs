@@ -151,6 +151,7 @@ fn source_error(error: ClientError) -> SourceError {
             SourceError::PendingVerification { retry_after }
         }
         ClientError::MembershipNotVisible => SourceError::MembershipNotVisible,
+        ClientError::ContentWithheld { ref_name } => SourceError::ContentWithheld { ref_name },
         ClientError::RetryAfter { ms } => SourceError::RetryAfter { ms },
         ClientError::Signing(reason) => SourceError::Signing(reason),
         ClientError::SignerRefused(reason) => SourceError::SignerRefused(reason),
@@ -725,6 +726,49 @@ mod tests {
         };
         assert_eq!(challenges.www_authenticate, ["Admission opaque"]);
         assert_eq!(challenges.admission_required, ["opaque-admission"]);
+    }
+
+    #[test]
+    fn a_withheld_detail_is_a_typed_refusal_and_an_old_style_denial_is_unchanged() {
+        use crate::{FailureClass, SyncError};
+        use base64::Engine as _;
+        let value = base64::engine::general_purpose::STANDARD.encode(
+            proto::ContentWithheld {
+                ref_name: Some("refs/kit/packmap/main".into()),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let typed = format!(
+            r#"{{"code":"permission_denied","message":"hidden","details":[{{"type":"kit.transport.v1.ContentWithheld","value":"{value}"}}]}}"#
+        );
+        let old_style = r#"{"code":"permission_denied","message":"hidden"}"#.to_owned();
+        for (body, withheld) in [(typed, true), (old_style, false)] {
+            let mut response = failure_response(&body, None);
+            *response.status_mut() = http::StatusCode::FORBIDDEN;
+            let transport = FailureResponse(RefCell::new(Some(response)));
+            let dest =
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+            let client = Client::anonymous(&transport, dest);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            let error = source.list_branches().unwrap_err();
+            assert_eq!(error.class(), FailureClass::Refusal);
+            let SyncError::Source(error) = source.repository_error(error) else {
+                panic!("refusal flattened")
+            };
+            if withheld {
+                assert!(matches!(
+                    &error,
+                    SourceError::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
+                ));
+                assert_eq!(error.to_string(), "Part of this Kit is withheld.");
+            } else {
+                assert!(matches!(error, SourceError::Remote(_)), "{error:?}");
+                assert_eq!(error.to_string(), "access denied by remote");
+            }
+            // Never retried.
+            assert!(transport.0.borrow().is_none());
+        }
     }
 
     #[test]

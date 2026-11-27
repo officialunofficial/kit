@@ -7,6 +7,8 @@
 //! 2023. Run them through `scripts/regen-rpc-proto.sh` and
 //! `scripts/regen-transport-proto.sh`.
 
+#![forbid(unsafe_code)]
+
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};

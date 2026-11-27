@@ -11287,6 +11287,157 @@ pub const __CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
     from_json: ::buffa::type_registry::any_from_json::<Challenge>,
     is_wkt: false,
 };
+/// Detail on a `permission_denied` answer: the caller may read the repository,
+/// but part of its content is withheld. The refusal is permanent for the
+/// caller's current view; an unchanged retry fails the same way.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
+pub struct ContentWithheld {
+    /// the ref that cannot be served, e.g. "refs/kit/packmap/main"
+    ///
+    /// Field 1: `ref_name`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "refName",
+            alias = "ref_name",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
+    )]
+    pub ref_name: ::core::option::Option<::buffa::alloc::string::String>,
+    #[cfg_attr(feature = "json", serde(skip))]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ContentWithheld {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ContentWithheld").field("ref_name", &self.ref_name).finish()
+    }
+}
+impl ContentWithheld {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.ContentWithheld";
+}
+impl ContentWithheld {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::ref_name`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_ref_name(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.ref_name = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(ContentWithheld);
+impl ::buffa::MessageName for ContentWithheld {
+    const PACKAGE: &'static str = "kit.transport.v1";
+    const NAME: &'static str = "ContentWithheld";
+    const FULL_NAME: &'static str = "kit.transport.v1.ContentWithheld";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.ContentWithheld";
+}
+impl ::buffa::Message for ContentWithheld {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.ref_name {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.ref_name {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .ref_name
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.ref_name = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ContentWithheld {
+    const PROTO_FQN: &'static str = "kit.transport.v1.ContentWithheld";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+#[cfg(feature = "json")]
+impl ::buffa::json_helpers::ProtoElemJson for ContentWithheld {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[cfg(feature = "json")]
+#[doc(hidden)]
+pub const __CONTENT_WITHHELD_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/kit.transport.v1.ContentWithheld",
+    to_json: ::buffa::type_registry::any_to_json::<ContentWithheld>,
+    from_json: ::buffa::type_registry::any_from_json::<ContentWithheld>,
+    is_wkt: false,
+};
 /// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 /// verification (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
