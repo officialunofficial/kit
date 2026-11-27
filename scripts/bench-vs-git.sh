@@ -58,6 +58,7 @@ if [ "${KIT_BENCH_PROVENANCE_ONLY:-}" = "1" ]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kit-bench.XXXXXX")"
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" XDG_DATA_HOME="$WORK/home/.local/share" XDG_CACHE_HOME="$WORK/home/.cache"
 mkdir -p "$HOME"
@@ -139,6 +140,10 @@ mkdir -p clone-src/kit clone-src/git remotes/kit
   && "$KIT" remote add origin "kit+file://$WORK/remotes/kit" >/dev/null && "$KIT" push origin >/dev/null 2>&1)
 (cd clone-src/git && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$F/small10k/" . \
   && git add . && git commit -q -m bench && git clone -q --bare . "$WORK/remotes/git.git")
+
+# Clone once outside hyperfine, so a broken setup fails with its own message.
+"$KIT" clone "kit+file://$WORK/remotes/kit" clone-check >/dev/null && rm -rf clone-check
+git clone -q "file://$WORK/remotes/git.git" clone-check && rm -rf clone-check
 
 run clone-small-files --warmup 1 \
   --prepare 'rm -rf work && sync' "$KIT clone kit+file://$WORK/remotes/kit work >/dev/null 2>&1" \
