@@ -329,6 +329,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   commit date is the time of the commit, and the applier signs it. It reads
   no `-s`, `-k`, `--3way`, `--interactive` or `--quoted-cr`, and refuses a
   base64 or quoted-printable mail.
+- **`range-diff`.** kit pairs the commits as git does, but its patch
+  text holds no `## Metadata ##` section and it solves the assignment with
+  its own Hungarian method, so two pairings of equal cost may come out
+  differently. The diff under a `!` line is a plain diff of the two
+  patches, without git's dual coloring or its section names in the hunk
+  headers. There are no `--left-only`, `--right-only` or diff options, and
+  a side over 1,000 commits is an error.
 - **`shortlog`.** The author is the name `kit log` prints, so a commit
   made with a signing key groups under its key, not under a name and
   email. There is no `-c`/`--committer`, `--group`, `-w` or `--format`
