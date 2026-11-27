@@ -228,7 +228,7 @@ Object IDs are the only difference. They are 64 hex characters.
   special bytes uses C-style quoting. `-z` prints raw paths with NUL
   terminators.
 - `status --porcelain=v2` prints `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
-  for a tracked change. It prints `2 ... R100` for an exact rename and
+  for a tracked change. It prints `2 ... R<score>` for a staged rename and
   `? <path>` for an untracked path. It prints no `--branch` header lines.
 - `diff --name-only -z` and `ls-files -z` print raw paths with NUL
   terminators.
@@ -296,6 +296,14 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   is at most 4096 bytes. The index form `:<path>` and `:<n>:<path>` is an
   error. `show <rev>:<dir>` prints the `ls-tree` listing, not the Git
   header and the names.
+- **Rename detection.** `diff`, `status`, `show` and `log -p` pair renames
+  by similarity with git's scoring, threshold grammar and limit warning.
+  Three things differ. Pathspecs filter after detection, so a rename keeps
+  its source path when only its destination matches; Git limits the
+  candidates first. Ties between equal scores break by path order, where
+  Git's order depends on its sort. Copy detection (`-C`), break detection
+  (`-B`) and the `diff.renames` and `diff.renameLimit` config keys are not
+  supported; `show` and `log` have no rename flags and use the default 50%.
 - **`log -p` and `--stat`.** A merge commit shows its diff against its
   first parent, as `show` does. Git `log -p` shows no diff for a merge.
   `-p` and `--stat` together are a usage error. Git prints both, with a

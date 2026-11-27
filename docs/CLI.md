@@ -119,7 +119,7 @@ Working-tree commands:
     delete untracked ones &mdash; git won't clobber a directory with `mv` either),
     rejects **overlapping sources** up front (`mv dir dir/file <dest>`), and
     refuses moving a directory into itself.
-- `kit status [--porcelain[=v1|v2]] [-s|--short] [-z]` &mdash; show staged and
+- `kit status [--porcelain[=v1|v2]] [-s|--short] [-z] [--find-renames[=<n>]|--no-renames]` &mdash; show staged and
   unstaged changes. Default-mode prose (banner plus section headers plus per-file
   lines) goes to **stderr**; stdout is reserved for machine output.
   `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
@@ -128,13 +128,16 @@ Working-tree commands:
   non-git extension). `--porcelain=v2` selects git's richer per-path
   format &mdash; `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` for tracked
   changes (octal modes; full 64-hex BLAKE3 object ids; `<sub>` always
-  `N...`) and `? <path>` for untracked &mdash; with no rename (`2`) records and
-  no `--branch` header lines. Paths with special bytes are **C-style quoted**
+  `N...`), `2 <XY> ... R<score> <path>\t<orig>` for a staged rename and
+  `? <path>` for untracked &mdash; with no `--branch` header lines. Paths with special bytes are **C-style quoted**
   (matching git's default `core.quotePath`). `-z` (which implies
   porcelain) NUL-terminates records and emits **raw, unquoted** paths &mdash;
   the round-trip-safe form for paths containing newlines or other special
-  bytes. Empty stdout means clean.
-- `kit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
+  bytes. Empty stdout means clean. A staged deletion and a staged addition
+  pair into a rename with the same similarity detection as `kit diff`
+  (default 50%); `--find-renames=<n>` sets the threshold and `--no-renames`
+  turns it off.
+- `kit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [-M[<n>]|--find-renames[=<n>]|--no-renames] [-l<n>] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   &mdash; show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree &mdash; the change `kit commit`
@@ -196,6 +199,30 @@ Working-tree commands:
   real (unmodified) bytes &mdash; only line *comparison* changes. `-U<n>` /
   `--unified=<n>` sets the number of unchanged context lines around each
   hunk (default 3, matching git's `-U3`).
+  Rename detection is on by default, like git's `diff.renames`. A deleted
+  file and an added file pair into one rename when their contents are at
+  least 50% similar. The score is git's: content splits into lines (at most
+  64 bytes each), and the score is the share of bytes in matching lines
+  against the larger file. A text file's CR before LF does not count. The
+  score depends only on the bytes, never on how either blob is chunked.
+  Identical content pairs first, at 100%. Then a deleted file and an added
+  file that are the only ones with their basename pair if they are at least
+  halfway between the threshold and 100% similar. The rest pair best score
+  first, and each file takes part in at most one rename. Only regular and
+  executable files pair by similarity; a symlink pairs only when it is
+  identical. `-M[<n>]` / `--find-renames[=<n>]` sets the threshold with
+  git's grammar: `-M90%` is 90%, while digits without `%` are a decimal
+  fraction, so `-M9` is 90% and `-M100` is 10%. `-M100%` keeps only
+  identical content. `--no-renames` turns detection off. A rename prints
+  `R<score>` in `--name-status` (`R090`), `old => new` in `--stat`
+  (shortened to `dir/{a => b}` around a shared prefix or suffix), and
+  `similarity index <n>%`, `rename from`, `rename to` and the hunks in the
+  patch. When more than `-l<n>` (default 1000) squared pairs would need a
+  score, kit keeps the identical-content renames, skips the similarity
+  pass, and prints git's `exhaustive rename detection was skipped` warning
+  on stderr; `-l0` removes the limit. Pathspecs filter the entries after
+  detection, so a rename whose destination matches a pathspec still shows
+  its source.
 - `kit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
   `remove [--force] <path>` / `prune [--dry-run]` /
   `move [--force] <path> <new-path>` / `lock [--reason <text>] <path>` /
@@ -623,7 +650,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   followed by the unified diff against its first parent; that diff body is
   produced by the same code as `kit diff`, so `show <commit>` is
   byte-identical to `diff <parent> <commit>` (modulo abbreviated `index`
-  ids). `--stat` shows a diffstat instead of the full patch for
+  ids). Renames are detected as in `kit diff`, at the default 50%
+  threshold; `kit log -p` and `kit log --stat` do the same. `--stat` shows a diffstat instead of the full patch for
   commit/remix objects (like `git show --stat`); non-commit objects are
   shown as usual. A **tag** prints its header then the peeled target object; a **tree**
   is listed as `<mode> <type> <hash>\t<name>` lines; a **blob** prints its raw
@@ -1973,8 +2001,9 @@ These are documented behaviors, not bugs:
   `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` (UTC). git's fuzzier
   natural-language forms (`last Tuesday`, `3am`, `noon`) are not accepted.
 - **`kit status --porcelain=v2`** matches git's format except that object
-  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
-  `2` record (`R100`); `--branch` header lines are not emitted.
+  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). A staged rename
+  emits a `2` record with git's score (`R100`, `R90`); `--branch` header
+  lines are not emitted.
 - **`kit clone --depth N` is not supported.** `clone` rejects it with a
   `--depth is not supported` usage error rather than silently producing a
   full clone. A clone holds the full history, so every commit verifies with its
@@ -2012,9 +2041,8 @@ porcelain-completion work: `kit revert`, `kit mv`, `kit clean`, and
 `kit reset --hard` are all available and documented above. Each keeps a
 kit data-loss guard &mdash; for example, `clean` and `reset --hard` refuse to delete or
 discard without an explicit `-f` &mdash; rather than adopting git's silent
-destructive default. Rename *detection* in diff/log output remains a
-separate, unscheduled follow-up: `kit mv` stages the move
-but `status` shows it as a delete plus add, not `R`.
+destructive default. `status`, `diff`, `show` and `log -p`/`--stat`
+detect renames by similarity, like git; merge does not apply renames yet.
 
 Note: object garbage collection (`kit gc`) **is shipped**.
 History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
