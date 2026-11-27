@@ -175,6 +175,99 @@ pub fn is_valid_exec_command(command: &str) -> bool {
     !command.is_empty() && command.trim() == command && !command.contains(['\n', '\r', '\0'])
 }
 
+/// The fewest hex digits that name a target by id in [`autosquash`].
+pub const AUTOSQUASH_MIN_ID_DIGITS: usize = 4;
+
+/// The part of `subject` after its leading `fixup! ` and `squash! `
+/// prefixes, with the action that the first prefix asks for, or `None` when
+/// the subject has neither prefix.
+fn fold_request(subject: &str) -> Option<(RebaseAction, &str)> {
+    let action = if subject.starts_with("fixup! ") {
+        RebaseAction::Fixup
+    } else if subject.starts_with("squash! ") {
+        RebaseAction::Squash
+    } else {
+        return None;
+    };
+    let mut rest = subject;
+    loop {
+        rest = rest.trim_start();
+        match rest
+            .strip_prefix("fixup! ")
+            .or_else(|| rest.strip_prefix("squash! "))
+        {
+            Some(inner) => rest = inner,
+            None => return Some((action, rest)),
+        }
+    }
+}
+
+/// Arrange the commits of a rebase, oldest first, as `--autosquash` does.
+/// Each commit whose subject starts with `fixup! ` or `squash! ` moves to
+/// just after the commit it names, after the commits already moved there,
+/// with the [`RebaseAction::Fixup`] or [`RebaseAction::Squash`] action. Every
+/// other commit is a [`RebaseAction::Pick`] and keeps its order.
+///
+/// The leading prefixes are stripped, so `fixup! fixup! x` names `x`. The
+/// target is an earlier commit that is not moved itself: the first whose
+/// subject equals the rest, else, when the rest is one word of
+/// [`AUTOSQUASH_MIN_ID_DIGITS`] or more hex digits, the one commit of
+/// `commits` whose id starts with it, else the first whose subject starts
+/// with the rest. A commit with no target stays a pick where it is.
+#[must_use]
+pub fn autosquash<S: AsRef<str>>(commits: &[(Hash, S)]) -> Vec<(Hash, RebaseAction)> {
+    // `chains[i]` holds the commits moved after commit `i`, in order.
+    let mut chains: Vec<Vec<usize>> = vec![Vec::new(); commits.len()];
+    let mut moved = vec![false; commits.len()];
+    for (i, (_, subject)) in commits.iter().enumerate() {
+        let Some((_, key)) = fold_request(subject.as_ref()) else {
+            continue;
+        };
+        let earlier = |j: &usize| *j < i && !moved[*j];
+        let by_subject = (0..i)
+            .filter(earlier)
+            .find(|&j| commits[j].1.as_ref() == key);
+        let by_id = || {
+            let is_id =
+                key.len() >= AUTOSQUASH_MIN_ID_DIGITS && key.bytes().all(|b| b.is_ascii_hexdigit());
+            if !is_id {
+                return None;
+            }
+            let prefix = key.to_ascii_lowercase();
+            let mut named = commits
+                .iter()
+                .enumerate()
+                .filter(|(_, (h, _))| hash::to_hex(h).starts_with(&prefix))
+                .map(|(j, _)| j);
+            match (named.next(), named.next()) {
+                (Some(j), None) if earlier(&j) => Some(j),
+                _ => None,
+            }
+        };
+        let by_prefix = || {
+            (0..i)
+                .filter(earlier)
+                .find(|&j| commits[j].1.as_ref().starts_with(key))
+        };
+        if let Some(target) = by_subject.or_else(by_id).or_else(by_prefix) {
+            chains[target].push(i);
+            moved[i] = true;
+        }
+    }
+    let mut out = Vec::with_capacity(commits.len());
+    for (i, (h, _)) in commits.iter().enumerate() {
+        if moved[i] {
+            continue;
+        }
+        out.push((*h, RebaseAction::Pick));
+        for &j in &chains[i] {
+            let action = fold_request(commits[j].1.as_ref()).map_or(RebaseAction::Pick, |r| r.0);
+            out.push((commits[j].0, action));
+        }
+    }
+    out
+}
+
 /// Persisted rebase state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseState {
@@ -1167,5 +1260,169 @@ mod tests {
         // Replay feature (c5) onto main (c3): should yield [c4, c5].
         let res = collect_commits_to_replay(&store, c5, c3).unwrap();
         assert_eq!(res, vec![c4, c5]);
+    }
+
+    fn h(n: u8) -> Hash {
+        [n; 32]
+    }
+
+    fn arranged(commits: &[(Hash, &str)]) -> Vec<(u8, RebaseAction)> {
+        autosquash(commits)
+            .into_iter()
+            .map(|(h, a)| (h[0], a))
+            .collect()
+    }
+
+    #[test]
+    fn autosquash_moves_a_fixup_after_its_target() {
+        use RebaseAction::{Fixup, Pick, Squash};
+        let commits = [
+            (h(1), "A"),
+            (h(2), "B"),
+            (h(3), "fixup! A"),
+            (h(4), "squash! B"),
+        ];
+        assert_eq!(
+            arranged(&commits),
+            [(1, Pick), (3, Fixup), (2, Pick), (4, Squash)]
+        );
+    }
+
+    #[test]
+    fn autosquash_strips_nested_prefixes_and_keeps_chain_order() {
+        use RebaseAction::{Fixup, Pick, Squash};
+        let commits = [
+            (h(1), "A"),
+            (h(2), "fixup! A"),
+            (h(3), "B"),
+            (h(4), "squash! fixup! A"),
+            (h(5), "fixup! fixup! A"),
+        ];
+        assert_eq!(
+            arranged(&commits),
+            [(1, Pick), (2, Fixup), (4, Squash), (5, Fixup), (3, Pick)]
+        );
+    }
+
+    #[test]
+    fn autosquash_matches_subject_then_id_then_subject_prefix() {
+        use RebaseAction::{Fixup, Pick};
+        let id = hash::to_hex(&h(0xab));
+        let by_id = format!("fixup! {}", &id[..6]);
+        let commits = [
+            (h(0xab), "Add the parser for dates"),
+            (h(2), "Add the parser"),
+            (h(3), "fixup! Add the parser"),
+            (h(4), by_id.as_str()),
+            (h(5), "fixup! Add the"),
+        ];
+        // The exact subject wins over the earlier prefix match, the id
+        // names the first commit, and a prefix takes the first match.
+        assert_eq!(
+            arranged(&commits),
+            [(0xab, Pick), (4, Fixup), (5, Fixup), (2, Pick), (3, Fixup)]
+        );
+    }
+
+    #[test]
+    fn autosquash_leaves_unmatched_and_short_or_later_ids_in_place() {
+        use RebaseAction::Pick;
+        let later = hash::to_hex(&h(0xcd));
+        let to_later = format!("fixup! {}", &later[..8]);
+        let commits = [
+            (h(1), "fixup! not in the range"),
+            (h(2), "fixup! 0606"),
+            (h(3), "fixup! 01"),
+            (h(4), to_later.as_str()),
+            (h(0xcd), "C"),
+            (h(5), "fixup!A"),
+        ];
+        // `0606` names no commit, `01` is too short to be an id, and
+        // commit 4 names a later commit by id.
+        assert_eq!(
+            arranged(&commits),
+            [
+                (1, Pick),
+                (2, Pick),
+                (3, Pick),
+                (4, Pick),
+                (0xcd, Pick),
+                (5, Pick)
+            ]
+        );
+    }
+
+    /// A subject drawn from a few targets, so fixups often find one.
+    fn subject_strategy() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let base = prop::sample::select(vec!["A", "B", "C", "A B", "Z"]);
+        let prefix = prop::sample::select(vec!["", "", "fixup! ", "squash! ", "fixup! fixup! "]);
+        (prefix, base).prop_map(|(p, b)| format!("{p}{b}"))
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn autosquash_invariants(
+            subjects in proptest::collection::vec(subject_strategy(), 0..12),
+        ) {
+            let commits: Vec<(Hash, String)> = subjects
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (h(u8::try_from(i).unwrap()), s.clone()))
+                .collect();
+            let out = autosquash(&commits);
+
+            // A permutation of the input.
+            let mut ids: Vec<u8> = out.iter().map(|(h, _)| h[0]).collect();
+            ids.sort_unstable();
+            let all: Vec<u8> = (0..commits.len()).map(|i| u8::try_from(i).unwrap()).collect();
+            proptest::prop_assert_eq!(ids, all);
+
+            // A plain subject is a pick, and the picks keep their order.
+            let picks: Vec<u8> = out
+                .iter()
+                .filter(|(_, a)| *a == RebaseAction::Pick)
+                .map(|(h, _)| h[0])
+                .collect();
+            proptest::prop_assert!(picks.windows(2).all(|w| w[0] < w[1]));
+            for (h, a) in &out {
+                let subject = &commits[usize::from(h[0])].1;
+                if fold_request(subject).is_none() {
+                    proptest::prop_assert_eq!(*a, RebaseAction::Pick);
+                }
+            }
+
+            // The count of commits after folding is the input count minus
+            // the matched fixups and squashes.
+            let folded = out.iter().filter(|(_, a)| a.folds_into_previous()).count();
+            proptest::prop_assert_eq!(picks.len(), commits.len() - folded);
+            proptest::prop_assert!(out.first().is_none_or(|(_, a)| *a == RebaseAction::Pick));
+
+            // Each folded commit comes after its target, and after only
+            // folds since that target.
+            for (k, (h, a)) in out.iter().enumerate() {
+                if !a.folds_into_previous() {
+                    continue;
+                }
+                let (_, key) = fold_request(&commits[usize::from(h[0])].1).unwrap();
+                let head = out[..k]
+                    .iter()
+                    .rev()
+                    .find(|(_, a)| !a.folds_into_previous())
+                    .unwrap();
+                let target = &commits[usize::from(head.0[0])].1;
+                proptest::prop_assert!(head.0[0] < h[0]);
+                proptest::prop_assert!(target.starts_with(key), "{} -> {}", key, target);
+            }
+
+            // Arranging an arranged list changes nothing.
+            let again: Vec<(Hash, String)> = out
+                .iter()
+                .map(|(h, _)| (*h, commits[usize::from(h[0])].1.clone()))
+                .collect();
+            let twice: Vec<Hash> = autosquash(&again).into_iter().map(|(h, _)| h).collect();
+            let once: Vec<Hash> = out.iter().map(|(h, _)| *h).collect();
+            proptest::prop_assert_eq!(twice, once);
+        }
     }
 }

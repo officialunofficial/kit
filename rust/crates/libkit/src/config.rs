@@ -205,6 +205,9 @@ pub struct Config {
     pub pull_require_signed: String,
     /// Automatic local pack maintenance. Empty means enabled.
     pub gc_auto: String,
+    /// `rebase.autosquash`: `true` turns on `--autosquash` for an
+    /// interactive rebase. Empty means off.
+    pub rebase_autosquash: String,
     /// Fetch portable attestations unless explicitly disabled.
     pub fetch_attestations: String,
     /// Publish locally authored attestations only when true.
@@ -402,6 +405,13 @@ impl Config {
     #[must_use]
     pub fn gc_auto_enabled(&self) -> bool {
         !self.gc_auto.eq_ignore_ascii_case("false")
+    }
+
+    /// Whether an interactive rebase arranges `fixup!` and `squash!`
+    /// commits without `--autosquash`.
+    #[must_use]
+    pub fn rebase_autosquash_enabled(&self) -> bool {
+        self.rebase_autosquash.eq_ignore_ascii_case("true")
     }
 
     /// Return a Config with documented defaults filled in.
@@ -816,6 +826,10 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.gc_auto = val.to_ascii_lowercase();
         }
+        "rebase.autosquash" => {
+            expect_one_of(key, val, &["true", "false"])?;
+            cfg.rebase_autosquash = val.to_ascii_lowercase();
+        }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.fetch_attestations = val.to_ascii_lowercase();
@@ -1003,6 +1017,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("fetch.attestations", cfg.fetch_attestations.as_str()),
         ("gc.auto", cfg.gc_auto.as_str()),
         ("push.attestations", cfg.push_attestations.as_str()),
+        ("rebase.autosquash", cfg.rebase_autosquash.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),

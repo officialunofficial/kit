@@ -286,7 +286,9 @@ _kit() {
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
                         '--allow-empty[accept a first commit with nothing staged]' \
-                        '--amend[replace HEAD instead of adding a new commit]' \
+                        '(--fixup --squash)--amend[replace HEAD instead of adding a new commit]' \
+                        '(--amend --squash)--fixup[make a fixup! commit for rebase --autosquash]:revision:' \
+                        '(--amend --fixup)--squash[make a squash! commit for rebase --autosquash]:revision:' \
                         '(-m --message)-m[commit message]:message:' \
                         '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
                         '--author[override the author identity]:spec:' \
@@ -418,6 +420,8 @@ _kit() {
                 rebase)
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
+                        '(--no-autosquash)--autosquash[fold fixup! and squash! commits into their targets]' \
+                        '(--autosquash)--no-autosquash[ignore rebase.autosquash]' \
                         '--onto[replay onto this revision instead of the upstream]:newbase:' \
                         '*'{-x,--exec}'[run a shell command after each replayed commit]:command:' \
                         '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \

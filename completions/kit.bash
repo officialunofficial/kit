@@ -97,7 +97,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --find-renames --no-renames --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend --fixup --squash -m --message -F --file --author -q --quiet --help" -- "$cur") )
             ;;
         blame)
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
@@ -136,7 +136,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete -l --list --author --help" -- "$cur") )
             ;;
         rebase)
-            COMPREPLY=( $(compgen -W "-i --interactive --onto -X --strategy-option -x --exec --continue --skip --abort --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-i --interactive --autosquash --no-autosquash --onto -X --strategy-option -x --exec --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
             COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline -X --strategy-option --format --help" -- "$cur") )

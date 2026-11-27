@@ -131,8 +131,10 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
-    let normalized_value = if matches!(key, "fetch.attestations" | "gc.auto" | "push.attestations")
-    {
+    let normalized_value = if matches!(
+        key,
+        "fetch.attestations" | "gc.auto" | "push.attestations" | "rebase.autosquash"
+    ) {
         let value = value.to_ascii_lowercase();
         if !matches!(value.as_str(), "true" | "false") {
             return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
@@ -278,6 +280,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "fetch.attestations" => Ok(take_nonempty(&mut cfg.fetch_attestations)),
         "gc.auto" => Ok(take_nonempty(&mut cfg.gc_auto)),
         "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
+        "rebase.autosquash" => Ok(take_nonempty(&mut cfg.rebase_autosquash)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -341,6 +344,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "fetch.attestations" => value.clone_into(&mut cfg.fetch_attestations),
         "gc.auto" => value.clone_into(&mut cfg.gc_auto),
         "push.attestations" => value.clone_into(&mut cfg.push_attestations),
+        "rebase.autosquash" => value.clone_into(&mut cfg.rebase_autosquash),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -404,6 +408,7 @@ const CONFIG_KEYS: &[&str] = &[
     "gc.auto",
     "push.attestations",
     "grant.webauthn_rp",
+    "rebase.autosquash",
     "http.sslcainfo",
     "key.backend",
     "key.default_ref",
@@ -445,6 +450,11 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
         "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
         "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),
+        "rebase.autosquash" => Some(Cow::Borrowed(if cfg.rebase_autosquash_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

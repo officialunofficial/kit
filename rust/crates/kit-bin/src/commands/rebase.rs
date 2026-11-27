@@ -47,6 +47,14 @@ struct RebaseOpts {
     /// to amend with `edit`, or run a command with `exec`.
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
+    /// Move each `fixup!` and `squash!` commit to just after the commit it
+    /// names and fold it in. Without `-i`, run the arranged plan without a
+    /// todo list.
+    #[arg(long, conflicts_with_all = ["cont", "abort", "skip", "no_autosquash"])]
+    autosquash: bool,
+    /// Turn off `rebase.autosquash` for this rebase.
+    #[arg(long = "no-autosquash", conflicts_with_all = ["cont", "abort", "skip"])]
+    no_autosquash: bool,
     /// Resolve every content conflict to one side: `ours` (the base being
     /// rebased onto, as in git) or `theirs` (the commit being replayed).
     #[arg(short = 'X', long = "strategy-option",
@@ -115,6 +123,17 @@ fn fail(failure: rebase::Error, json: bool) -> u8 {
     emit_err(&message, crate::exit_map::exit_code(&failure))
 }
 
+/// Whether the rebase arranges `fixup!` and `squash!` commits: the flags,
+/// else `rebase.autosquash` for an interactive rebase. A config that cannot
+/// be read leaves it off.
+fn autosquash(opts: &RebaseOpts, layout: &RepoLayout) -> bool {
+    if opts.autosquash || opts.no_autosquash {
+        return opts.autosquash;
+    }
+    opts.interactive
+        && crate::config::read_or_default(layout).is_ok_and(|cfg| cfg.rebase_autosquash_enabled())
+}
+
 const USAGE: &str = "usage: kit rebase [-i] <revspec> | kit rebase [-i] --onto <newbase> \
                      <upstream> [<branch>] | kit rebase --continue | --abort | --skip";
 
@@ -124,6 +143,7 @@ fn request<'a>(
     opts: &'a RebaseOpts,
     favor: libkit::merge::Favor,
     exec: &'a [String],
+    autosquash: bool,
 ) -> Option<Request<'a>> {
     let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
         (None, [onto]) => (onto.as_str(), None, None),
@@ -138,6 +158,7 @@ fn request<'a>(
         interactive: opts.interactive,
         favor,
         exec,
+        autosquash,
     })
 }
 
@@ -187,7 +208,7 @@ pub fn run(args: &[String]) -> u8 {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
         rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
-    } else if let Some(request) = request(&opts, favor, &exec) {
+    } else if let Some(request) = request(&opts, favor, &exec, autosquash(&opts, &layout)) {
         rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
         return super::usage_error(USAGE);
@@ -214,6 +235,7 @@ pub(super) fn rebase_onto(
         interactive: false,
         favor,
         exec: &[],
+        autosquash: false,
     };
     let signing = super::signing::Configured;
     match rebase::start(

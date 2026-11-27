@@ -501,7 +501,7 @@ must be a fully-qualified ref
 .Pq Pa refs/heads/<b> , refs/tags/<t> , refs/remotes/<r>/<b>
 or the literal
 .Cm HEAD .
-.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl allow-empty Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
+.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl allow-empty Oc Oo Fl Fl amend | Fl Fl fixup Ar rev | Fl Fl squash Ar rev Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
 Create a signed commit. With
 .Fl a
 or
@@ -556,6 +556,31 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
+.Pp
+With
+.Fl Fl fixup Ar rev ,
+the subject is
+.Ql fixup!\&
+followed by the subject of
+.Ar rev ,
+for
+.Cm rebase Fl Fl autosquash
+to fold into
+.Ar rev ;
+no editor opens, and
+.Fl m
+or
+.Fl F
+text goes in the body.
+.Fl Fl squash Ar rev
+writes
+.Ql squash!\&
+instead, and opens the editor for the body when neither
+.Fl m
+nor
+.Fl F
+is given. They do not combine with each other or with
+.Fl Fl amend .
 .It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
@@ -1038,7 +1063,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl Fl autosquash | Fl Fl no-autosquash Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
 With
@@ -1087,6 +1112,30 @@ adds an
 .Cm exec Ar cmd
 line after each commit of the plan, or after the last commit of a squash or
 fixup chain; it may repeat.
+.Fl Fl autosquash
+moves each commit whose subject starts with
+.Ql fixup!\&
+or
+.Ql squash!\&
+to just after the earlier commit it names, by subject, by id prefix of 4 or
+more hex digits, or by subject prefix, and marks it
+.Cm fixup
+or
+.Cm squash ;
+a commit with no target in the range stays a
+.Cm pick .
+With
+.Fl i
+the todo list opens arranged; without it the arranged plan runs directly.
+Setting
+.Cm rebase.autosquash
+to
+.Cm true
+turns it on for
+.Fl i ,
+and
+.Fl Fl no-autosquash
+turns it off.
 .Fl X Cm ours
 and
 .Fl X Cm theirs
@@ -1706,6 +1755,7 @@ emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
 .Cm ssh.identity_file ,
+.Cm rebase.autosquash ,
 and
 .Cm gc.auto .
 Setting

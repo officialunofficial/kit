@@ -120,6 +120,7 @@ fn start(
             interactive,
             favor: libkit::merge::Favor::None,
             exec: &[],
+            autosquash: false,
         },
         &TestSigning,
         editor,
@@ -250,6 +251,7 @@ fn an_upstream_limits_the_replay_to_the_commits_after_it() {
         interactive: false,
         favor: libkit::merge::Favor::None,
         exec: &[],
+        autosquash: false,
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -281,6 +283,7 @@ fn a_named_branch_is_the_one_that_moves() {
         interactive: false,
         favor: libkit::merge::Favor::None,
         exec: &[],
+        autosquash: false,
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -312,6 +315,7 @@ fn an_unknown_upstream_or_branch_is_an_error() {
             interactive: false,
             favor: libkit::merge::Favor::None,
             exec: &[],
+            autosquash: false,
         };
         let err = rebase::start(
             &l.f.layout,
@@ -494,6 +498,7 @@ fn reword_asks_the_editor_for_a_message_and_an_empty_reply_keeps_the_old_one() {
             interactive: true,
             favor: libkit::merge::Favor::None,
             exec: &[],
+            autosquash: false,
         },
         &TestSigning,
         &mut script,

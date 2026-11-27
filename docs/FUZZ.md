@@ -77,6 +77,7 @@ from recurring.
 | `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
 | `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
 | `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one commit for each step but `exec` and one command for each `exec`, names only listed commits, never folds its first commit and holds only one-line commands; a full hash names its commit) |
+| `fuzz_targets/rebase_autosquash.rs` | `kit_core::ops::rebase::autosquash` (never panics on any subjects; arranges every commit once, starts with a pick, keeps the picks in order, makes every plain subject a pick, and gives the same order when it arranges its own result) |
 | `fuzz_targets/signer_spec_parse.rs` | `libkit::attestation::SignerSpec` (never panics on any text; a spec parses the same twice; an accepted spec names an algorithm and a signer; a refusal names the flag) |
 | `fuzz_targets/secret_hex_parse.rs` | `libkit::keys::parse_secret_hex` (never panics on any text; exactly 64 hex digits in either case are accepted; the secret equals the digits; a refusal never shows the text) |
 | `fuzz_targets/git_patch_text.rs` | `libkit::git::patch::slug`, `split_range`, `is_mbox_from_line` and `rfc2822` (a subject gives a name of at most 52 letters, digits and dashes, and the same name twice; a range always has an end; a date always ends with `+0000`; none panics) |
@@ -151,6 +152,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | The path arguments of `libkit::add::stage` | None. A named path is checked against the file system, not parsed. Integration tests cover a path outside the repository and a path through a symlink. |
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
+| The `fixup!` and `squash!` subjects that `kit_core::ops::rebase::autosquash` reads | `rebase_autosquash` |
 | `libkit::attestation::SignerSpec` | `signer_spec_parse` |
 | `libkit::keys::parse_secret_hex` | `secret_hex_parse` |
 | `libkit::git::patch::split_range`, `slug`, `is_mbox_from_line`, `rfc2822` | `git_patch_text` |

@@ -3106,6 +3106,55 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
     );
 }
 
+/// Autosquash (`rebase_autosquash`): `kit_core::ops::rebase::autosquash`
+/// never panics on any subjects. Each line of the input is the subject of
+/// one commit. The result arranges every commit once, starts with a pick,
+/// keeps the picks in order, makes every plain subject a pick, and gives
+/// the same order when it arranges its own result.
+pub fn rebase_autosquash_one_iteration(input: &[u8]) {
+    use kit_core::ops::rebase::{RebaseAction, autosquash};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let text = String::from_utf8_lossy(input);
+    let commits: Vec<(kit_core::hash::Hash, &str)> = text
+        .lines()
+        .take(64)
+        .enumerate()
+        .map(|(i, s)| (kit_core::hash::hash(&i.to_le_bytes()), s))
+        .collect();
+    let out = autosquash(&commits);
+    assert_eq!(out.len(), commits.len(), "every commit once");
+    let position = |h: &kit_core::hash::Hash| commits.iter().position(|(c, _)| c == h);
+    let mut seen: Vec<usize> = out.iter().filter_map(|(h, _)| position(h)).collect();
+    seen.sort_unstable();
+    assert!(seen.iter().copied().eq(0..commits.len()), "a permutation");
+    assert!(
+        out.first().is_none_or(|(_, a)| *a == RebaseAction::Pick),
+        "a pick comes first"
+    );
+    let picks: Vec<usize> = out
+        .iter()
+        .filter(|(_, a)| *a == RebaseAction::Pick)
+        .filter_map(|(h, _)| position(h))
+        .collect();
+    assert!(
+        picks.windows(2).all(|w| w[0] < w[1]),
+        "picks keep their order"
+    );
+    for (h, a) in &out {
+        let subject = position(h).map_or("", |i| commits[i].1);
+        if !subject.starts_with("fixup! ") && !subject.starts_with("squash! ") {
+            assert_eq!(*a, RebaseAction::Pick, "a plain subject is a pick");
+        }
+    }
+    let again: Vec<(kit_core::hash::Hash, &str)> = out
+        .iter()
+        .filter_map(|(h, _)| position(h).map(|i| commits[i]))
+        .collect();
+    let twice: Vec<_> = autosquash(&again).into_iter().map(|(h, _)| h).collect();
+    let once: Vec<_> = out.iter().map(|(h, _)| *h).collect();
+    assert_eq!(twice, once, "arranging an arrangement changes nothing");
+}
+
 /// Hex secrets (`secret_hex_parse`): `keys::parse_secret_hex` never panics on
 /// any text. It accepts exactly 64 hex digits in either case, and the
 /// secret equals the digits. A refusal never shows the text.
@@ -4312,6 +4361,20 @@ mod tests {
             .step_by(2)
             .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
             .collect()
+    }
+
+    #[test]
+    fn unit_rebase_autosquash() {
+        run_iterated_unit(rebase_autosquash_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"A\nfixup! A\n",
+            b"A\nB\nsquash! fixup! A\nfixup! B\nfixup! nothing\n",
+            b"fixup! fixup! \nfixup! \n\n",
+            b"\xff\nfixup! \xff\n",
+        ] {
+            run_one(case, rebase_autosquash_one_iteration).unwrap();
+        }
     }
 
     #[test]

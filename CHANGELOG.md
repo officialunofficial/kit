@@ -14,6 +14,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit reflog --recovery` lists the commits that `commit --amend`, `reset`, `rebase` and `stash pop` replaced, and the revision `recovery@{N}` names them, so `kit reset --hard recovery@{0}` undoes the last rewrite.
 - `merge`, `cherry-pick`, `revert`, `rebase` and `pull` take `-X ours` and `-X theirs` (`--strategy-option`), which resolve every content conflict to one side while changes that do not conflict still merge; a paused rebase keeps the option. `merge -s ours` records a merge commit with the tree of `HEAD`, and `-s ort` and `-s recursive` name the default merge.
 - `kit rebase -i` takes `edit` lines, which replay a commit and stop so it can be amended or followed by new commits, and `exec` lines, which run a shell command and stop the rebase when it fails. `kit rebase -x/--exec <cmd>` adds an `exec` line after each replayed commit. A paused rebase whose plan holds `edit` or `exec` marks its `actions` state file with a version line; any other plan keeps the format that 0.11 reads.
+- `kit commit --fixup <rev>` and `--squash <rev>` write `fixup! <subject>` and `squash! <subject>` commits, and `kit rebase --autosquash` moves each one to just after the commit it names and folds it in, with or without `-i`. `rebase.autosquash = true` turns it on for `rebase -i`, and `--no-autosquash` turns it off.
 
 ### Breaking
 
@@ -21,6 +22,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `libkit::log::Query` gains `paths` and `follow`, and `libkit::log::Entry` gains `paths`.
 - `libkit::merge::Request` gains `strategy` and `libkit::rebase::Request` gains `favor`. `kit_core::ops::cherry_pick` and `kit_core::ops::revert` take a `Favor` as a fifth argument, and `kit_core::ops::rebase::RebaseState` gains `favor`.
 - `kit_core::ops::rebase::RebaseAction` gains `Edit` and `Exec`, and `RebaseState` gains `exec`. `libkit::rebase::parse_todo` returns a `Plan`, `libkit::rebase::Request` gains `exec`, `libkit::rebase::Outcome` gains `Stopped` and `ExecFailed`, and `TodoError::EditUnsupported` is replaced by `TodoError::MissingCommand`.
+- `libkit::rebase::Request` gains `autosquash`, and `libkit::config::Config` gains `rebase_autosquash`.
 
 ## [0.11.1] - 2026-11-26
 

@@ -31,8 +31,8 @@ use kit_core::ops::conflict_state::{
 use kit_core::ops::merge::Favor;
 pub use kit_core::ops::rebase::RebaseAction;
 use kit_core::ops::rebase::{
-    RebaseError, RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress,
-    is_valid_exec_command, read_state, rebase_dir_path, write_state,
+    RebaseError, RebaseState, autosquash, cleanup_rebase, collect_commits_to_replay,
+    is_rebase_in_progress, is_valid_exec_command, read_state, rebase_dir_path, write_state,
 };
 use kit_core::ops::recovery::{self, RecoveryEntry, RecoveryError};
 use kit_core::protocol::escape_terminal_text;
@@ -272,6 +272,11 @@ pub struct Request<'a> {
     /// of a squash or fixup chain, as `--exec` does. Each is one line, with
     /// no leading or trailing whitespace.
     pub exec: &'a [String],
+    /// Move each `fixup!` and `squash!` commit after the commit it names and
+    /// fold it in, as `--autosquash` does: see
+    /// [`kit_core::ops::rebase::autosquash`]. With `interactive`, the todo
+    /// list opens arranged.
+    pub autosquash: bool,
 }
 
 /// The steps of a rebase, as [`parse_todo`] reads them from a todo list.
@@ -426,29 +431,33 @@ pub fn start(
         });
     }
 
+    let seed = if request.autosquash {
+        let subjects: Vec<(Hash, String)> = candidates
+            .iter()
+            .map(|&h| (h, commit_subject(store, h)))
+            .collect();
+        let (todo, actions) = autosquash(&subjects).into_iter().unzip();
+        Plan {
+            todo,
+            actions,
+            exec: Vec::new(),
+        }
+    } else {
+        Plan {
+            todo: candidates.clone(),
+            actions: vec![RebaseAction::Pick; candidates.len()],
+            exec: Vec::new(),
+        }
+    };
+    let seed = with_exec(seed, request.exec);
     let plan = if request.interactive {
         if candidates.is_empty() {
             Plan::default()
         } else {
-            edit_todo(
-                store,
-                &candidates,
-                orig_head,
-                stop,
-                onto,
-                request.exec,
-                editor,
-            )?
+            edit_todo(store, &candidates, &seed, orig_head, stop, onto, editor)?
         }
     } else {
-        with_exec(
-            Plan {
-                actions: vec![RebaseAction::Pick; candidates.len()],
-                todo: candidates,
-                exec: Vec::new(),
-            },
-            request.exec,
-        )
+        seed
     };
     let state = RebaseState {
         head_name,
@@ -965,24 +974,29 @@ fn commit_subject(store: &ObjectStore, h: Hash) -> String {
 fn edit_todo(
     store: &ObjectStore,
     candidates: &[Hash],
+    seed: &Plan,
     orig_head: Hash,
     stop: Hash,
     onto: Hash,
-    exec: &[String],
     editor: &mut dyn Editor,
 ) -> Result<Plan, Error> {
-    // One `pick` line for each candidate, the oldest first, each followed
-    // by the `--exec` commands.
+    // One line for each step of the seed plan, in order.
     let mut template = String::new();
-    for h in candidates {
-        let _ = writeln!(
-            template,
-            "pick {} {}",
-            abbreviate(h),
-            commit_subject(store, *h)
-        );
-        for command in exec {
-            let _ = writeln!(template, "exec {command}");
+    let mut commits = seed.todo.iter();
+    let mut commands = seed.exec.iter();
+    for &action in &seed.actions {
+        if action == RebaseAction::Exec {
+            if let Some(command) = commands.next() {
+                let _ = writeln!(template, "exec {command}");
+            }
+        } else if let Some(h) = commits.next() {
+            let _ = writeln!(
+                template,
+                "{} {} {}",
+                action.keyword(),
+                abbreviate(h),
+                commit_subject(store, *h)
+            );
         }
     }
     let _ = write!(

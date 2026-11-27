@@ -158,6 +158,10 @@ complete -c kit -n "__fish_seen_subcommand_from commit" \
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l amend -d "Replace HEAD instead of adding a new commit"
 complete -c kit -n "__fish_seen_subcommand_from commit" \
+    -l fixup -d "Make a fixup! commit for rebase --autosquash" -r
+complete -c kit -n "__fish_seen_subcommand_from commit" \
+    -l squash -d "Make a squash! commit for rebase --autosquash" -r
+complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l message -s m -d "Commit message" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
@@ -275,6 +279,10 @@ complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l interactive -s i -d "Edit the todo list before replaying"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l onto -d "Replay onto this revision" -r
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l autosquash -d "Fold fixup! and squash! commits into their targets"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l no-autosquash -d "Ignore rebase.autosquash"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l exec -s x -d "Run a shell command after each replayed commit" -r
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
