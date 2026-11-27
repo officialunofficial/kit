@@ -21,6 +21,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit describe` names a commit after the nearest tag that reaches it, as `<tag>-<n>-k<short id>`, with `--tags`, `--always`, `--abbrev`, `--long`, `--dirty`, `--match` and `--exclude`. kit writes `k` where git writes `g`, so a kit name never passes for a git one.
 - `kit apply` applies unified diffs from `kit diff`, `git diff` or `git format-patch` to the worktree, the index (`--cached`) or both (`--index`), with `-R`, `--check` and `--stat`. A hunk applies only where its context matches exactly, and either the whole patch applies or nothing changes (SPEC-PATCH).
 - `kit am` applies a mailbox of patch mails as signed commits, with the mail's `From:` as the author. A mail that does not apply pauses `am` in `.kit/am/` until `--continue`, `--skip` or `--abort`, and merge, cherry-pick, revert and rebase refuse to start meanwhile.
+- `kit shortlog` groups the commits that `kit log` shows by author, with `-s`, `-n`, `-e`, `--format=json`, the revision and path rules of `kit log`, and `kit log` text on standard input, as git reads it.
 
 ### Breaking
 

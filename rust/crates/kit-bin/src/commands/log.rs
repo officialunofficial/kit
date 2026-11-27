@@ -281,7 +281,7 @@ pub fn run(args: &[String]) -> u8 {
         Ok(repo) => repo,
         Err(code) => return code,
     };
-    let (start, paths) = match split_args(&repo, &cwd, &opts, explicit) {
+    let (start, paths) = match split_args(&repo, &cwd, &opts.args, opts.all, explicit) {
         Ok(split) => split,
         Err(code) => return code,
     };
@@ -453,13 +453,14 @@ fn print_graph_commit(
 /// Split the positional arguments into the revision selection and the paths,
 /// in the form of the index. `explicit` holds the arguments after `--`. The
 /// error is the exit code, after the message.
-fn split_args(
+pub(super) fn split_args(
     repo: &libkit::Repo,
     cwd: &std::path::Path,
-    opts: &LogOpts,
+    args: &[String],
+    all: bool,
     explicit: Option<&[String]>,
 ) -> Result<(Option<String>, Vec<String>), u8> {
-    let mut positional = opts.args.iter();
+    let mut positional = args.iter();
     let mut start = None;
     let mut raw: Vec<&String> = Vec::new();
     if explicit.is_some() {
@@ -468,9 +469,7 @@ fn split_args(
             let msg = format!("unexpected argument '{extra}' before '--'");
             return Err(emit_err(&msg, exit::USAGE));
         }
-    } else if !opts.all
-        && let Some(first) = positional.next()
-    {
+    } else if !all && let Some(first) = positional.next() {
         let in_worktree = cwd.join(first).symlink_metadata().is_ok();
         if is_revision(repo, first) {
             if in_worktree {
@@ -499,7 +498,7 @@ fn split_args(
         raw.push(arg);
     }
     raw.extend(explicit.unwrap_or_default());
-    if opts.all && start.is_some() {
+    if all && start.is_some() {
         return Err(emit_err(
             "--all does not combine with a revision or a range",
             exit::USAGE,

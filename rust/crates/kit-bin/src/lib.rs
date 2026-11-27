@@ -147,6 +147,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "bisect" => commands::bisect::run(&rest),
         "rerere" => commands::rerere::run(&rest),
         "grep" => commands::grep::run(&rest),
+        "shortlog" => commands::shortlog::run(&rest),
         "describe" => commands::describe::run(&rest),
         "apply" => commands::apply::run(&rest),
         "am" => commands::am::run(&rest),

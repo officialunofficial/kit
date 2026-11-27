@@ -155,14 +155,19 @@ fn log_output_on_standard_input_is_read() {
 }
 
 #[test]
-fn usage_errors_exit_64() {
+fn bad_arguments_exit_as_kit_log_does() {
     let repo = two_authors();
-    for args in [
-        &["shortlog", "no-such-rev"][..],
-        &["shortlog", "--format=xml", "HEAD"],
-    ] {
-        let out = repo.run(args);
-        assert_eq!(out.status.code(), Some(64), "{args:?}: {}", stderr(&out));
+    // A bad format and an unknown revision exit as they do for `kit log`.
+    for args in [&["--format=xml", "HEAD"][..], &["no-such-rev"]] {
+        let ours = repo.run(&[&["shortlog"][..], args].concat());
+        let log = repo.run(&[&["log"][..], args].concat());
+        assert!(!ours.status.success(), "{args:?}");
+        assert_eq!(
+            ours.status.code(),
+            log.status.code(),
+            "{args:?}: {}",
+            stderr(&ours)
+        );
     }
 }
 

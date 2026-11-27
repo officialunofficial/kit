@@ -24,7 +24,7 @@ _kit_complete() {
         fi
     fi
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect rerere gc grep describe apply am worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect rerere gc grep shortlog describe apply am worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -104,6 +104,9 @@ _kit_complete() {
             ;;
         am)
             COMPREPLY=( $(compgen -W "--continue --skip --abort --help" -- "$cur") )
+            ;;
+        shortlog)
+            COMPREPLY=( $(compgen -W "-s --summary -n --numbered -e --email --format --help" -- "$cur") )
             ;;
         describe)
             COMPREPLY=( $(compgen -W "--tags --always --abbrev --long --dirty --match --exclude --help" -- "$cur") )

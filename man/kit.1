@@ -1525,6 +1525,19 @@ drops the mail, and
 returns to where
 .Cm am
 started.
+.It Cm shortlog Oo Fl s Oc Oo Fl n Oc Oo Fl e Oc Oo Fl Fl format Ns = Ns Cm json Oc Oo Ar rev | Ar range Oc Oo Oo Fl Fl Oc Ar path ... Oc
+Group the commits that
+.Cm kit log
+shows by author, each with its subjects oldest first.
+.Fl n
+sorts by count,
+.Fl s
+prints only the counts, and
+.Fl e
+keeps the email, or the key id of a key author.
+With no revision and standard input that is not a terminal, kit reads
+.Cm kit log
+output from it.
 .It Cm describe Oo Fl Fl tags Oc Oo Fl Fl always Oc Oo Fl Fl abbrev Ns = Ns Ar n Oc Oo Fl Fl long Oc Oo Fl Fl dirty Ns Oo = Ns Ar mark Oc Oc Oo Fl Fl match Ar glob Oc Oo Fl Fl exclude Ar glob Oc Op Ar rev
 Name
 .Ar rev

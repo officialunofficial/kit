@@ -68,6 +68,7 @@ pub mod revert;
 pub mod rm;
 pub mod self_update;
 pub mod serve;
+pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod signing;

@@ -319,6 +319,8 @@ commands:
                     or nothing, never with fuzz
   am <mbox>... | --continue | --skip | --abort
                     Apply a mailbox of patch mails as signed commits
+  shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]
+                    Group commits by author, for release notes
   describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]] [--match <glob>] [--exclude <glob>] [<rev>]
                     Name a commit after the nearest tag: <tag>-<n>-k<id>
   grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]
@@ -461,6 +463,7 @@ mod tests {
             "bisect",
             "rerere",
             "grep",
+            "shortlog",
             "describe",
             "apply",
             "am",

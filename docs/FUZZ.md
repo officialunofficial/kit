@@ -158,6 +158,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
 | The `fixup!` and `squash!` subjects that `kit_core::ops::rebase::autosquash` reads | `rebase_autosquash` |
 | The `actions` and `update-refs` files that `kit_core::ops::rebase::read_state` reads | None. kit writes them under `.kit/rebase-apply/` for its own paused rebase, and they never come from a peer. They are size-capped, and unit tests cover malformed text, which reads as invalid state. |
+| The `kit log` text that `kit shortlog` reads on standard input | None. It is the user's own input, read line by line for `Author:` and indented subject lines; every line is either taken as text or skipped, so no input is refused or can fail. Unit tests cover the reader. |
 | The patch text that `kit apply` and `kit am` read | `patch_parse` |
 | The mailbox that `kit am` reads | `mailbox_parse` |
 | The `am/` state files that `kit am` reads: `orig-head`, `next` and `last` | None. kit writes them under `.kit/am/` for its own paused `am`, and they never come from a peer. They are read with a 128-byte cap and checked as 64 hex digits or a number of at most four digits. The mails in `am/` are read again by `mailbox_parse`'s parser. |
