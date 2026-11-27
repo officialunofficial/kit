@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-26 (Thu): main green incl. release 0.11.0. Updated branches of 309, 262, 233, 220, 195, 152 (stale bases). Commented on 324: kit-ci-pr needs maintainer /gcbrun, semver-checks fails, mutants cancelled. Next run: merge any that are green and MERGEABLE.",
+  "last_findings": "2026-11-27 (Fri): main green. Updated branches of 324, 309, 262, 233, 220, 195, 152 (main moved again). Commented on 309, 220, 195: only kit-ci-pr and kit-connect-pr (need maintainer /gcbrun) block merge. Next run: judge reruns; merge any with all ran checks green and MERGEABLE, otherwise leave.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -20,6 +20,7 @@
     "An open PR with a stale base shows mergeable unknown and old failures; call update_pull_request_branch first and judge the rerun, since CI takes over 10 minutes and cannot be polled in-session.",
     "The fmt job also runs check-dependency-versions.py; a stale PR base fails it with Cargo.lock mismatches, and cargo fmt shows no diff. Update the branch, do not reformat.",
     "PRs still show mergeable unknown after update_pull_request_branch for many minutes; one run cannot both update and merge, so merge on the next run.",
-    "kit-ci-pr and kit-connect-pr start only on a maintainer /gcbrun comment (action_required until then); do not post it, and do not treat it as a failure to fix."
+    "kit-ci-pr and kit-connect-pr start only on a maintainer /gcbrun comment (action_required until then); do not post it, and do not treat it as a failure to fix.",
+    "Every merge to main makes open PR bases stale again; with required /gcbrun checks pending, PRs cannot merge unattended, so keep updates to one per day and avoid repeat comments."
   ]
 }
