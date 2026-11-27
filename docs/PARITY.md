@@ -187,9 +187,15 @@ instead, what it costs, and what would reopen the decision.
   An attestation takes the place of a note. `kit git import` does not bring in
   `refs/notes`.
 - **Cost.** An attestation is signed, so it has a predicate type and it cannot
-  be edited. A correction is a new attestation. Attestations are local today.
-  `kit push`, `kit pull` and `kit fetch` move only the object graph, so a
-  teammate does not receive them. The spec plans transport for them.
+  be edited. A correction is a new attestation. Attestations travel apart
+  from the commit graph, on the remote's `refs/kit/attestmap` log.
+  `kit push` publishes the envelopes you authored only with `--attestations`
+  or `push.attestations = true`, and a published envelope is permanent.
+  `kit clone`, `kit fetch` and `kit pull` fetch the published envelopes by
+  default and keep each valid one whose commit exists locally;
+  `--no-attestations` or `fetch.attestations = false` skips them. A fetched
+  envelope is never pushed again, and trusting its signer stays a
+  `kit verify-attest` decision.
 - **Would reopen.** A need for an annotation that is unsigned and editable. A
   shared attestation store does not reopen it, because that answers the sharing
   cost.
@@ -351,7 +357,7 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   kit's date order, where git uses topological order, so the order of two
   branches of a merge can differ. When a file repeats lines, several
   smallest diffs exist, and kit's line diff may pick another one than
-  git's; the range then follows another copy of a repeated line.
+  git's; kit follows the copy that `kit blame` credits.
 - **`range-diff`.** kit pairs the commits with git's costs, but it solves
   the assignment with its own Hungarian method, so two pairings of equal
   cost may come out differently. The `## Metadata ##` section names the
