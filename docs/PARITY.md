@@ -310,6 +310,13 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `exec` stop is an error. An `exec` command that leaves files changed
   does not stop the rebase. kit has no `break`, `label`, `reset` or
   `merge` todo lines, and no `--reschedule-failed-exec`.
+- **Autosquash.** `rebase --autosquash` and `commit --fixup` and
+  `--squash` follow git, with three differences. Only an earlier commit of
+  the range that is not itself moved can be a target, where git can also
+  match a later commit by id or a moved commit by subject prefix. An id
+  prefix needs 4 or more hex digits and names a commit of the range only.
+  `commit --fixup=amend:` and `--fixup=reword:`, and `amend!` subjects,
+  are not supported.
 - **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
   `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
   ort` and `-s recursive`. Other strategies and options, such as

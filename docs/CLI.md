@@ -291,8 +291,8 @@ Working-tree commands:
 
 History / commits:
 
-- `kit commit [-a|--all] [--allow-empty] [--amend] [--author <spec>] [-m <msg> | -F <file>]
-  [--format=json]`
+- `kit commit [-a|--all] [--allow-empty] [--amend | --fixup <rev> | --squash <rev>] [--author <spec>]
+  [-m <msg> | -F <file>] [--format=json]`
   &mdash; create
   a signed commit from the staging index. The index is built by `kit
   add` / `kit rm`; `commit` with an empty index is an error, except a first
@@ -322,6 +322,15 @@ History / commits:
   commit's message is reused (no editor is launched). The superseded
   commit is recorded in the recovery log so it stays recoverable, and is
   reclaimed by `kit gc` once it falls out of the retention window.
+  `--fixup <rev>` makes a commit whose subject is `fixup! ` followed by
+  the subject of `<rev>`, for `kit rebase --autosquash` to fold into
+  `<rev>`. It opens no editor; text from `-m` or `-F` goes in the body,
+  after a blank line. `--squash <rev>` makes the subject `squash! ` and
+  the subject of `<rev>`. Its body comes from `-m` or `-F`, and without
+  them `$EDITOR` opens on the subject. Both resolve `<rev>` through the
+  revspec resolver and refuse a revision that is not a commit. They do
+  not combine with each other or with `--amend`. Git's `--fixup=amend:`
+  and `--fixup=reword:` forms are not supported.
   After `kit merge --no-commit` (or a merge you have just resolved),
   `commit` notices the recorded `MERGE_HEAD` and records a **two-parent
   merge commit** rather than an ordinary single-parent one.
@@ -1085,7 +1094,7 @@ Branches / refs:
   `ours` is the current branch and `theirs` the text before the reverted
   commit. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--autosquash|--no-autosquash] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   `--onto <newbase> <upstream> [<branch>]` replays the commits of
@@ -1129,6 +1138,22 @@ Branches / refs:
   commit of the plan, or after the last commit of a squash or fixup
   chain; with several, the lines go in the order given, and with `-i`
   they show in the todo list. A command is one line and not empty.
+  `--autosquash` moves each commit whose subject starts with `fixup! ` or
+  `squash! ` (as `kit commit --fixup` and `--squash` write them) to just
+  after the commit it names, and marks it `fixup` or `squash`. Repeated
+  prefixes, as in `fixup! fixup! x`, name `x`. The target is an earlier
+  commit of the range that is not itself moved: first one whose subject
+  equals the rest of the subject, then, for a word of 4 or more hex
+  digits, the one whose id starts with it, then the first one whose
+  subject starts with it. Several commits for one target keep their
+  order after it. A commit whose target is not in the range stays a
+  `pick` where it is. With `-i` the todo list opens already arranged;
+  without it the rebase runs the arranged plan without a todo list, as
+  git 2.44 and later do. A `squash` still opens `$EDITOR` to combine the
+  messages. `rebase.autosquash = true` in repo or user config turns
+  `--autosquash` on for `-i`, and `--no-autosquash` turns it off.
+  `--autosquash` does not combine with `--continue`, `--skip` or
+  `--abort`.
   `--format=json` emits one JSON object to stdout on the top-level
   outcomes: `{"ok":true,"kind":"up-to-date"|"rebased"|"aborted",...}` on
   success, `{"ok":true,"kind":"stopped","commit":"<hex>"}` at an `edit`
@@ -2136,6 +2161,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `rebase.autosquash` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase -i` arrange `fixup!` and `squash!` commits as `--autosquash` does; `--no-autosquash` overrides it. It does not apply to a rebase without `-i`, as in git 2.44 and later |
 | `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
