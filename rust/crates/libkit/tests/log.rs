@@ -119,7 +119,10 @@ fn a_filter_applies_before_the_limit() {
     let f = fixture();
     let q = Query {
         filter: Filter {
-            grep: Some("change".to_owned()),
+            grep: Some(
+                log::Patterns::new(vec!["change".to_owned()], log::PatternOptions::default())
+                    .unwrap(),
+            ),
             ..Filter::default()
         },
         limit: Some(1),

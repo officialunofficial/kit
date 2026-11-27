@@ -51,7 +51,7 @@
 //! and must not also resolve as a revision. `--follow` continues under the
 //! old name of a renamed file and needs exactly one path.
 //!
-//! History filters — `--author`/`--grep` (substring matches),
+//! History filters — `--author`/`--grep` (regular expressions),
 //! `--since`/`--until` (a small explicit date grammar, see
 //! `libkit::log::date`), and `--no-merges`/`--first-parent` — are
 //! applied to the walk before `-n`'s limit, so the limit caps the
@@ -125,21 +125,39 @@ struct LogOpts {
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "7")]
     abbrev: Option<usize>,
 
-    /// Only show commits whose author identity contains `<pattern>`
-    /// (substring match against both the short display form — `kit
-    /// log`'s `Author:` line — and the full `kind:hex`/`mid:N` form used
-    /// by `--format=json`'s `author` field). Unlike git, kit identities
-    /// are opaque (Ed25519 keys, `mid:N` numbers, DID keys) rather than
-    /// free-text `Name <email>`, so this is a plain substring match, not
-    /// a regex.
+    /// Only show commits whose author identity matches the regular
+    /// expression `<pattern>`, in the short display form (the `Author:`
+    /// line) or the full `kind:hex`/`mid:N` form (`--format=json`'s
+    /// `author` field). It may repeat; any pattern may match.
     #[arg(long, value_name = "PATTERN")]
-    author: Option<String>,
+    author: Vec<String>,
 
-    /// Only show commits whose message (title + body) contains
-    /// `<pattern>` (substring match, case-sensitive — like git's default
-    /// `--grep`).
+    /// Only show commits whose message (title and body) matches the regular
+    /// expression `<pattern>`, with `^` and `$` at each line. It may
+    /// repeat; any pattern may match, or every one with `--all-match`.
     #[arg(long, value_name = "PATTERN")]
-    grep: Option<String>,
+    grep: Vec<String>,
+
+    /// Take the `--author` and `--grep` patterns literally.
+    #[arg(short = 'F', long = "fixed-strings")]
+    fixed_strings: bool,
+
+    /// Ignore case in the `--author` and `--grep` patterns.
+    #[arg(short = 'i', long = "regexp-ignore-case")]
+    ignore_case: bool,
+
+    /// Read the patterns as extended regular expressions (the default).
+    #[arg(short = 'E', long = "extended-regexp")]
+    extended_regexp: bool,
+
+    /// Keep only the commits whose message matches every `--grep`.
+    #[arg(long = "all-match")]
+    all_match: bool,
+
+    /// Keep only the commits whose message does not pass the `--grep`
+    /// patterns.
+    #[arg(long = "invert-grep")]
+    invert_grep: bool,
 
     /// Only show commits at or after this time. Accepts `@<unix-seconds>`,
     /// `now`/`today`/`yesterday`, `<N> <unit> ago`
@@ -205,6 +223,7 @@ struct LogOpts {
         value_name = "start,end:file",
         conflicts_with_all = [
             "stat", "graph", "follow", "all", "author", "grep", "since", "until", "no_merges",
+            "fixed_strings", "ignore_case", "all_match", "invert_grep",
         ]
     )]
     line_ranges: Vec<String>,
@@ -213,6 +232,29 @@ struct LogOpts {
     /// or symmetric range (`A...B`), then paths. The walk starts at `HEAD`
     /// without a revision; an empty range side means `HEAD`.
     args: Vec<String>,
+}
+
+/// The compiled `--author` and `--grep` patterns.
+fn patterns_of(opts: &LogOpts) -> Result<(Option<log::Patterns>, Option<log::Patterns>), String> {
+    if opts.grep.is_empty() && (opts.all_match || opts.invert_grep) {
+        return Err("--all-match and --invert-grep need a --grep pattern".to_owned());
+    }
+    let options = log::PatternOptions {
+        fixed: opts.fixed_strings,
+        ignore_case: opts.ignore_case,
+    };
+    let compile = |sources: &[String], flag: &str| {
+        if sources.is_empty() {
+            return Ok(None);
+        }
+        log::Patterns::new(sources.to_vec(), options)
+            .map(Some)
+            .map_err(|e| format!("invalid --{flag} pattern: {e}"))
+    };
+    Ok((
+        compile(&opts.author, "author")?,
+        compile(&opts.grep, "grep")?,
+    ))
 }
 
 impl LogOpts {
@@ -307,13 +349,19 @@ pub fn run(args: &[String]) -> u8 {
     // `-n <limit>` caps the *filtered* set, not the raw walk, so it
     // composes with `--author`/`--grep`/`--since`/`--until`/`--no-merges`
     // the way git's does.
+    let (author, grep) = match patterns_of(&opts) {
+        Ok(p) => p,
+        Err(e) => return emit_err(&e, exit::USAGE),
+    };
     let query = Query {
         start: start.clone(),
         all: opts.all,
         first_parent: opts.first_parent,
         filter: Filter {
-            author: opts.author.clone(),
-            grep: opts.grep.clone(),
+            author,
+            grep,
+            all_match: opts.all_match,
+            invert_grep: opts.invert_grep,
             since,
             until,
             no_merges: opts.no_merges,
@@ -883,8 +931,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -909,8 +962,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -935,8 +993,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -961,8 +1024,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -986,8 +1054,13 @@ mod tests {
             limit: None,
             abbrev_commit,
             abbrev,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,

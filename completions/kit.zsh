@@ -328,8 +328,13 @@ _kit() {
                         '--abbrev-commit[abbreviate commit ids]' \
                         '--abbrev[set abbreviation length]:length:' \
                         '--format[output format]:format:(json)' \
-                        '--author[filter by author substring]:pattern:' \
-                        '--grep[filter by message substring]:pattern:' \
+                        '*--author[filter by author regex]:pattern:' \
+                        '*--grep[filter by message regex]:pattern:' \
+                        '(-F --fixed-strings)'{-F,--fixed-strings}'[take patterns literally]' \
+                        '(-i --regexp-ignore-case)'{-i,--regexp-ignore-case}'[ignore case in patterns]' \
+                        '(-E --extended-regexp)'{-E,--extended-regexp}'[extended regex (default)]' \
+                        '--all-match[require every --grep]' \
+                        '--invert-grep[keep commits that do not match]' \
                         '--since[only commits at or after this date]:date:' \
                         '--until[only commits at or before this date]:date:' \
                         '--no-merges[hide merge commits from the output]' \

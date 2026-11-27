@@ -124,7 +124,7 @@ fn invert_grep_keeps_the_commits_that_do_not_match() {
 fn author_is_a_regex_and_repeats_as_or() {
     let repo = history();
     assert_eq!(
-        subjects(&repo, &["--author", "^opaque:(alice|carol)$"]),
+        subjects(&repo, &["--author", "^(alice|carol)$"]),
         set(&[
             "fix: crash on empty input",
             "docs: fix a typo",

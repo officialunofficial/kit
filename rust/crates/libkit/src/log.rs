@@ -104,16 +104,89 @@ pub enum Error {
     RenameDetection(StoreError),
 }
 
+/// How the patterns of a [`Patterns`] are read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PatternOptions {
+    /// `-F`: take each pattern literally.
+    pub fixed: bool,
+    /// `-i`: ignore case.
+    pub ignore_case: bool,
+}
+
+/// Regular expressions for `--author` or `--grep`, with `^` and `$` at
+/// each line. Two sets are equal when their sources and options are.
+#[derive(Debug, Clone)]
+pub struct Patterns {
+    sources: Vec<String>,
+    options: PatternOptions,
+    compiled: Vec<regex::Regex>,
+}
+
+impl Patterns {
+    /// Compile `sources`.
+    ///
+    /// # Errors
+    /// [`regex::Error`] when a pattern is not valid, or there is none.
+    pub fn new(sources: Vec<String>, options: PatternOptions) -> Result<Self, regex::Error> {
+        if sources.is_empty() {
+            return Err(regex::Error::Syntax("no pattern".to_owned()));
+        }
+        let compiled = sources
+            .iter()
+            .map(|p| {
+                let p = if options.fixed {
+                    regex::escape(p)
+                } else {
+                    p.clone()
+                };
+                regex::RegexBuilder::new(&p)
+                    .case_insensitive(options.ignore_case)
+                    .multi_line(true)
+                    .build()
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            sources,
+            options,
+            compiled,
+        })
+    }
+
+    /// Does any pattern match `text`?
+    #[must_use]
+    pub fn any(&self, text: &str) -> bool {
+        self.compiled.iter().any(|re| re.is_match(text))
+    }
+
+    /// Does every pattern match `text`?
+    #[must_use]
+    pub fn all(&self, text: &str) -> bool {
+        self.compiled.iter().all(|re| re.is_match(text))
+    }
+}
+
+impl PartialEq for Patterns {
+    fn eq(&self, other: &Self) -> bool {
+        self.sources == other.sources && self.options == other.options
+    }
+}
+
+impl Eq for Patterns {}
+
 /// Which commits pass. A commit has to pass every set condition.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one flag each, as git has them
 pub struct Filter {
-    /// Keep a commit when its author, in the short form or the full form of
-    /// [`identity`], contains this text. The match is a plain substring
-    /// match.
-    pub author: Option<String>,
-    /// Keep a commit when its message contains this text. The match is a
-    /// plain, case-sensitive substring match.
-    pub grep: Option<String>,
+    /// Keep a commit when any pattern matches its author, in the short form
+    /// or the full form of [`identity`].
+    pub author: Option<Patterns>,
+    /// Keep a commit when any pattern matches its message, or every pattern
+    /// with [`Filter::all_match`].
+    pub grep: Option<Patterns>,
+    /// `--all-match`: every `grep` pattern has to match.
+    pub all_match: bool,
+    /// `--invert-grep`: keep the commits that the `grep` patterns reject.
+    pub invert_grep: bool,
     /// Keep a commit made at or after this time, in Unix seconds.
     pub since: Option<u64>,
     /// Keep a commit made at or before this time, in Unix seconds.
@@ -135,16 +208,22 @@ impl Filter {
         if self.until.is_some_and(|until| commit.timestamp > until) {
             return false;
         }
-        if let Some(pattern) = &self.author
-            && !(identity::short(&commit.author).contains(pattern.as_str())
-                || identity::full(&commit.author).contains(pattern.as_str()))
+        if let Some(patterns) = &self.author
+            && !(patterns.any(&identity::short(&commit.author))
+                || patterns.any(&identity::full(&commit.author)))
         {
             return false;
         }
-        if let Some(pattern) = &self.grep
-            && !String::from_utf8_lossy(&commit.message).contains(pattern.as_str())
-        {
-            return false;
+        if let Some(patterns) = &self.grep {
+            let message = String::from_utf8_lossy(&commit.message);
+            let hit = if self.all_match {
+                patterns.all(&message)
+            } else {
+                patterns.any(&message)
+            };
+            if hit == self.invert_grep {
+                return false;
+            }
         }
         true
     }
@@ -1095,6 +1174,14 @@ mod tests {
         Filter::default()
     }
 
+    fn patterns(sources: &[&str]) -> Patterns {
+        Patterns::new(
+            sources.iter().map(|s| (*s).to_owned()).collect(),
+            PatternOptions::default(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn an_empty_filter_passes_every_commit() {
         let c = commit_for(vec![], alice(), "m", 100);
@@ -1102,10 +1189,10 @@ mod tests {
     }
 
     #[test]
-    fn author_is_a_substring_of_the_short_or_the_full_form() {
+    fn author_matches_the_short_or_the_full_form() {
         let c = commit_for(vec![], alice(), "m", 100);
         let by = |pattern: &str| Filter {
-            author: Some(pattern.to_owned()),
+            author: Some(patterns(&[pattern])),
             ..filter()
         };
         assert!(by("alice").matches(&c));
@@ -1120,12 +1207,65 @@ mod tests {
     fn grep_checks_the_message() {
         let c = commit_for(vec![], alice(), "fix: widget overflow", 100);
         let by = |pattern: &str| Filter {
-            grep: Some(pattern.to_owned()),
+            grep: Some(patterns(&[pattern])),
             ..filter()
         };
         assert!(by("widget").matches(&c));
         assert!(!by("gadget").matches(&c));
         assert!(!by("WIDGET").matches(&c));
+        assert!(by("^fix:").matches(&c));
+        assert!(!by("^widget").matches(&c));
+    }
+
+    #[test]
+    fn grep_anchors_per_line_and_honors_the_flags() {
+        let c = commit_for(vec![], alice(), "title\n\nbody line v1.2", 100);
+        let with = |sources: &[&str], options: PatternOptions, all_match, invert_grep| Filter {
+            grep: Some(
+                Patterns::new(sources.iter().map(|s| (*s).to_owned()).collect(), options).unwrap(),
+            ),
+            all_match,
+            invert_grep,
+            ..filter()
+        };
+        let plain = PatternOptions::default();
+        assert!(with(&["^body"], plain, false, false).matches(&c));
+        assert!(with(&["v1.2$"], plain, false, false).matches(&c));
+        let fixed = PatternOptions {
+            fixed: true,
+            ..plain
+        };
+        assert!(!with(&["v1x2"], fixed, false, false).matches(&c));
+        assert!(with(&["v1.2"], plain, false, false).matches(&c));
+        assert!(with(&["v1.2"], fixed, false, false).matches(&c));
+        let icase = PatternOptions {
+            ignore_case: true,
+            ..plain
+        };
+        assert!(with(&["^TITLE"], icase, false, false).matches(&c));
+        assert!(with(&["title", "nope"], plain, false, false).matches(&c));
+        assert!(!with(&["title", "nope"], plain, true, false).matches(&c));
+        assert!(!with(&["title"], plain, false, true).matches(&c));
+        assert!(with(&["nope"], plain, false, true).matches(&c));
+    }
+
+    #[test]
+    fn patterns_compare_by_source_and_refuse_bad_input() {
+        let a = patterns(&["x"]);
+        assert_eq!(a, patterns(&["x"]));
+        assert_ne!(a, patterns(&["y"]));
+        assert!(Patterns::new(vec!["(".to_owned()], PatternOptions::default()).is_err());
+        assert!(Patterns::new(Vec::new(), PatternOptions::default()).is_err());
+        assert!(
+            Patterns::new(
+                vec!["(".to_owned()],
+                PatternOptions {
+                    fixed: true,
+                    ..PatternOptions::default()
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]

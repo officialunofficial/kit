@@ -98,14 +98,15 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable; `gc` can reclaim it.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-p|--patch] [--stat] [--all] [--decorate] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT]... [--grep PAT]... [-F] [-i] [--all-match] [--invert-grep] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-p|--patch] [--stat] [--all] [--decorate] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp).
                     --author/
-                    --grep filter by substring match on the author identity
-                    / commit message; --since/--until bound the commit
+                    --grep filter by regex on the author identity / commit
+                    message (-F literal, -i ignore case, --all-match needs
+                    every --grep, --invert-grep keeps non-matches); --since/--until bound the commit
                     timestamp (@<unix>, now/today/yesterday, N-unit-ago,
                     or YYYY-MM-DD[ HH:MM:SS]); --no-merges hides
                     merge commits from the output; --first-parent walks

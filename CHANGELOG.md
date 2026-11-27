@@ -28,6 +28,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit range-diff` shows how each commit of a series changed between two versions of it, with the `=`, `!`, `<` and `>` lines of git and the diff of each changed pair. It pairs the commits by git's least-cost assignment, takes the ranges in git's three forms and `--creation-factor`, and bounds each side at 1,000 commits.
 - `kit stash push -a`/`--all` also saves the files the ignore rules match, such as build output, and removes them from the working tree; `pop` puts them back. `kit stash branch <name> [<stash>]` creates a branch at the commit a stash was made on, switches to it, and pops the entry with its staged state. The entry is dropped only after the restore succeeds. `kit_core::worktree` gains `build_tree_including_ignored` and `kit_core::ops::stash` gains `save_paths_with`.
 - `@{-N}` names the N-th previous HEAD of the tree, for N from 1 to 16, in `switch`, `checkout` and every revision argument, such as `kit log @{-2}`. Each tree keeps the record in a new `HEAD_HISTORY` file beside `PREVIOUS_HEAD`, which kit still writes, so an older kit keeps `switch -`; a record an older kit left stale reads as `PREVIOUS_HEAD` alone. gc keeps each recorded detached commit. `kit_core::refs` gains `read_head_history`, `nth_previous_head`, `record_previous_head` and `parse_previous_spec`.
+- `kit log --grep` and `--author` take regular expressions, as git does, with `^` and `$` at each line of the message. Both repeat, and `-F`/`--fixed-strings`, `-i`/`--regexp-ignore-case`, `-E`/`--extended-regexp`, `--all-match` and `--invert-grep` work as in git. A pattern with no regex metacharacters selects the same commits as before.
 
 ### Fixed
 
@@ -35,6 +36,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `libkit::log::Filter` takes compiled `Patterns` for `author` and `grep` in place of strings, and gains `all_match` and `invert_grep`. A `--grep` or `--author` pattern that holds regex metacharacters, such as `.` or `(`, now matches as a regex.
 - `libkit::diff::Request::renames` is an `Option<RenameOptions>` instead of a `bool`, and `libkit::diff::between_trees` takes the rename options as a fourth argument. `kit_core::ops::DiffEntry` gains `similarity`, `libkit::diff::FileStat` gains `old_path` and `libkit::status::Record` gains `similarity`.
 - `libkit::log::Query` gains `paths` and `follow`, and `libkit::log::Entry` gains `paths`.
 - `libkit::merge::Request` gains `strategy` and `libkit::rebase::Request` gains `favor`. `kit_core::ops::cherry_pick` and `kit_core::ops::revert` take a `Favor` as a fifth argument, and `kit_core::ops::rebase::RebaseState` gains `favor`.

@@ -581,7 +581,7 @@ nor
 .Fl F
 is given. They do not combine with each other or with
 .Fl Fl amend .
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl L Ar start , Ns Ar end : Ns Ar file Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl F Oc Oo Fl i Oc Oo Fl Fl all-match Oc Oo Fl Fl invert-grep Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl L Ar start , Ns Ar end : Ns Ar file Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -663,12 +663,26 @@ or
 .Fl Fl author Ar pattern
 and
 .Fl Fl grep Ar pattern
-filter by a plain substring match \(em
+filter by a regular expression \(em
 .Fl Fl author
 against the short and full identity forms,
 .Fl Fl grep
-against the full commit message. kit identities are opaque (Ed25519 keys,
-mid numbers, DID keys), not free-text names, so this is not a regex.
+against the commit message, with
+.Ql ^
+and
+.Ql $
+at each line. Both repeat; any pattern may match, or every
+.Fl Fl grep
+with
+.Fl Fl all-match .
+.Fl Fl invert-grep
+keeps the commits the
+.Fl Fl grep
+patterns reject.
+.Fl F
+takes the patterns literally and
+.Fl i
+ignores case.
 .Fl Fl since Ar date
 and
 .Fl Fl until Ar date

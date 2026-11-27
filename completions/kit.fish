@@ -230,9 +230,19 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l format -d "Output format (json)" -r -a json
 complete -c kit -n "__fish_seen_subcommand_from log" \
-    -l author -d "Filter by author substring" -r
+    -l author -d "Filter by author regex" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
-    -l grep -d "Filter by message substring" -r
+    -l grep -d "Filter by message regex" -r
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s F -l fixed-strings -d "Take patterns literally"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s i -l regexp-ignore-case -d "Ignore case in patterns"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s E -l extended-regexp -d "Extended regex (the default)"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l all-match -d "Require every --grep"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l invert-grep -d "Keep commits that do not match"
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l since -d "Only commits at or after this date" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
