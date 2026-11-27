@@ -346,6 +346,7 @@ _kit() {
                         '--all[pull from every configured remote]' \
                         '(--rebase --no-ff)--rebase[replay the current branch onto the fetched branch]' \
                         '(--rebase --no-ff)--no-ff[always create a merge commit]' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
                         '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
@@ -418,6 +419,7 @@ _kit() {
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
                         '--onto[replay onto this revision instead of the upstream]:newbase:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--continue[continue after conflict resolution]' \
                         '--skip[skip the current commit]' \
                         '--abort[abort rebase]' \
@@ -429,6 +431,7 @@ _kit() {
                         '--abort[abort revert]' \
                         '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
                         '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
@@ -438,6 +441,8 @@ _kit() {
                         '--abort[abort the in-progress merge]' \
                         '--no-commit[merge but stop before creating the merge commit]' \
                         '(-m --message)'{-m,--message}'[override the merge commit message]:message:' \
+                        '(-s --strategy)'{-s,--strategy}'[merge strategy]:strategy:(ort recursive ours)' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--help[show help]' \
                         '1:branch:'
                     ;;
@@ -447,6 +452,7 @@ _kit() {
                         '--abort[abort the cherry-pick]' \
                         '(-n --no-commit)'{-n,--no-commit}'[apply the change without creating a commit]' \
                         '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--help[show help]' \
                         '1:commit:'
                     ;;

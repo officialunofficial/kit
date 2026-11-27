@@ -13,7 +13,7 @@ use crate::hash::Hash;
 use crate::object::Object;
 use crate::store::{ObjectSink, ObjectSource, StoreError};
 
-use super::merge::{self, Conflict};
+use super::merge::{self, Conflict, Favor};
 
 /// Errors specific to cherry-pick on top of [`StoreError`]. We split
 /// these out so callers can distinguish "your input hash didn't point
@@ -66,7 +66,8 @@ impl CherryPickResult {
 /// 2. Load the target's first parent's tree as the merge `base`. If
 ///    the target is a root commit (no parents), `base = None` (empty
 ///    tree).
-/// 3. 3-way merge `(base, ours_tree, target.tree_hash)`.
+/// 3. 3-way merge `(base, ours_tree, target.tree_hash)`, resolving content
+///    conflicts to the `favor` side.
 /// 4. Return the merged tree hash, any conflicts, and the target
 ///    commit's `message` so the caller can craft a new commit.
 ///
@@ -85,6 +86,7 @@ pub fn cherry_pick<S: ObjectSource + ObjectSink + ?Sized>(
     target_hash: Hash,
     ours_tree: Hash,
     mainline: Option<usize>,
+    favor: Favor,
 ) -> Result<CherryPickResult, CherryPickError> {
     let Object::Commit(target_commit) = store.read_object(&target_hash)? else {
         return Err(CherryPickError::NotACommit);
@@ -120,11 +122,12 @@ pub fn cherry_pick<S: ObjectSource + ObjectSink + ?Sized>(
     };
 
     let original_message = target_commit.message.clone();
-    let merge_result = merge::merge_trees(
+    let merge_result = merge::merge_trees_favoring(
         store,
         parent_tree,
         Some(ours_tree),
         Some(target_commit.tree_hash),
+        favor,
     )?;
 
     Ok(CherryPickResult {
@@ -153,7 +156,7 @@ mod tests {
         ours: Hash,
         mainline: Option<usize>,
     ) -> Result<CherryPickResult, CherryPickError> {
-        s.compare(|backend| super::cherry_pick(backend, target, ours, mainline))
+        s.compare(|backend| super::cherry_pick(backend, target, ours, mainline, super::Favor::None))
     }
 
     fn store() -> (TempDir, CorpusStore) {

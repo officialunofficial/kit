@@ -46,6 +46,11 @@ struct RebaseOpts {
     /// (`edit` is not yet supported.)
     #[arg(short = 'i', long, conflicts_with_all = ["cont", "abort", "skip"])]
     interactive: bool,
+    /// Resolve every content conflict to one side: `ours` (the base being
+    /// rebased onto, as in git) or `theirs` (the commit being replayed).
+    #[arg(short = 'X', long = "strategy-option",
+          conflicts_with_all = ["cont", "abort", "skip"])]
+    strategy_option: Option<String>,
     /// Emit a machine-readable JSON result object to stdout describing
     /// the outcome: a finished rebase, a conflict pause
     /// (`"conflicts":[<path>,...]`), or an error. Best-effort on the
@@ -109,7 +114,7 @@ const USAGE: &str = "usage: kit rebase [-i] <revspec> | kit rebase [-i] --onto <
 
 /// The request that the arguments describe, or `None` when they do not fit
 /// one of the forms of [`USAGE`].
-fn request(opts: &RebaseOpts) -> Option<Request<'_>> {
+fn request(opts: &RebaseOpts, favor: libkit::merge::Favor) -> Option<Request<'_>> {
     let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
         (None, [onto]) => (onto.as_str(), None, None),
         (Some(onto), [upstream]) => (onto, Some(upstream.as_str()), None),
@@ -121,6 +126,7 @@ fn request(opts: &RebaseOpts) -> Option<Request<'_>> {
         upstream,
         branch,
         interactive: opts.interactive,
+        favor,
     })
 }
 
@@ -131,6 +137,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, RebaseFormat::Json);
+    let favor = match super::strategy_option(opts.strategy_option.as_deref()) {
+        Ok(favor) => favor,
+        Err(code) => return code,
+    };
     if opts.interactive
         && let Err(e) = editor::check_usable()
     {
@@ -159,7 +169,7 @@ pub fn run(args: &[String]) -> u8 {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
         rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
-    } else if let Some(request) = request(&opts) {
+    } else if let Some(request) = request(&opts, favor) {
         rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
         return super::usage_error(USAGE);
@@ -172,12 +182,19 @@ pub fn run(args: &[String]) -> u8 {
 
 /// Rebases the current branch onto `onto` and reports the outcome as
 /// `kit rebase` does. The caller holds the worktree lock.
-pub(super) fn rebase_onto(layout: &RepoLayout, store: &ObjectStore, onto: &str, json: bool) -> u8 {
+pub(super) fn rebase_onto(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    onto: &str,
+    favor: libkit::merge::Favor,
+    json: bool,
+) -> u8 {
     let request = Request {
         onto,
         upstream: None,
         branch: None,
         interactive: false,
+        favor,
     };
     let signing = super::signing::Configured;
     match rebase::start(

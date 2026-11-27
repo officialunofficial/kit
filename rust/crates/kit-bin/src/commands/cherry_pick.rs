@@ -59,6 +59,11 @@ struct CherryPickOpts {
     /// guess which side is the mainline) and rejected for a non-merge.
     #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
     mainline: Option<usize>,
+    /// Resolve every content conflict to one side: `ours` (the current
+    /// branch) or `theirs` (the picked commit).
+    #[arg(short = 'X', long = "strategy-option",
+          conflicts_with_all = ["cont", "abort"])]
+    strategy_option: Option<String>,
     /// Emit a machine-readable JSON result object to stdout describing
     /// the outcome: a new commit, `--no-commit` staging, a conflict
     /// pause (`"conflicts":[<path>,...]`), or an error.
@@ -87,6 +92,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, CherryPickFormat::Json);
+    let favor = match super::strategy_option(opts.strategy_option.as_deref()) {
+        Ok(favor) => favor,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -109,7 +118,15 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&layout, &store, json)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&layout, &store, hex, opts.no_commit, opts.mainline, json)
+        start(
+            &layout,
+            &store,
+            hex,
+            opts.no_commit,
+            opts.mainline,
+            favor,
+            json,
+        )
     } else {
         super::usage_error("usage: kit cherry-pick <commit> | --continue | --abort")
     }
@@ -122,6 +139,7 @@ fn start(
     hex: &str,
     no_commit: bool,
     mainline: Option<usize>,
+    favor: libkit::merge::Favor,
     json: bool,
 ) -> u8 {
     let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
@@ -151,7 +169,7 @@ fn start(
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
 
-    let result = match cherry_pick(store, target, ours_tree, mainline) {
+    let result = match cherry_pick(store, target, ours_tree, mainline, favor) {
         Ok(r) => r,
         // Mainline-selection misuse is a usage error (bad invocation),
         // distinct from a runtime store/merge failure.

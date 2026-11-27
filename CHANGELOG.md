@@ -12,11 +12,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit log [<rev>] [--] <path>...` shows only the commits that change the paths, with git's default history simplification at merges. `--follow` continues the history of one file under its old name across a rename. `-p` and `--stat` show only the files at the paths.
 - `diff`, `status`, `show` and `log -p`/`--stat` detect renames by similarity, as git does. A deleted and an added file at least 50% alike pair into one rename, scored with git's method, so the scores match git's (`R090`, `similarity index 90%`, `R90` in `status --porcelain=v2`). `-M[<n>]`/`--find-renames[=<n>]` takes git's threshold grammar, `--no-renames` turns detection off, and `-l<n>` sets the candidate limit (default 1000) past which only identical content pairs, with git's warning. `--stat` names both sides of a rename (`dir/{a.txt => b.txt}`), and a rename's patch now carries its mode lines and hunks.
 - `kit reflog --recovery` lists the commits that `commit --amend`, `reset`, `rebase` and `stash pop` replaced, and the revision `recovery@{N}` names them, so `kit reset --hard recovery@{0}` undoes the last rewrite.
+- `merge`, `cherry-pick`, `revert`, `rebase` and `pull` take `-X ours` and `-X theirs` (`--strategy-option`), which resolve every content conflict to one side while changes that do not conflict still merge; a paused rebase keeps the option. `merge -s ours` records a merge commit with the tree of `HEAD`, and `-s ort` and `-s recursive` name the default merge.
 
 ### Breaking
 
 - `libkit::diff::Request::renames` is an `Option<RenameOptions>` instead of a `bool`, and `libkit::diff::between_trees` takes the rename options as a fourth argument. `kit_core::ops::DiffEntry` gains `similarity`, `libkit::diff::FileStat` gains `old_path` and `libkit::status::Record` gains `similarity`.
 - `libkit::log::Query` gains `paths` and `follow`, and `libkit::log::Entry` gains `paths`.
+- `libkit::merge::Request` gains `strategy` and `libkit::rebase::Request` gains `favor`. `kit_core::ops::cherry_pick` and `kit_core::ops::revert` take a `Favor` as a fifth argument, and `kit_core::ops::rebase::RebaseState` gains `favor`.
 
 ## [0.11.1] - 2026-11-26
 

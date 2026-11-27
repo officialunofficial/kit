@@ -238,6 +238,24 @@ pub fn not_yet_ported(cmd: &str) -> u8 {
     exit::TEMPFAIL
 }
 
+/// The side that `-X`/`--strategy-option` names: `ours` or `theirs`, and
+/// [`libkit::merge::Favor::None`] without the flag.
+///
+/// # Errors
+///
+/// Any other value prints a usage error and returns its exit code.
+pub(crate) fn strategy_option(value: Option<&str>) -> Result<libkit::merge::Favor, u8> {
+    match value {
+        None => Ok(libkit::merge::Favor::None),
+        Some(v) => libkit::merge::Favor::from_option(v).ok_or_else(|| {
+            usage_error(&format!(
+                "unsupported strategy option '{}': use ours or theirs",
+                kit_core::protocol::escape_terminal_text(v, false)
+            ))
+        }),
+    }
+}
+
 /// Shared helper: print a usage error and return the USAGE exit code.
 #[must_use]
 pub fn usage_error(msg: &str) -> u8 {

@@ -1,6 +1,7 @@
 //! Rebase state machine.
 //!
-//! Persists rebase state under `.kit/rebase-apply/` as six files:
+//! Persists rebase state under `.kit/rebase-apply/` as six files and one
+//! optional file:
 //!
 //! - `head-name`  : symbolic name of the branch being rebased
 //! - `orig-head`  : 64-hex BLAKE3 of the tip before rebase started
@@ -9,6 +10,8 @@
 //! - `actions`    : newline-separated per-commit action parallel to `todo`
 //!   (`pick`/`reword`/`squash`/`fixup`); it has exactly one line per `todo` line
 //! - `done`       : newline-separated list of replayed commits
+//! - `strategy-option` : `ours` or `theirs`, the side every replayed
+//!   commit's conflicts resolve to; absent when conflicts stop the rebase
 //!
 //! Trailing newlines are tolerated on read and always written.
 //!
@@ -28,6 +31,7 @@ use tempfile::NamedTempFile;
 
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::layout::RepoLayout;
+use crate::ops::merge::Favor;
 use crate::store::ObjectStore;
 
 /// Directory under `.kit/` that holds the persisted rebase state.
@@ -39,6 +43,8 @@ const ONTO_FILE: &str = "onto";
 const TODO_FILE: &str = "todo";
 const DONE_FILE: &str = "done";
 const ACTIONS_FILE: &str = "actions";
+const STRATEGY_OPTION_FILE: &str = "strategy-option";
+const MAX_STRATEGY_OPTION_BYTES: u64 = 64;
 
 const MAX_HEAD_NAME_BYTES: u64 = 4096;
 const MAX_HASH_FILE_BYTES: u64 = 128;
@@ -154,6 +160,8 @@ pub struct RebaseState {
     pub actions: Vec<RebaseAction>,
     /// Commits already replayed.
     pub done: Vec<Hash>,
+    /// The side the conflicts of every replayed commit resolve to.
+    pub favor: Favor,
 }
 
 impl RebaseState {
@@ -208,6 +216,7 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
     // The actions file is parallel to todo. A missing file or a length
     // mismatch is corrupt state.
     let actions = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
+    let favor = read_favor(&dir.join(STRATEGY_OPTION_FILE))?;
 
     Ok(RebaseState {
         head_name,
@@ -216,6 +225,7 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
         todo,
         actions,
         done,
+        favor,
     })
 }
 
@@ -249,6 +259,18 @@ pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()>
         (ACTIONS_FILE, actions_bytes(&state.actions)),
         (DONE_FILE, hash_list_bytes(&state.done)),
     ];
+    let option = state
+        .favor
+        .option()
+        .map(|o| (STRATEGY_OPTION_FILE, with_newline(o.as_bytes())));
+    if option.is_none() {
+        match fs::remove_file(dir.join(STRATEGY_OPTION_FILE)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(RebaseError::Io(e)),
+        }
+    }
+    let files: Vec<_> = files.into_iter().chain(option).collect();
     let mut staged = Vec::with_capacity(files.len());
     for (name, bytes) in &files {
         if holds(&dir.join(name), bytes) {
@@ -454,6 +476,16 @@ fn holds(path: &Path, bytes: &[u8]) -> bool {
     same_len && fs::read(path).is_ok_and(|on_disk| on_disk == bytes)
 }
 
+/// Read the optional strategy-option file. A missing file is
+/// [`Favor::None`]; any value but `ours` or `theirs` is corrupt state.
+fn read_favor(path: &Path) -> RebaseResult<Favor> {
+    match read_text_capped(path, MAX_STRATEGY_OPTION_BYTES) {
+        Ok(text) => Favor::from_option(trim_trailing(&text)).ok_or(RebaseError::InvalidRebaseState),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Favor::None),
+        Err(_) => Err(RebaseError::InvalidRebaseState),
+    }
+}
+
 fn read_text_capped(path: &Path, cap: u64) -> io::Result<String> {
     crate::bounded_read::read_capped_string(path, cap)
 }
@@ -629,6 +661,7 @@ mod tests {
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
 
         let state = RebaseState {
+            favor: Favor::None,
             head_name: "feature-branch".to_string(),
             orig_head: hash::hash(b"orig-head"),
             onto: hash::hash(b"onto"),
@@ -658,6 +691,7 @@ mod tests {
         let kit = RepoLayout::single(tmp.path());
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
         let state = RebaseState {
+            favor: Favor::None,
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -681,12 +715,50 @@ mod tests {
 
     fn sample_state(todo: &[&[u8]]) -> RebaseState {
         RebaseState {
+            favor: Favor::None,
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
             todo: todo.iter().map(|t| hash::hash(t)).collect(),
             actions: vec![RebaseAction::Pick; todo.len()],
             done: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_strategy_option_round_trips_and_is_removed_when_cleared() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let mut state = sample_state(&[b"t1"]);
+        let option = kit.rebase_dir().join(STRATEGY_OPTION_FILE);
+        write_state(&kit, &state).unwrap();
+        assert!(!option.exists());
+        assert_eq!(read_state(&kit).unwrap().favor, Favor::None);
+        for favor in [Favor::Ours, Favor::Theirs] {
+            state.favor = favor;
+            write_state(&kit, &state).unwrap();
+            assert_eq!(read_state(&kit).unwrap(), state);
+        }
+        state.favor = Favor::None;
+        write_state(&kit, &state).unwrap();
+        assert!(!option.exists());
+        assert_eq!(read_state(&kit).unwrap(), state);
+    }
+
+    #[test]
+    fn an_unknown_strategy_option_is_invalid_state() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        write_state(&kit, &sample_state(&[b"t1"])).unwrap();
+        let option = kit.rebase_dir().join(STRATEGY_OPTION_FILE);
+        for content in [&b""[..], b"patience\n", b"Ours\n", &[b'o'; 100][..]] {
+            fs::write(&option, content).unwrap();
+            assert!(matches!(
+                read_state(&kit),
+                Err(RebaseError::InvalidRebaseState)
+            ));
         }
     }
 
@@ -809,6 +881,7 @@ mod tests {
     #[test]
     fn consume_front_keeps_todo_and_actions_aligned() {
         let mut state = RebaseState {
+            favor: Favor::None,
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -830,6 +903,7 @@ mod tests {
         fs::create_dir_all(kit.worktree_state_dir()).unwrap();
 
         let state = RebaseState {
+            favor: Favor::None,
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),

@@ -1002,7 +1002,7 @@ prints the current patterns,
 clears them, and
 .Cm reapply
 re-materialises the working tree from the current patterns.
-.It Cm merge Oo Fl Fl no-commit Oc Oo Fl m Ar msg Oc Ar branch | Fl Fl continue | Fl Fl abort
+.It Cm merge Oo Fl Fl no-commit Oc Oo Fl m Ar msg Oc Oo Fl s Ar strategy Oc Oo Fl X Ar option Oc Ar branch | Fl Fl continue | Fl Fl abort
 Merge
 .Ar branch
 into HEAD. Fast-forwards when possible.
@@ -1015,14 +1015,30 @@ or
 .Fl m
 or
 .Fl Fl message
-overrides the merge commit message. After a conflict, resolve and
+overrides the merge commit message.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+.Pq Fl Fl strategy-option
+resolve each conflict in a text file to that side's lines, and a conflict in
+a binary or large file to that side's whole file; changes that do not
+conflict still merge from both sides.
+A delete/modify conflict, a file against a directory and two different modes
+still stop the merge.
+.Fl s Cm ours
+records a merge commit with the tree of HEAD and never fast-forwards;
+.Fl s Cm ort
+and
+.Fl s Cm recursive
+name the default merge.
+After a conflict, resolve and
 .Cm add
 the paths, then
 .Fl Fl continue ,
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl X Ar option Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
 With
@@ -1055,6 +1071,17 @@ cannot be the first line and is rejected before any mutation. Removing every
 line resets the branch to the base.
 .Cm edit
 (stop-to-amend) is not yet supported.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge ;
+as in
+.Xr git 1 ,
+.Cm ours
+is the base being rebased onto and
+.Cm theirs
+the replayed commit, and a paused rebase keeps the option.
 Accepts
 .Fl Fl continue ,
 .Fl Fl skip ,
@@ -1102,7 +1129,7 @@ A name the remote holds as both a branch and a tag needs
 or
 .Pa refs/tags/ .
 An S3 remote refuses every delete.
-.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
+.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl X Ar option Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 .It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 Download or download-and-merge from the remote.
 Both take every remote tag after the branches unless
@@ -1128,6 +1155,13 @@ It does not combine with
 .Fl Fl all
 or
 .Fl Fl rebase .
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve the conflicts of the merge or the replay as in
+.Cm merge
+and
+.Cm rebase .
 .Cm fetch Fl Fl prune
 then deletes the remote-tracking refs whose branch is gone from the remote;
 it deletes no local branch and no tag.
@@ -1158,7 +1192,7 @@ renames a named remote and repoints any branch upstream tracking it.
 Removing or renaming a remote never touches the user-scoped
 .Ar trusted_remote_endpoint ,
 which is keyed by exact URL rather than remote name.
-.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Ar hash | Fl Fl continue | Fl Fl abort
+.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Oo Fl X Ar option Oc Ar hash | Fl Fl continue | Fl Fl abort
 Apply a single commit from elsewhere onto HEAD.
 .Fl n
 or
@@ -1176,6 +1210,11 @@ This differs from
 git's
 .Cm cherry-pick Fl m
 is mainline selection, not a message override.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge .
 On conflict, resolve and
 .Cm add
 the paths, then
@@ -1183,7 +1222,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc
+.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Op Fl X Ar option
 Create a new commit that undoes
 .Ar commit
 (the inverse of cherry-pick). A normal forward commit — it does not rewrite
@@ -1206,6 +1245,11 @@ which undoes the merge relative to that parent, counted from 1; a number out
 of range, and
 .Fl m
 on a commit that is not a merge, are errors.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge .
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
 .It Cm gc Oo Fl n | Fl Fl dry-run Oc Oo Fl Fl grace-secs Ar secs Oc

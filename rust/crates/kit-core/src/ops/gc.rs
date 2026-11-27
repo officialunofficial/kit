@@ -2010,6 +2010,7 @@ mod tests {
         rebase::write_state(
             &md,
             &rebase::RebaseState {
+                favor: crate::ops::merge::Favor::None,
                 head_name: "main".to_owned(),
                 orig_head: kept,
                 onto: kept,
@@ -2189,6 +2190,7 @@ mod tests {
             rebase::write_state(
                 md,
                 &rebase::RebaseState {
+                    favor: crate::ops::merge::Favor::None,
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: kept,
@@ -2203,6 +2205,7 @@ mod tests {
             rebase::write_state(
                 md,
                 &rebase::RebaseState {
+                    favor: crate::ops::merge::Favor::None,
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: gone,
@@ -2217,6 +2220,7 @@ mod tests {
             rebase::write_state(
                 md,
                 &rebase::RebaseState {
+                    favor: crate::ops::merge::Favor::None,
                     head_name: "main".to_owned(),
                     orig_head: gone,
                     onto: kept,

@@ -38,6 +38,55 @@ pub enum ConflictKind {
     AddAdd,
 }
 
+/// The side a content conflict resolves to, as git's `-X ours` and
+/// `-X theirs`. With a side, a conflicting hunk of a text file takes that
+/// side's lines, a binary or large file takes that side's whole content,
+/// and an add/add conflict between two files takes that side's file.
+/// Delete/modify conflicts, a file against a directory and two different
+/// modes still conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Favor {
+    /// Report every conflict.
+    #[default]
+    None,
+    /// Resolve conflicts to the ours side.
+    Ours,
+    /// Resolve conflicts to the theirs side.
+    Theirs,
+}
+
+impl Favor {
+    /// Parse the value of `-X`: `ours` or `theirs`. Anything else is `None`.
+    #[must_use]
+    pub fn from_option(s: &str) -> Option<Self> {
+        match s {
+            "ours" => Some(Favor::Ours),
+            "theirs" => Some(Favor::Theirs),
+            _ => None,
+        }
+    }
+
+    /// The `-X` value of this side, or `None` for [`Favor::None`].
+    #[must_use]
+    pub fn option(self) -> Option<&'static str> {
+        match self {
+            Favor::None => None,
+            Favor::Ours => Some("ours"),
+            Favor::Theirs => Some("theirs"),
+        }
+    }
+
+    /// The favored one of `ours` and `theirs`, or `None` for
+    /// [`Favor::None`].
+    fn pick<T>(self, ours: T, theirs: T) -> Option<T> {
+        match self {
+            Favor::None => None,
+            Favor::Ours => Some(ours),
+            Favor::Theirs => Some(theirs),
+        }
+    }
+}
+
 /// Single conflict report. `base_hash`, `ours_hash`, `theirs_hash` are
 /// `None` whenever the corresponding side does not contain the path
 /// (Add/Add has no base; Delete/Modify has no hash on the deleting
@@ -100,6 +149,22 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
     ours_hash: Option<Hash>,
     theirs_hash: Option<Hash>,
 ) -> Result<MergeResult, StoreError> {
+    merge_trees_favoring(store, base_hash, ours_hash, theirs_hash, Favor::None)
+}
+
+/// [`merge_trees`] that resolves content conflicts to one side, as
+/// [`Favor`] describes. With [`Favor::None`] it is [`merge_trees`].
+///
+/// # Errors
+///
+/// As [`merge_trees`].
+pub fn merge_trees_favoring<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
+    base_hash: Option<Hash>,
+    ours_hash: Option<Hash>,
+    theirs_hash: Option<Hash>,
+    favor: Favor,
+) -> Result<MergeResult, StoreError> {
     let base_entries = load_entries(store, base_hash)?;
     let ours_entries = load_entries(store, ours_hash)?;
     let theirs_entries = load_entries(store, theirs_hash)?;
@@ -116,6 +181,7 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
         &mut conflicts,
         0,
         &mut WalkBudget::new(),
+        favor,
     )?;
 
     let tree_hash = put_tree(store, merged)?;
@@ -420,21 +486,24 @@ fn single_blob_bytes<S: ObjectSource + ?Sized>(
 /// blob. Returns the hash of the merged blob when ours/theirs
 /// changed disjoint regions of base, or `None` to fall back to a
 /// modify/modify conflict (overlapping changes, a binary side, or a
-/// chunked/large blob). Genuine store I/O errors propagate.
+/// chunked/large blob). With a [`Favor`] side it never falls back: a
+/// conflicting hunk takes that side's lines, and content that cannot be
+/// line-merged is that side's blob. Genuine store I/O errors propagate.
 fn try_text_merge<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
     base_h: Hash,
     ours_h: Hash,
     theirs_h: Hash,
+    favor: Favor,
 ) -> Result<Option<Hash>, StoreError> {
     let (Some(base), Some(ours), Some(theirs)) = (
         single_blob_bytes(store, base_h)?,
         single_blob_bytes(store, ours_h)?,
         single_blob_bytes(store, theirs_h)?,
     ) else {
-        return Ok(None);
+        return Ok(favor.pick(ours_h, theirs_h));
     };
-    match crate::ops::merge_blob_3way(&base, &ours, &theirs) {
+    match crate::ops::merge_blob_3way_favoring(&base, &ours, &theirs, favor) {
         Some(merged) => {
             // Store as a single Blob — same shape (and hash) `add` produces
             // for sub-threshold content, so the merged object dedups.
@@ -540,6 +609,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
     conflicts: &mut Vec<Conflict>,
     depth: usize,
     budget: &mut WalkBudget,
+    favor: Favor,
 ) -> Result<(), StoreError> {
     let sub_prefix = join_path(prefix, entry_name);
     let base_entries = load_entries(store, base_sub)?;
@@ -557,6 +627,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
         conflicts,
         depth + 1,
         budget,
+        favor,
     )?;
 
     let sub_hash = put_tree(store, sub_merged)?;
@@ -575,6 +646,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     conflicts: &mut Vec<Conflict>,
     depth: usize,
     budget: &mut WalkBudget,
+    favor: Favor,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -651,6 +723,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -669,6 +742,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, t.mode, t.object_hash);
@@ -687,6 +761,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -707,11 +782,12 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         conflicts,
                         depth,
                         budget,
+                        favor,
                     )?;
                 } else if o.mode == t.mode
                     && matches!(o.mode, EntryMode::Blob | EntryMode::Executable)
                     && let Some(merged_hash) =
-                        try_text_merge(store, b.object_hash, o.object_hash, t.object_hash)?
+                        try_text_merge(store, b.object_hash, o.object_hash, t.object_hash, favor)?
                 {
                     // Both changed the same regular file, but on disjoint
                     // lines — auto-merge the content. Mode is shared,
@@ -755,7 +831,15 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         conflicts,
                         depth,
                         budget,
+                        favor,
                     )?;
+                } else if o.mode != EntryMode::Tree
+                    && t.mode != EntryMode::Tree
+                    && let Some(side) = favor.pick(o, t)
+                {
+                    // Two files added at one path: the favored side's file,
+                    // which is what a line merge over an empty base gives.
+                    add_entry(merged, min_name, side.mode, side.object_hash);
                 } else {
                     conflicts.push(Conflict {
                         path: join_path(prefix, min_name),
@@ -888,6 +972,65 @@ mod tests {
     }
     fn find_entry<'a>(entries: &'a [TreeEntry], name: &[u8]) -> Option<&'a TreeEntry> {
         entries.iter().find(|e| e.name == name)
+    }
+
+    fn merge_favoring(
+        s: &CorpusStore,
+        base: Hash,
+        ours: Hash,
+        theirs: Hash,
+        favor: Favor,
+    ) -> MergeResult {
+        s.compare(|backend| {
+            super::merge_trees_favoring(backend, Some(base), Some(ours), Some(theirs), favor)
+        })
+        .unwrap()
+    }
+
+    fn one_file(s: &CorpusStore, mode: EntryMode, data: &[u8]) -> Hash {
+        let blob = put_blob(s, data);
+        make_tree(s, vec![entry(b"f", mode, blob)])
+    }
+
+    #[test]
+    fn favoring_resolves_a_content_and_an_add_add_conflict_to_the_side() {
+        let (_d, s) = store();
+        let base = one_file(&s, EntryMode::Blob, b"1\n2\n3\n");
+        let ours = one_file(&s, EntryMode::Blob, b"ours\n2\n3\n");
+        let theirs = one_file(&s, EntryMode::Blob, b"theirs\n2\n3\n");
+        let empty = make_tree(&s, Vec::new());
+        assert!(merge_favoring(&s, base, ours, theirs, Favor::None).has_conflicts());
+        for (favor, want) in [(Favor::Ours, ours), (Favor::Theirs, theirs)] {
+            let r = merge_favoring(&s, base, ours, theirs, favor);
+            assert!(!r.has_conflicts(), "{favor:?}");
+            assert_eq!(r.tree_hash, want, "{favor:?}");
+            let r = merge_favoring(&s, empty, ours, theirs, favor);
+            assert!(!r.has_conflicts(), "add/add {favor:?}");
+            assert_eq!(r.tree_hash, want, "add/add {favor:?}");
+        }
+    }
+
+    #[test]
+    fn favoring_still_stops_on_delete_modify_mode_and_kind_conflicts() {
+        let (_d, s) = store();
+        let base = one_file(&s, EntryMode::Blob, b"1\n");
+        let changed = one_file(&s, EntryMode::Blob, b"2\n");
+        let exec = one_file(&s, EntryMode::Executable, b"3\n");
+        let empty = make_tree(&s, Vec::new());
+        let dir = make_tree(&s, vec![entry(b"f", EntryMode::Tree, base)]);
+        for favor in [Favor::Ours, Favor::Theirs] {
+            let kinds = |b, o, t| {
+                merge_favoring(&s, b, o, t, favor)
+                    .conflicts
+                    .iter()
+                    .map(|c| c.kind)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(kinds(base, empty, changed), [ConflictKind::DeleteModify]);
+            assert_eq!(kinds(base, changed, empty), [ConflictKind::DeleteModify]);
+            assert_eq!(kinds(base, changed, exec), [ConflictKind::ModifyModify]);
+            assert_eq!(kinds(empty, changed, dir), [ConflictKind::AddAdd]);
+        }
     }
 
     #[test]
@@ -1751,6 +1894,7 @@ mod walk_budget_tests {
                 &mut conflicts,
                 0,
                 &mut budget,
+                Favor::None,
             )
         };
         merge(1_000_000).unwrap();
@@ -1803,6 +1947,7 @@ mod walk_budget_tests {
                 &mut conflicts,
                 0,
                 &mut budget,
+                Favor::None,
             )
         };
         let exact = (67 + 100) + 2 * (67 + 102);

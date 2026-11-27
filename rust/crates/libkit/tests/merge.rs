@@ -23,6 +23,7 @@ fn merge_request(target: &str) -> Request<'_> {
         no_commit: false,
         no_ff: false,
         message: None,
+        strategy: merge::Strategy::default(),
     }
 }
 

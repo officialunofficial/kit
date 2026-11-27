@@ -54,6 +54,11 @@ struct PullOpts {
     /// `--abort`. Does not combine with `--all` or `--rebase`.
     #[arg(long = "no-ff", conflicts_with_all = ["all", "rebase"])]
     no_ff: bool,
+    /// Resolve every content conflict of the `--no-ff` merge or the
+    /// `--rebase` replay to one side: `ours` or `theirs`, as `kit merge` and
+    /// `kit rebase` do.
+    #[arg(short = 'X', long = "strategy-option")]
+    strategy_option: Option<String>,
     #[command(flatten)]
     tags: super::fetched_tags::TagFlags,
     #[command(flatten)]
@@ -79,6 +84,9 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, PullFormat::Json);
+    if let Err(code) = super::strategy_option(opts.strategy_option.as_deref()) {
+        return code;
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -141,6 +149,8 @@ fn pull_one(
     opts: &PullOpts,
 ) -> u8 {
     let quiet = opts.quiet;
+    // `run` checked the option already.
+    let favor = super::strategy_option(opts.strategy_option.as_deref()).unwrap_or_default();
     let Some(resolved) = config::resolve_remote(cfg, remote) else {
         return emit_err_json(
             &if remote.is_empty() {
@@ -220,9 +230,11 @@ fn pull_one(
                     };
                     let code = match outcome {
                         None if opts.no_ff => {
-                            merge_fetched(layout, &resolved.name, require_signed, json)
+                            merge_fetched(layout, &resolved.name, require_signed, favor, json)
                         }
-                        None => rebase_onto_fetched(layout, &resolved.name, require_signed, json),
+                        None => {
+                            rebase_onto_fetched(layout, &resolved.name, require_signed, favor, json)
+                        }
                         Some(outcome) => report_fast_forward(
                             layout,
                             &resolved.name,
@@ -304,7 +316,13 @@ fn report_fast_forward(
 
 /// Rebase the current branch onto the branch that the fetch updated, unless
 /// the branch has that tip already.
-fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
+fn rebase_onto_fetched(
+    layout: &RepoLayout,
+    remote: &str,
+    require_signed: bool,
+    favor: libkit::merge::Favor,
+    json: bool,
+) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -358,13 +376,25 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, 
             }
         }
     }
-    super::rebase::rebase_onto(layout, &store, &kit_core::hash::to_hex(&upstream), json)
+    super::rebase::rebase_onto(
+        layout,
+        &store,
+        &kit_core::hash::to_hex(&upstream),
+        favor,
+        json,
+    )
 }
 
 /// Merge the branch that the fetch updated into the current branch, and write
 /// a merge commit even when a fast-forward is possible. A branch that holds
 /// the fetched tip is up to date and gets no commit.
-fn merge_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
+fn merge_fetched(
+    layout: &RepoLayout,
+    remote: &str,
+    require_signed: bool,
+    favor: libkit::merge::Favor,
+    json: bool,
+) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -430,6 +460,7 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: 
             no_commit: false,
             no_ff: true,
             message: Some(&message),
+            strategy: libkit::merge::Strategy::ThreeWay(favor),
         },
         json,
     )

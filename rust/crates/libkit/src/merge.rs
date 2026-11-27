@@ -25,7 +25,8 @@ use kit_core::ops::conflict_state::{
     self, ConflictRecord, ConflictStateError, MergeState, in_progress_op_name, is_merge_in_progress,
 };
 use kit_core::ops::graph::AncestorError;
-use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
+pub use kit_core::ops::merge::Favor;
+use kit_core::ops::merge::{MergeResult, find_merge_base_strict, merge_trees_favoring};
 use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
@@ -133,6 +134,25 @@ pub struct Request<'a> {
     /// `Merge branch '<target>'`, or `Merge remote-tracking branch
     /// '<remote>/<branch>'` for a remote-tracking ref.
     pub message: Option<&'a str>,
+    /// How the trees merge.
+    pub strategy: Strategy,
+}
+
+/// How [`start`] merges the trees, as git's `-s` and `-X`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// The three-way merge. A [`Favor`] side resolves content conflicts to
+    /// that side, as `-X ours` and `-X theirs` do.
+    ThreeWay(Favor),
+    /// Keep the tree of `HEAD` and record the target as the second parent,
+    /// as `-s ours` does. It never fast-forwards.
+    Ours,
+}
+
+impl Default for Strategy {
+    fn default() -> Self {
+        Strategy::ThreeWay(Favor::None)
+    }
 }
 
 /// A merge commit.
@@ -230,7 +250,11 @@ pub fn start(
         other => Error::History(other),
     })?;
 
-    if base == Some(ours) && !request.no_ff {
+    let favor = match request.strategy {
+        Strategy::ThreeWay(favor) => Some(favor),
+        Strategy::Ours => None,
+    };
+    if base == Some(ours) && !request.no_ff && favor.is_some() {
         let theirs_tree = commit_tree(store, theirs)?;
         let ours_tree = commit_tree(store, ours)?;
         ensure_restore_safe_from(
@@ -254,8 +278,16 @@ pub fn start(
     let theirs_tree = commit_tree(store, theirs)?;
     let base_tree = base.map(|b| commit_tree(store, b)).transpose()?;
 
-    let result =
-        merge_trees(store, base_tree, Some(ours_tree), Some(theirs_tree)).map_err(Error::Merge)?;
+    let result = match favor {
+        Some(favor) => {
+            merge_trees_favoring(store, base_tree, Some(ours_tree), Some(theirs_tree), favor)
+                .map_err(Error::Merge)?
+        }
+        None => MergeResult {
+            tree_hash: ours_tree,
+            conflicts: Vec::new(),
+        },
+    };
 
     let message = match request.message {
         Some(m) => m.to_owned(),

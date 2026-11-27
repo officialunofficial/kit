@@ -1241,7 +1241,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`) |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`). `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X` |
 
 Remote / sync:
 

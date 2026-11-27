@@ -295,6 +295,12 @@ complete -c kit -n "__fish_seen_subcommand_from merge" \
     -l no-commit -d "Merge but stop before creating the merge commit"
 complete -c kit -n "__fish_seen_subcommand_from merge" \
     -l message -s m -d "Override the merge commit message" -r
+complete -c kit -n "__fish_seen_subcommand_from merge" \
+    -l strategy -s s -d "Merge strategy" -xa "ort recursive ours"
+complete -c kit -n "__fish_seen_subcommand_from merge" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from cherry-pick" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from revert" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from rebase" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
 complete -c kit -n "__fish_seen_subcommand_from cherry-pick" \
     -l continue -d "Continue an in-progress cherry-pick"
 complete -c kit -n "__fish_seen_subcommand_from cherry-pick" \
@@ -522,6 +528,7 @@ complete -c kit -n "__fish_seen_subcommand_from revert" -l format -d "Output for
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l all -d "Pull from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l rebase -d "Replay the current branch onto the fetched branch"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-ff -d "Always create a merge commit"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"

@@ -28,6 +28,7 @@ use kit_core::ops::cherry_pick::{CherryPickError, cherry_pick};
 use kit_core::ops::conflict_state::{
     self, ConflictRecord, ConflictStateError, in_progress_op_name,
 };
+use kit_core::ops::merge::Favor;
 pub use kit_core::ops::rebase::RebaseAction;
 use kit_core::ops::rebase::{
     RebaseError, RebaseState, cleanup_rebase, collect_commits_to_replay, is_rebase_in_progress,
@@ -262,6 +263,10 @@ pub struct Request<'a> {
     pub branch: Option<&'a str>,
     /// Edit the todo list before the replay.
     pub interactive: bool,
+    /// The side the conflicts of every replayed commit resolve to, as
+    /// `-X ours` and `-X theirs`. As in git, ours is the base being rebased
+    /// onto and theirs the replayed commit. A paused rebase keeps it.
+    pub favor: Favor,
 }
 
 /// How a rebase has ended or paused.
@@ -405,6 +410,7 @@ pub fn start(
         todo,
         actions,
         done: Vec::new(),
+        favor: request.favor,
     };
     let signer = signing.open(layout)?;
     let onto_tree = commit_tree(store, onto)?;
@@ -638,7 +644,8 @@ fn replay(
             Ok(Object::Commit(c)) if c.parents.len() >= 2 => Some(1),
             _ => None,
         };
-        let result = cherry_pick(store, target, ours_tree, mainline).map_err(Error::CherryPick)?;
+        let result = cherry_pick(store, target, ours_tree, mainline, state.favor)
+            .map_err(Error::CherryPick)?;
         if result.has_conflicts() {
             // Save the state first. Then the material goes into the files and
             // the index, and a resume commits the resolved tree. A resume

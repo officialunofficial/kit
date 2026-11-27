@@ -42,6 +42,15 @@ struct MergeOpts {
     /// Override the merge commit message (default `Merge branch '<name>'`).
     #[arg(short = 'm', long = "message", conflicts_with_all = ["cont", "abort"])]
     message: Option<String>,
+    /// The merge strategy: `ort` or `recursive` (the three-way merge, the
+    /// default) or `ours` (keep the tree of HEAD, record the branch as the
+    /// second parent, never fast-forward).
+    #[arg(short = 's', long = "strategy", conflicts_with_all = ["cont", "abort"])]
+    strategy: Option<String>,
+    /// Resolve every content conflict to one side: `ours` or `theirs`.
+    #[arg(short = 'X', long = "strategy-option",
+          conflicts_with_all = ["cont", "abort"])]
+    strategy_option: Option<String>,
     /// Emit a machine-readable JSON result object to stdout describing
     /// the outcome: a clean merge/fast-forward, `--no-commit` staging, a
     /// conflict pause (`"conflicts":[<path>,...]`), or an error.
@@ -58,6 +67,23 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, MergeFormat::Json);
+    let favor = match super::strategy_option(opts.strategy_option.as_deref()) {
+        Ok(favor) => favor,
+        Err(code) => return code,
+    };
+    let strategy = match (opts.strategy.as_deref(), favor) {
+        (None | Some("ort" | "recursive"), favor) => merge::Strategy::ThreeWay(favor),
+        (Some("ours"), merge::Favor::None) => merge::Strategy::Ours,
+        (Some("ours"), _) => {
+            return super::usage_error("-s ours does not take a strategy option (-X)");
+        }
+        (Some(other), _) => {
+            return super::usage_error(&format!(
+                "unsupported merge strategy '{}': use ort, recursive or ours",
+                kit_core::protocol::escape_terminal_text(other, false)
+            ));
+        }
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -88,6 +114,7 @@ pub fn run(args: &[String]) -> u8 {
                 no_commit: opts.no_commit,
                 no_ff: false,
                 message: opts.message.as_deref(),
+                strategy,
             },
             json,
         )

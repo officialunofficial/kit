@@ -34,8 +34,8 @@ pub use diff::{
     BINARY_SNIFF_LEN, DEFAULT_CONTEXT_LINES, DiffEntry, DiffError, DiffKind, DiffResult, HunkLine,
     HunkLineKind, PatchHunk, StatusEntry, StatusStaging, WhitespaceMode, apply_hunks_subset,
     detect_content_renames, diff_line_counts, diff_trees, enumerate_hunks, is_binary,
-    merge_blob_3way, status_diff, status_diff_observed, text_patch, unified_hunks,
-    unified_hunks_opts,
+    merge_blob_3way, merge_blob_3way_favoring, status_diff, status_diff_observed, text_patch,
+    unified_hunks, unified_hunks_opts,
 };
 pub use gc::{GcReport, GcRootsError, LiveSet, collect_roots, run_gc};
 pub use graph::{
@@ -43,8 +43,8 @@ pub use graph::{
     check_closure_present_above_from, children, reachable_objects, reachable_snapshot,
 };
 pub use merge::{
-    Conflict, ConflictKind, MergeResult, find_merge_base, find_merge_base_strict, is_ancestor,
-    is_ancestor_strict, merge_trees,
+    Conflict, ConflictKind, Favor, MergeResult, find_merge_base, find_merge_base_strict,
+    is_ancestor, is_ancestor_strict, merge_trees, merge_trees_favoring,
 };
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{
