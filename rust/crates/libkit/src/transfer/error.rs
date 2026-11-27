@@ -46,7 +46,14 @@ pub enum Error {
     UploadInterrupted(String),
     /// The transport failed.
     #[error("transport: {0}")]
-    Transport(#[from] TransportError),
+    Transport(TransportError),
+    /// The remote lets the caller read the repository but withholds part of
+    /// its content. Permanent for the caller's current view.
+    #[error("Part of this Kit is withheld.")]
+    ContentWithheld {
+        /// The ref the remote could not serve.
+        ref_name: String,
+    },
     /// The remote source failed in a way that has no transport equivalent.
     #[error("transport: {0}")]
     Source(#[source] kit_sync::SourceError),
@@ -349,12 +356,22 @@ impl Error {
     }
 }
 
+impl From<TransportError> for Error {
+    fn from(error: TransportError) -> Self {
+        match error {
+            TransportError::ContentWithheld { ref_name } => Self::ContentWithheld { ref_name },
+            other => Self::Transport(other),
+        }
+    }
+}
+
 impl From<kit_sync::SourceError> for Error {
     fn from(error: kit_sync::SourceError) -> Self {
         use kit_sync::SourceError as S;
         let transport = match error {
             S::PackNotFound => TransportError::PackNotFound,
             S::AccessDenied => TransportError::AccessDenied,
+            S::ContentWithheld { ref_name } => return Self::ContentWithheld { ref_name },
             S::AdmissionConfiguration(value) => TransportError::AdmissionConfiguration(value),
             S::TlsConfiguration(value) => TransportError::TlsConfiguration(value),
             S::AdmissionHelperFailed(value) => TransportError::AdmissionHelperFailed(value),
@@ -521,6 +538,20 @@ mod tests {
         use kit_sync::SyncError as S;
 
         assert!(matches!(Error::from(S::Interrupted), Error::Interrupted));
+        let withheld = Error::from(S::Source(kit_sync::SourceError::ContentWithheld {
+            ref_name: "refs/kit/packmap/main".into(),
+        }));
+        assert_eq!(withheld.to_string(), "Part of this Kit is withheld.");
+        assert!(matches!(
+            withheld,
+            Error::ContentWithheld { ref_name } if ref_name == "refs/kit/packmap/main"
+        ));
+        assert!(matches!(
+            Error::from(TransportError::ContentWithheld {
+                ref_name: "r".into()
+            }),
+            Error::ContentWithheld { .. }
+        ));
         assert!(matches!(Error::from(S::DetachedHead), Error::DetachedHead));
         assert!(matches!(Error::from(S::NotCommit), Error::NotCommit));
         assert!(matches!(
