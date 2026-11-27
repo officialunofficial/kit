@@ -256,6 +256,11 @@ impl Drop for Restore<'_> {
 #[test]
 fn the_state_of_an_operation_is_on_disk_before_its_material_is() {
     use std::os::unix::fs::PermissionsExt;
+    // Root writes into a read-only directory, so the material would not fail.
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: the test needs a directory that root cannot write");
+        return;
+    }
     for (op, marker) in OPERATIONS {
         let (td, target) = conflicting(op);
         let root = td.path();
