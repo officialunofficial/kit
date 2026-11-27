@@ -305,14 +305,21 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   is at most 4096 bytes. The index form `:<path>` and `:<n>:<path>` is an
   error. `show <rev>:<dir>` prints the `ls-tree` listing, not the Git
   header and the names.
-- **Rename detection.** `diff`, `status`, `show` and `log -p` pair renames
-  by similarity with git's scoring, threshold grammar and limit warning.
+- **Rename detection.** `diff`, `status`, `show`, `log -p`, `log --follow`
+  and the three-way merge of `merge`, `cherry-pick`, `revert` and `rebase`
+  pair renames by similarity with git's scoring, threshold grammar and
+  limit warning.
   Three things differ. Pathspecs filter after detection, so a rename keeps
   its source path when only its destination matches; Git limits the
   candidates first. Ties between equal scores break by path order, where
   Git's order depends on its sort. Copy detection (`-C`), break detection
   (`-B`) and the `diff.renames` and `diff.renameLimit` config keys are not
   supported; `show` and `log` have no rename flags and use the default 50%.
+  The merge uses the default 50% and takes no `-X find-renames` or
+  `-X no-renames`. It detects no directory renames, where git moves the
+  files that the other side added to a renamed directory. When the other
+  side also adds a file at the new path, kit does not follow the rename,
+  and both files meet at that path as an add/add conflict.
 - **`rebase` `edit` and `exec` stops.** At an `edit` stop, `--continue`
   does not commit staged changes into the edited commit, as Git does;
   commit them with `kit commit --amend` first. `--skip` at an `edit` or
@@ -404,8 +411,8 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 - **`log -- <path>`.** kit applies git's default history simplification
   and no other mode: it has no `--full-history`, `--simplify-merges`,
   `--dense` or `--sparse`. A path is a file or a directory; globs and
-  pathspec magic are usage errors. `--follow` finds exact renames only, the
-  same content at a new path. Git also finds a rename with an edit.
+  pathspec magic are usage errors. `--follow` finds a rename by
+  similarity, with the default 50%.
 - **`log --all`.** The walk starts at `HEAD`, the local branches, the
   remote-tracking refs and the tags. Git also starts at `refs/stash` and at
   other refs. kit leaves out a ref with unreadable content and a ref that ends

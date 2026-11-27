@@ -485,8 +485,8 @@ History / commits:
   the walk follows every parent. With `--first-parent` only the first
   parent counts. `-p` and `--stat` show only the files at the paths.
   `--follow` takes exactly one file path and continues the walk under the
-  old name when a commit renames the file. Rename detection is the exact
-  detection of `diff`: the same content at a new path. The name changes
+  old name when a commit renames the file. Rename detection is the
+  similarity detection of `diff`, with the default 50%. The name changes
   when the walk prints the renaming commit, so on a history with merges the
   walk may follow the old name into a branch that never held the rename.
   `--follow` with no path or with more than one path is a usage error
@@ -1201,6 +1201,15 @@ Branches / refs:
   every commit of both histories. One that is missing, corrupt or not a
   commit fails the merge with exit `65` and an error that names it, before
   it touches the files, the index or a ref.
+  The merge follows renames. It pairs the files that each side removed and
+  added with the similarity detection of `kit diff` (50% by default). When
+  one side renames a file and the other side edits it, the edit goes to
+  the new path. A rename on one side against a delete on the other is a
+  rename/delete conflict at the new path. Two renames of one file to
+  different names are a rename/rename conflict at both new paths. Both
+  keep the renamed files in the working tree: `kit add` keeps a file and
+  `kit rm` drops it. `cherry-pick`, `revert` and `rebase` follow renames
+  the same way.
   `-X ours` and `-X theirs` (`--strategy-option=<option>`, also `-Xours`)
   resolve each conflict in a text file to that side's lines, and a conflict
   in a binary or large file to that side's whole file. Changes that do not

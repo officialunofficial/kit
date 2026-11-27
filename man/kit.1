@@ -713,7 +713,8 @@ Without
 a path must exist in the worktree and must not also name a revision.
 .Fl Fl follow
 takes exactly one file and continues under its old name when a commit
-renames it with the same content.
+renames it, found by similarity as in
+.Cm diff .
 .Pp
 .Fl L Ar start , Ns Ar end : Ns Ar file
 follows the history of a range of lines, as
@@ -1080,6 +1081,16 @@ or
 or
 .Fl Fl message
 overrides the merge commit message.
+The merge follows a file that one side renamed, found by similarity as in
+.Cm diff :
+the other side's edit goes to the new path.
+A rename against a delete, or two renames of one file to different names,
+is a conflict at each new path.
+.Cm cherry-pick ,
+.Cm revert
+and
+.Cm rebase
+follow renames the same way.
 .Fl X Cm ours
 and
 .Fl X Cm theirs

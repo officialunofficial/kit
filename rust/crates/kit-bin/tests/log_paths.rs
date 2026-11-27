@@ -254,6 +254,22 @@ fn follow_continues_under_the_old_name_of_a_renamed_file() {
 }
 
 #[test]
+fn follow_continues_through_a_rename_with_an_edit() {
+    let repo = Repo::new();
+    let lines: String = (0..10).map(|i| format!("line {i} of the file\n")).collect();
+    repo.commit_file("old.txt", lines.as_bytes(), "add old");
+    repo.ok(&["mv", "old.txt", "new.txt"]);
+    let edited = lines.replace("line 4 of", "line four of");
+    repo.write("new.txt", edited.as_bytes());
+    repo.ok(&["add", "new.txt"]);
+    repo.ok(&["commit", "-m", "rename and edit"]);
+    assert_eq!(
+        subjects(&repo, &["--follow", "--", "new.txt"]),
+        ["rename and edit", "add old"]
+    );
+}
+
+#[test]
 fn follow_needs_exactly_one_path() {
     let repo = linear();
     for args in [
