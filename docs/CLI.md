@@ -345,7 +345,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [-L <start>,<end>:<file>]... [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -396,6 +396,32 @@ History / commits:
   or a filter leaves no open line. A history with more than 1024 open
   branches is an error (exit `65`). `--graph` with `-p`, `--stat` or
   `--format=json` is a usage error (exit `64`).
+  `-L <start>,<end>:<file>` follows the history of a range of lines, as
+  git does. The range takes the forms of `kit blame -L` and is read in the
+  file at the starting revision; `<file>` is relative to the current
+  directory. kit lists each commit that changes a line of the range, newest
+  first, and follows the range back through each edit: the lines a commit
+  adds leave the range, the lines they replaced join it in the parent, and
+  an insertion or a deletion outside the range only shifts it. After a
+  blank line, each commit shows a diff for each file of the range:
+  `diff --git a/<file> b/<file>`, `--- a/<file>` (`--- /dev/null` when the
+  commit creates the file), `+++ b/<file>`, then one hunk per range,
+  `@@ -<p>,<n> +<t>,<m> @@`, with each line of the range as context, `-`
+  or `+`. As in git, a change that spans two ranges of one file prints
+  under the first one only. At a merge, if one parent leaves every range
+  unchanged, kit follows that parent alone and hides the merge; otherwise
+  it follows each parent and shows the merge without a diff. `-L` may
+  repeat, for more ranges or more files; ranges that overlap or touch
+  merge into one. It combines with `-n`, `--oneline`, `--abbrev`,
+  `--decorate`, `--first-parent` and `--format=json`, where each record
+  gains `hunks`, a list of
+  `{"path","old_start","old_lines","new_start","new_lines","lines"}` with
+  each line prefixed by ` `, `-` or `+`. `-p` changes nothing. `-L` takes
+  at most one revision; with a range, `--all`, paths, `--follow`,
+  `--stat`, `--graph`, `--author`, `--grep`, `--since`, `--until` or
+  `--no-merges` it is a usage error (exit `64`). A file that does not
+  exist at the revision, a range that starts past its end, and an argument
+  without `:<file>` exit `64`.
   `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
   **substring** match &mdash; `--author` against both the short display form
   (the `Author:` line) and the full `kind:hex`/`mid:N` form
