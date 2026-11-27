@@ -1528,6 +1528,12 @@ attestation support warn once per command and skip the log.
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
+  - **From a closure export.** `<url>` may be `kit+closure://<dir>` or a
+    plain path to a `MANIFEST.mkcl` written by `kit closure export
+    --history --branch <name>`. The clone checks the manifest, every pack
+    against its key, the closure of the root and every signature, as any
+    clone does, and lands on the recorded branch. A plain path is saved
+    as the `kit+closure://` URL of its directory.
 - `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
   [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
@@ -1567,6 +1573,17 @@ attestation support warn once per command and skip the log.
   "tag_listing_failed":"..."|null}` on success, with `"ok":false` when a tag
   was refused or the listing failed, or `{"ok":false,"error":"..."}` on
   failure.
+
+  `<remote>` may also be `kit+closure://<dir>` or a path to a
+  `MANIFEST.mkcl`. Such a fetch has no configured remote, so its tracking
+  ref is `refs/remotes/closure/<branch>`. To pick the name, add the export
+  as a remote first: `kit remote add usb kit+closure:///media/usb/x.closure`,
+  then `kit fetch usb`. An export is read-only: a push to it fails. A
+  manifest with no branch (written without `--branch`, or by kit 0.11) is
+  refused with exit 65, because nothing names the tracking ref; re-export
+  it with `--branch`. An incremental export (`--since`) fetches only into a
+  repository that already holds its bases; elsewhere the fetch fails on the
+  missing objects and publishes nothing.
 - `kit pull [<remote>] [--all] [--rebase | --no-ff] [-X <option>] [--tags | --no-tags]
   [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
@@ -1848,8 +1865,9 @@ attestation support warn once per command and skip the log.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.
-- `kit closure export <revision> [--history] [-o DIR] [--force]
-  [--format=json]` &mdash; write a full-disclosure closure of `<revision>`
+- `kit closure export <revision> [--history] [--branch <name>]
+  [--since <rev>]... [-o DIR] [--force] [--format=json]` &mdash; write a
+  full-disclosure closure of `<revision>`
   as `DIR/MANIFEST.mkcl` plus `DIR/<pack_key hex>.pack` files (raw-only
   v1 packs). Default mode is snapshot (the commit and its tree
   closure; parents referenced but not included); `--history` exports
@@ -1859,7 +1877,17 @@ attestation support warn once per command and skip the log.
   export` is kit's native object-set disclosure (nearest git relative:
   `git bundle`). Status line: `closure: <mode>, <n> objects in <k>
   pack(s), <total> B -> DIR`. JSON: `{root, mode, packs: [{file,
-  blake3, bytes}], objects, manifest}`.
+  blake3, bytes}], objects, manifest}`, plus `branch` and `since` (an
+  array of ids) when given.
+
+  `--branch <name>` records the branch the root belongs to, so `kit
+  clone` and `kit fetch` can read the export as a remote with that branch
+  (see `kit fetch`). The root must be a commit. `--since <rev>` (history
+  mode only, repeatable) writes an incremental export: only the objects
+  that `<revision>` reaches and no `--since` commit reaches. A base must be
+  a commit. Either flag writes manifest version 2 (SPEC-DISCLOSURE §7.3),
+  which kit 0.11 cannot read; without them the manifest stays version 1.
+  `--since` without `--history`, or an invalid branch name, exits 64.
 - `kit closure verify <commit-id> [--from DIR] [--history]
   [--show-unreferenced] [--format=json]` &mdash; verify a closure. With
   `--from DIR`, reads `MANIFEST.mkcl` and every pack it names and
@@ -1881,6 +1909,10 @@ attestation support warn once per command and skip the log.
   mode unless `--show-unreferenced` is passed, and the unchecked streaming
   mode prints a note explaining how to opt in. Incomplete closures exit `65`
   (`DATAERR`).
+
+  With `--from`, an incremental export lists the objects its bases reach
+  as missing, unless the command runs in a repository that holds them; then
+  those objects complete the walk and the export verifies.
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
 - `kit closure repair-indexes` &mdash; rebuild damaged or missing local pack
@@ -2451,6 +2483,7 @@ Accepted schemes:
 | `kit+s3` | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `kit+ssh` | `kit+ssh://user@host[:port]/path` | SSH with the kit shell |
 | `kit+memory` | `kit+memory://` | in-memory (testing only) |
+| `kit+closure` | `kit+closure:///abs/dir` | a `kit closure export --branch` directory, read-only (fetch and clone) |
 
 `kit+https` (and loopback-only `kit+http`) speaks
 `kit.transport.v1.TransportService` over ConnectRPC &mdash; see

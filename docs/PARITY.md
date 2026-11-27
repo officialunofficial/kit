@@ -38,7 +38,9 @@ These divergences stay while kit uses BLAKE3.
 - **Default remote name.** The default remote of kit is `default`, not
   `origin`. Its tracking refs live under `refs/remotes/default/`.
 - **Remote URLs.** A kit remote URL starts with `kit+<scheme>://`. Plain
-  `https://` and plain paths are errors.
+  `https://` and plain paths are errors. The one exception is a path to a
+  closure export's `MANIFEST.mkcl`, which `clone` and `fetch` read as
+  `kit+closure://`.
 
 ## Non-goals
 
@@ -335,6 +337,12 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   (0664 and 0775 by default), and a tree id gives mtime 0 where git uses
   the current time, so the bytes differ from `git archive` while the files
   are the same.
+- **Bundles.** kit has no `git bundle` file. `kit closure export --history
+  --branch <name>` writes a directory (a `MANIFEST.mkcl` and packs) that
+  `clone` and `fetch` read as a `kit+closure://` remote, and `--since <rev>`
+  makes it incremental. An export carries one branch and no tags. A fetch
+  from a path, with no configured remote, writes
+  `refs/remotes/closure/<branch>`, where git writes `FETCH_HEAD`.
 - **`log -L`.** kit does not follow a renamed file: the range ends at
   the commit that creates the file under its name. There is no
   `:<funcname>:<file>` or `/<regex>/` form, and no `--author`, `--grep`,
