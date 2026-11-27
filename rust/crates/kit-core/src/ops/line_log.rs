@@ -11,6 +11,7 @@
 use std::ops::Range;
 
 use super::blame::matched_line_spans;
+use super::diff::changed_line_spans;
 
 /// A span of lines: 0-based, end excluded.
 pub type Span = Range<usize>;
@@ -194,6 +195,68 @@ pub struct RangeHunk {
     pub new_lines: usize,
     /// The lines of the span: context, removed and added.
     pub lines: Vec<HunkLine>,
+    /// The function line that git prints after the hunk header, or empty
+    /// for none.
+    pub func: Vec<u8>,
+}
+
+/// git's default function line rule: a line that starts with a letter,
+/// `_` or `$`, cut at 80 bytes, with trailing white space removed.
+fn function_line(text: &[u8]) -> Option<Vec<u8>> {
+    let first = *text.first()?;
+    if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+        return None;
+    }
+    let mut len = text.len().min(80);
+    while len > 0 && matches!(text[len - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        len -= 1;
+    }
+    Some(text[..len].to_vec())
+}
+
+/// The hunks of the standard diff from `parent` to `target` with `context`
+/// lines of context, each as the commit-side lines it covers and the
+/// function line of its header. A port of the hunk grouping and the
+/// function line search of git's `xdl_emit_diff`: each search goes up from
+/// the line above the hunk's context to the line above the previous hunk's
+/// context, and a search that finds nothing keeps the previous name.
+fn standard_hunk_funcs(
+    p_lines: &[(&[u8], bool)],
+    t_len: usize,
+    spans: &[(Span, Span)],
+    context: usize,
+) -> Vec<(Span, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut func = Vec::new();
+    // The line above the previous hunk's context; `None` before the first.
+    let mut limit: Option<usize> = None;
+    let mut i = 0;
+    while i < spans.len() {
+        let mut last = i;
+        while last + 1 < spans.len() && spans[last + 1].0.start - spans[last].0.end <= 2 * context {
+            last += 1;
+        }
+        let (first, end) = (&spans[i], &spans[last]);
+        let s1 = first.0.start.saturating_sub(context);
+        let s2 = first.1.start.saturating_sub(context);
+        let after = context
+            .min(p_lines.len().saturating_sub(end.0.end))
+            .min(t_len.saturating_sub(end.1.end));
+        let e2 = end.1.end + after;
+        if let Some(start) = s1.checked_sub(1) {
+            let stop = limit.map_or(0, |l| l + 1);
+            if let Some(found) = (stop..=start)
+                .rev()
+                .find_map(|l| p_lines.get(l).and_then(|(text, _)| function_line(text)))
+            {
+                func = found;
+            }
+        }
+        limit = s1.checked_sub(1);
+        out.push((s2..e2, func.clone()));
+        i = last + 1;
+    }
+    out
 }
 
 /// The lines of `text`, each with whether it ends with a newline.
@@ -232,6 +295,19 @@ pub fn hunks(
             newline,
         }
     };
+    // git prints the hunks of the standard diff clipped to the ranges, with
+    // the largest span as the context when it is more than 3 lines.
+    let context = ranges
+        .spans()
+        .iter()
+        .map(ExactSizeIterator::len)
+        .fold(3, usize::max);
+    let standard = standard_hunk_funcs(
+        &p_lines,
+        t_lines.len(),
+        &changed_line_spans(parent, target),
+        context,
+    );
     let mut out = Vec::new();
     let mut j = 0;
     for span in ranges.spans() {
@@ -250,6 +326,13 @@ pub fn hunks(
             j_last -= 1;
         }
         let (first, last) = (&touched[j], &touched[j_last]);
+        let at = first.target.start;
+        let func = standard
+            .iter()
+            .rev()
+            .find(|(cover, _)| cover.start <= at)
+            .map(|(_, f)| f.clone())
+            .unwrap_or_default();
         let p_start = if t_start < first.target.start {
             first
                 .parent
@@ -296,6 +379,7 @@ pub fn hunks(
             new_start: t_start + 1,
             new_lines: t_end - t_start,
             lines,
+            func,
         });
     }
     out

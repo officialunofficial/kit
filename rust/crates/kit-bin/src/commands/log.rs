@@ -614,11 +614,17 @@ fn write_line_hunks(out: &mut impl Write, file: &lines::FileHunks) {
     }
     let _ = writeln!(out, "+++ b/{path}");
     for h in &file.hunks {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "@@ -{},{} +{},{} @@",
             h.old_start, h.old_lines, h.new_start, h.new_lines
         );
+        if h.func.is_empty() {
+            let _ = writeln!(out);
+        } else {
+            let func = format::safe_text(&String::from_utf8_lossy(&h.func));
+            let _ = writeln!(out, " {func}");
+        }
         for line in &h.lines {
             let text = format::safe_text(&String::from_utf8_lossy(&line.text));
             let _ = writeln!(out, "{}{text}", char::from(line.origin));

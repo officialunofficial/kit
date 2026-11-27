@@ -35,7 +35,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - The line diff joins two runs of changed lines that can slide together into one hunk, as git does, instead of printing them apart: `l4 l0 l5 l5` to `l5` now removes the first three lines.
-- `kit log -L` prints the `index` line of each file, and `new file mode` for a created file, as git 2.55 and later print them.
+- `kit log -L` prints the `index` line of each file, `new file mode` for a created file, and the function line after each hunk header, as git 2.54 and later print them.
 
 ### Breaking
 
