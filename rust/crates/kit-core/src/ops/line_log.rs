@@ -185,7 +185,7 @@ pub struct HunkLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeHunk {
     /// The first line of the span in the parent, 1-based, as git prints
-    /// it: 0 when the span is empty at the top of the file.
+    /// it: 0 when the parent has no lines.
     pub old_start: usize,
     /// The number of lines of the span in the parent.
     pub old_lines: usize,
@@ -346,12 +346,10 @@ pub fn hunks(
         } else {
             last.parent.end
         };
-        // git prints an empty span at the top of the file as `-0,0`.
-        let old_start = if p_start == 0 && p_end == 0 {
-            0
-        } else {
-            p_start + 1
-        };
+        // git takes the old start from the old line where the standard diff
+        // stands, so an empty span at the top is `-1,0`, and `-0,0` only
+        // when the file did not exist.
+        let old_start = if p_lines.is_empty() { 0 } else { p_start + 1 };
         let mut lines = Vec::new();
         let mut t_cur = t_start;
         while j < touched.len() && touched[j].target.start < t_end {

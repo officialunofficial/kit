@@ -385,6 +385,10 @@ fn output_matches_git_log_l() {
                 if let Some(end) = l.strip_prefix("@@ ").and_then(|r| r.find(" @@ ")) {
                     l.truncate(end + 6);
                 }
+                // Older git prints an insertion at the top as `-0,0`.
+                if let Some(rest) = l.strip_prefix("@@ -1,0 ") {
+                    *l = format!("@@ -0,0 {rest}");
+                }
             }
         }
         assert_eq!(ours, theirs, "{args:?}");
