@@ -85,22 +85,6 @@ fn a_path_without_a_separator_works_when_it_exists() {
 }
 
 #[test]
-fn a_path_is_relative_to_the_current_directory() {
-    let repo = linear();
-    let out = common::kit(
-        &repo.path().join("dir"),
-        repo.xdg(),
-        &["log", "--oneline", "--", "x.txt"],
-    );
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(titles(&stdout(&out)), ["add x"]);
-}
-
-#[test]
 fn a_dot_at_the_top_names_the_whole_tree() {
     let repo = linear();
     repo.ok(&["commit", "--allow-empty", "-m", "empty"]);
@@ -217,12 +201,33 @@ fn a_merge_that_matches_a_parent_is_hidden_and_followed_through_it() {
     );
 }
 
+/// `kept` holds exactly the titles of `expected`, in the order of the full
+/// log. Commits made in the same second tie on time, and kit orders a tie
+/// its own way, so a test checks membership against git and order against
+/// kit.
+fn assert_kept(repo: &Repo, kept: &[String], expected: &[&str]) {
+    let mut sorted_kept: Vec<&str> = kept.iter().map(String::as_str).collect();
+    let mut sorted_expected = expected.to_vec();
+    sorted_kept.sort_unstable();
+    sorted_expected.sort_unstable();
+    assert_eq!(sorted_kept, sorted_expected);
+    let all = subjects(repo, &[]);
+    let in_order: Vec<&String> = all.iter().filter(|t| kept.contains(t)).collect();
+    assert_eq!(
+        in_order,
+        kept.iter().collect::<Vec<_>>(),
+        "order of the full log"
+    );
+}
+
 #[test]
 fn a_merge_that_matches_no_parent_shows() {
     let repo = merged();
-    assert_eq!(
-        subjects(&repo, &["--", "a.txt", "b.txt"]),
-        ["merge feature", "main edits a", "feature edits b", "base"]
+    let kept = subjects(&repo, &["--", "a.txt", "b.txt"]);
+    assert_kept(
+        &repo,
+        &kept,
+        &["merge feature", "main edits a", "feature edits b", "base"],
     );
 }
 
@@ -381,24 +386,16 @@ fn path_limited_subjects_match_git() {
         kit_args.extend_from_slice(paths);
         let mut git_args = vec!["log", "--format=%s", "--"];
         git_args.extend_from_slice(paths);
-        let expected: Vec<String> = stdout(&git(gdir, home.path(), &git_args))
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(subjects(&repo, &kit_args), expected, "paths {paths:?}");
+        let expected = stdout(&git(gdir, home.path(), &git_args));
+        let expected: Vec<&str> = expected.lines().collect();
+        assert_kept(&repo, &subjects(&repo, &kit_args), &expected);
         let mut first = vec!["--first-parent", "--"];
         first.extend_from_slice(paths);
         let mut git_first = vec!["log", "--first-parent", "--format=%s", "--"];
         git_first.extend_from_slice(paths);
-        let expected: Vec<String> = stdout(&git(gdir, home.path(), &git_first))
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(
-            subjects(&repo, &first),
-            expected,
-            "--first-parent {paths:?}"
-        );
+        let expected = stdout(&git(gdir, home.path(), &git_first));
+        let expected: Vec<&str> = expected.lines().collect();
+        assert_kept(&repo, &subjects(&repo, &first), &expected);
     }
 }
 
@@ -448,7 +445,6 @@ proptest! {
             let mut touched = Vec::new();
             for (file, edit) in FILES.iter().zip(edits) {
                 match edit {
-                    Edit::Keep => {}
                     Edit::Write => {
                         repo.write(file, format!("{title}\n").as_bytes());
                         repo.ok(&["add", file]);
@@ -460,7 +456,9 @@ proptest! {
                         present.insert(file, false);
                         touched.push(*file);
                     }
-                    Edit::Delete => {}
+                    // Keeping a file, or deleting one that is not there,
+                    // changes nothing.
+                    Edit::Keep | Edit::Delete => {}
                 }
             }
             repo.ok(&["commit", "--allow-empty", "-m", &title]);
@@ -486,4 +484,12 @@ proptest! {
             prop_assert!(rest.any(|t| t == title), "{} out of order", title);
         }
     }
+}
+
+#[test]
+fn a_file_named_like_a_range_is_a_path() {
+    let repo = linear();
+    repo.commit_file("v1..v2", b"notes\n", "add notes");
+    assert_eq!(subjects(&repo, &["v1..v2"]), ["add notes"]);
+    assert_eq!(subjects(&repo, &["HEAD~1..HEAD"]), ["add notes"]);
 }

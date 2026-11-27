@@ -174,13 +174,14 @@ fn show_commit_like(
     write_indented_message(out, message);
     let _ = writeln!(out);
 
-    write_commit_diff(out, repo, parent, tree, stat).map(|_| ())
+    write_commit_diff(out, repo, parent, tree, stat, &[]).map(|_| ())
 }
 
 /// Write the diff of `tree` against the tree of `parent`: the unified diff,
 /// or the diffstat when `stat` is set. `None` for `parent` is an empty tree,
 /// so a root commit shows every file as added. A merge commit passes its
 /// first parent. `kit log -p` and `kit log --stat` share this function.
+/// Non-empty `paths` keep only the files at or below them.
 /// Returns whether the diff has any change, and so wrote output.
 ///
 /// The diff comes from the library that `kit diff` uses, and the renderers
@@ -191,6 +192,7 @@ pub(super) fn write_commit_diff(
     parent: Option<Hash>,
     tree: Hash,
     stat: bool,
+    paths: &[String],
 ) -> Result<bool, (String, u8)> {
     let parent_tree = match parent {
         Some(p) => Some(
@@ -199,8 +201,9 @@ pub(super) fn write_commit_diff(
         ),
         None => None,
     };
-    let diff = libkit::diff::between_trees(repo, parent_tree, Some(tree))
+    let mut diff = libkit::diff::between_trees(repo, parent_tree, Some(tree))
         .map_err(|e| (e.to_string(), exit::GENERAL_ERROR))?;
+    diff.retain_paths(paths);
     if stat {
         let rows = diff
             .stats()

@@ -216,6 +216,14 @@ pub fn between_trees(repo: &Repo, old: Option<Hash>, new: Option<Hash>) -> Resul
 }
 
 impl Diff<'_> {
+    /// Keep only the entries at or below one of `paths`, in the form of the
+    /// index. The empty path keeps every entry, and so does an empty list.
+    pub fn retain_paths(&mut self, paths: &[String]) {
+        if !paths.is_empty() {
+            self.entries.retain(|e| path_matches_any(&e.path, paths));
+        }
+    }
+
     /// The changed entries, sorted as `diff_trees` sorts them.
     #[must_use]
     pub fn entries(&self) -> &[DiffEntry] {

@@ -556,7 +556,7 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -662,6 +662,19 @@ walks only first parents, so a merged side branch never enters the walk.
 These filters apply before
 .Fl n Ap s
 limit.
+.Pp
+Paths after the revision keep the commits that change them, with the
+default history simplification of
+.Xr git 1 :
+a merge that matches one parent at the paths is left out, and the walk
+follows that parent.
+A path names a file or a directory; globs are an error.
+Without
+.Fl - ,
+a path must exist in the worktree and must not also name a revision.
+.Fl Fl follow
+takes exactly one file and continues under its old name when a commit
+renames it with the same content.
 .It Cm reflog Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
 Show a branch's recorded movement history, read-only. Walks the branch
 tip's first-parent chain newest-first, addressing each entry

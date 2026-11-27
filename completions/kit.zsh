@@ -324,6 +324,7 @@ _kit() {
                         '--decorate[show the refs that name each commit]' \
                         '--graph[draw the commit graph in the left margin]' \
                         '--all[start from every ref and HEAD]' \
+                        '--follow[follow one file across renames]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;

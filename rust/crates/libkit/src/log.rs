@@ -22,14 +22,22 @@
 //! A query with [`Query::all`] set walks from `HEAD`, every local branch,
 //! every remote-tracking ref and every tag instead. [`ref_tips`] lists those
 //! refs.
+//!
+//! A query with [`Query::paths`] keeps only the commits that change an entry
+//! at one of the paths, with the default history simplification of git: a
+//! merge that matches one parent at the paths is left out, and the walk
+//! follows only that parent. [`Query::follow`] continues under the old name
+//! of a renamed file.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::{Commit, Object};
+use kit_core::object::{Commit, EntryMode, Object};
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::find_merge_base_strict;
+use kit_core::ops::{DiffKind, detect_content_renames, diff_trees};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -82,6 +90,17 @@ pub enum Error {
         /// Why it failed.
         source: StoreError,
     },
+    /// A tree on a limiting path could not be read.
+    #[error("read tree {}: {source}", hash::to_hex(.hash))]
+    ReadTree {
+        /// The tree that failed to read.
+        hash: Hash,
+        /// Why it failed.
+        source: StoreError,
+    },
+    /// The rename of a followed file could not be detected.
+    #[error("rename detection: {0}")]
+    RenameDetection(StoreError),
 }
 
 /// Which commits pass. A commit has to pass every set condition.
@@ -146,6 +165,14 @@ pub struct Query {
     pub filter: Filter,
     /// Keep at most this many commits after the filter.
     pub limit: Option<usize>,
+    /// Keep only the commits that change an entry at one of these paths. A
+    /// path has the form of the index: relative to the root, joined with
+    /// `/`. The empty path names the whole tree. An empty list keeps every
+    /// commit.
+    pub paths: Vec<String>,
+    /// Continue under the old name when a commit renames the one path of
+    /// [`Query::paths`]. The caller checks that there is exactly one path.
+    pub follow: bool,
 }
 
 /// One commit of the history.
@@ -155,6 +182,10 @@ pub struct Entry {
     pub hash: Hash,
     /// The commit.
     pub commit: Commit,
+    /// The paths that kept the commit, under the names that it has at this
+    /// commit. A commit that renames a followed file lists the new name and
+    /// the old one. The list is empty when the query has no paths.
+    pub paths: Vec<String>,
 }
 
 /// Walk the history that `query` selects.
@@ -382,15 +413,19 @@ fn all_tips(repo: &Repo) -> Result<Option<WalkSet>, Error> {
 /// history is larger than one walk may read.
 pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Vec<Entry>, Error> {
     let mut entries = Vec::new();
+    let rule = Rule {
+        first_parent,
+        paths: None,
+    };
     walk_ordered(
         store,
         tips,
         &HashSet::new(),
-        first_parent,
+        &rule,
         (0, MAX_LOG_COMMITS),
         |entry| {
             entries.push(entry);
-            true
+            Ok(true)
         },
     )?;
     Ok(entries)
@@ -412,17 +447,28 @@ fn select(
     if limit == 0 {
         return Ok(entries);
     }
+    let paths = (!query.paths.is_empty()).then(|| PathLimit::new(store, query));
+    let rule = Rule {
+        first_parent: query.first_parent,
+        paths: paths.as_ref(),
+    };
     walk_ordered(
         store,
         tips,
         excluded,
-        query.first_parent,
+        &rule,
         (excluded.len(), max_commits),
-        |entry| {
+        |mut entry| {
+            if let Some(paths) = &paths {
+                if !paths.shows(&entry.commit, query.first_parent)? {
+                    return Ok(true);
+                }
+                entry.paths = paths.after_shown(&entry.commit)?;
+            }
             if query.filter.matches(&entry.commit) {
                 entries.push(entry);
             }
-            entries.len() < limit
+            Ok(entries.len() < limit)
         },
     )?;
     Ok(entries)
@@ -632,21 +678,197 @@ fn read_commit(store: &ObjectStore, hash: Hash) -> Result<Commit, Error> {
     }
 }
 
-/// The parents of `commit` that the walk follows.
-fn walked_parents<'a>(
-    commit: &'a Commit,
-    excluded: &'a HashSet<Hash>,
+/// How the walk picks the parents of a commit.
+struct Rule<'a> {
+    /// Follow only the first parent.
     first_parent: bool,
-) -> impl Iterator<Item = Hash> + 'a {
-    let parents: &[Hash] = if first_parent {
+    /// Simplify the history at the paths of a query.
+    paths: Option<&'a PathLimit<'a>>,
+}
+
+/// The parents that count for `commit`: all of them, or the first one alone.
+fn counted_parents(commit: &Commit, first_parent: bool) -> &[Hash] {
+    if first_parent {
         commit.parents.get(..1).unwrap_or(&[])
     } else {
         &commit.parents
-    };
-    parents
+    }
+}
+
+/// The parents of `commit` that the walk follows. With paths, a merge that
+/// matches a parent at the paths is followed through that parent alone.
+fn walked_parents(
+    commit: &Commit,
+    excluded: &HashSet<Hash>,
+    rule: &Rule<'_>,
+) -> Result<Vec<Hash>, Error> {
+    let parents = counted_parents(commit, rule.first_parent);
+    if let Some(paths) = rule.paths
+        && parents.len() > 1
+        && let Some(same) = paths.same_parent(commit, parents)?
+    {
+        return Ok(if excluded.contains(&same) {
+            Vec::new()
+        } else {
+            vec![same]
+        });
+    }
+    Ok(parents
         .iter()
         .copied()
         .filter(|parent| !excluded.contains(parent))
+        .collect())
+}
+
+/// The mode and id of a tree entry, or `None` where a tree holds nothing.
+type Found = Option<(EntryMode, Hash)>;
+
+/// The paths of a query, with the trees and entries read so far.
+///
+/// Each cache grows by at most one entry per commit, tree and path that the
+/// walk reads, and the walk reads at most `MAX_LOG_COMMITS` commits.
+struct PathLimit<'s> {
+    store: &'s ObjectStore,
+    /// The paths under the names that the walk reached. `--follow` replaces
+    /// the one path with the old name at a rename.
+    paths: RefCell<Vec<String>>,
+    follow: bool,
+    trees: RefCell<HashMap<Hash, Hash>>,
+    entries: RefCell<HashMap<(Hash, String), Found>>,
+}
+
+impl<'s> PathLimit<'s> {
+    fn new(store: &'s ObjectStore, query: &Query) -> Self {
+        Self {
+            store,
+            paths: RefCell::new(query.paths.clone()),
+            follow: query.follow,
+            trees: RefCell::new(HashMap::new()),
+            entries: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The tree of the commit `hash`.
+    fn tree(&self, hash: Hash) -> Result<Hash, Error> {
+        if let Some(tree) = self.trees.borrow().get(&hash) {
+            return Ok(*tree);
+        }
+        let tree = read_commit(self.store, hash)?.tree_hash;
+        self.trees.borrow_mut().insert(hash, tree);
+        Ok(tree)
+    }
+
+    /// Read the tree `hash`.
+    fn read_tree(&self, hash: Hash) -> Result<Option<kit_core::object::Tree>, Error> {
+        match self.store.read_object(&hash) {
+            Ok(Object::Tree(tree)) => Ok(Some(tree)),
+            Ok(_) => Ok(None),
+            Err(source) => Err(Error::ReadTree { hash, source }),
+        }
+    }
+
+    /// The mode and id of the entry at `path` in the tree `root`. The empty
+    /// path names the root itself, and an empty root holds nothing.
+    fn entry(&self, root: Hash, path: &str) -> Result<Found, Error> {
+        let key = (root, path.to_owned());
+        if let Some(found) = self.entries.borrow().get(&key) {
+            return Ok(*found);
+        }
+        let found = if path.is_empty() {
+            self.read_tree(root)?
+                .filter(|tree| !tree.entries.is_empty())
+                .map(|_| (EntryMode::Tree, root))
+        } else {
+            let mut current = Some((EntryMode::Tree, root));
+            for part in path.split('/') {
+                current = match current {
+                    Some((EntryMode::Tree, hash)) => self.read_tree(hash)?.and_then(|tree| {
+                        tree.entries
+                            .iter()
+                            .find(|e| e.name == part.as_bytes())
+                            .map(|e| (e.mode, e.object_hash))
+                    }),
+                    _ => None,
+                };
+            }
+            current
+        };
+        self.entries.borrow_mut().insert(key, found);
+        Ok(found)
+    }
+
+    /// Do the trees `a` and `b` hold the same entry at every path? A missing
+    /// tree holds nothing.
+    fn same(&self, a: Hash, b: Option<Hash>) -> Result<bool, Error> {
+        if Some(a) == b {
+            return Ok(true);
+        }
+        let paths = self.paths.borrow().clone();
+        for path in &paths {
+            let other = match b {
+                Some(b) => self.entry(b, path)?,
+                None => None,
+            };
+            if self.entry(a, path)? != other {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The first of `parents` that matches `commit` at the paths.
+    fn same_parent(&self, commit: &Commit, parents: &[Hash]) -> Result<Option<Hash>, Error> {
+        for parent in parents {
+            if self.same(commit.tree_hash, Some(self.tree(*parent)?))? {
+                return Ok(Some(*parent));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Does `commit` change an entry at the paths? A commit without parents
+    /// changes the entries that it holds. A merge changes them when it
+    /// matches none of its parents.
+    fn shows(&self, commit: &Commit, first_parent: bool) -> Result<bool, Error> {
+        let parents = counted_parents(commit, first_parent);
+        if parents.is_empty() {
+            return Ok(!self.same(commit.tree_hash, None)?);
+        }
+        Ok(self.same_parent(commit, parents)?.is_none())
+    }
+
+    /// The paths that kept a shown commit. With `--follow`, a commit that
+    /// adds the followed file by renaming it switches the walk to the old
+    /// name, and keeps both names.
+    fn after_shown(&self, commit: &Commit) -> Result<Vec<String>, Error> {
+        let paths = self.paths.borrow().clone();
+        let [path] = paths.as_slice() else {
+            return Ok(paths);
+        };
+        let Some(parent) = commit.parents.first() else {
+            return Ok(paths);
+        };
+        let parent_tree = self.tree(*parent)?;
+        if !self.follow
+            || self.entry(commit.tree_hash, path)?.is_none()
+            || self.entry(parent_tree, path)?.is_some()
+        {
+            return Ok(paths);
+        }
+        let mut changes = diff_trees(self.store, Some(parent_tree), Some(commit.tree_hash))
+            .map_err(Error::RenameDetection)?
+            .entries;
+        detect_content_renames(self.store, &mut changes).map_err(Error::RenameDetection)?;
+        let old = changes
+            .into_iter()
+            .find(|change| change.kind == DiffKind::Renamed && change.path == *path)
+            .and_then(|change| change.old_path);
+        let Some(old) = old else {
+            return Ok(paths);
+        };
+        *self.paths.borrow_mut() = vec![old.clone()];
+        Ok(vec![path.clone(), old])
+    }
 }
 
 /// Pass the commits reachable from `tips` and not in `excluded` to `emit`,
@@ -675,9 +897,9 @@ fn walk_ordered(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (mut spent, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     let mut tips = tips.to_vec();
     loop {
@@ -685,7 +907,7 @@ fn walk_ordered(
             store,
             &tips,
             excluded,
-            first_parent,
+            rule,
             (spent, max_commits),
             &mut emit,
         )? {
@@ -703,19 +925,12 @@ fn walk_segment(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (spent, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<Option<(Hash, usize)>, Error> {
     let [tip] = *tips else {
-        return emit_sorted(
-            store,
-            tips,
-            excluded,
-            first_parent,
-            (spent, max_commits),
-            emit,
-        );
+        return emit_sorted(store, tips, excluded, rule, (spent, max_commits), emit);
     };
     let mut streamed = spent;
     let mut next = Some(tip);
@@ -724,21 +939,19 @@ fn walk_segment(
             return Ok(None);
         }
         let commit = read_commit(store, hash)?;
-        let (parent, merge) = {
-            let mut parents = walked_parents(&commit, excluded, first_parent);
-            (parents.next(), parents.next().is_some())
-        };
+        let walked = walked_parents(&commit, excluded, rule)?;
+        let (parent, merge) = (walked.first().copied(), walked.len() > 1);
         if streamed >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
-        let parents: Vec<_> = if merge {
-            walked_parents(&commit, excluded, first_parent).collect()
-        } else {
-            Vec::new()
-        };
+        let parents = if merge { walked } else { Vec::new() };
         next = parent;
-        if !emit(Entry { hash, commit }) {
+        if !emit(Entry {
+            hash,
+            commit,
+            paths: Vec::new(),
+        })? {
             return Ok(None);
         }
         if merge {
@@ -746,7 +959,7 @@ fn walk_segment(
                 store,
                 &parents,
                 excluded,
-                first_parent,
+                rule,
                 (streamed, max_commits),
                 emit,
             );
@@ -767,9 +980,9 @@ fn emit_sorted(
     store: &ObjectStore,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (streamed, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<Option<(Hash, usize)>, Error> {
     // Discover the region in parent order, deduplicating queued candidates.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
@@ -795,7 +1008,7 @@ fn emit_sorted(
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         let commit = read_commit(store, hash)?;
-        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
+        let parents = walked_parents(&commit, excluded, rule)?;
         closed &= !parents.is_empty();
         for parent in parents {
             if queued.insert(parent) {
@@ -847,7 +1060,8 @@ fn emit_sorted(
         if !emit(Entry {
             hash: item.hash,
             commit,
-        }) {
+            paths: Vec::new(),
+        })? {
             return Ok(None);
         }
     }
@@ -1424,6 +1638,7 @@ mod tests {
                                 first_parent,
                                 filter: filter.clone(),
                                 limit,
+                                ..Query::default()
                             };
                             let expected = reference(&store, tips, excluded, &query);
                             let got = select(&store, tips, excluded, &query, usize::MAX).unwrap();

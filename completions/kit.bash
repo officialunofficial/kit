@@ -103,7 +103,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all --follow -n --help" -- "$cur") )
             ;;
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )

@@ -1,4 +1,5 @@
-//! `kit log [<rev>] [<A>..<B> | <A>...<B>]` — walk commit history.
+//! `kit log [<rev>] [<A>..<B> | <A>...<B>] [[--] <path>...]` — walk commit
+//! history.
 //!
 //! With no argument the walk starts at `HEAD`. A single `<rev>` starts there
 //! instead; a range `A..B` shows commits reachable from `B` but not `A`
@@ -43,6 +44,12 @@
 //! the `--oneline` format. See the `graph` module. It draws an edge only to a parent
 //! that the output shows, so a filter or a limit leaves no open line. It
 //! excludes `-p`, `--stat` and `--format=json`.
+//!
+//! Paths after the revision keep the commits that change them, with git's
+//! default history simplification; see `libkit::log`. A path is relative to
+//! the current directory. Without `--`, each path must exist in the worktree
+//! and must not also resolve as a revision. `--follow` continues under the
+//! old name of a renamed file and needs exactly one path.
 //!
 //! History filters — `--author`/`--grep` (substring matches),
 //! `--since`/`--until` (a small explicit date grammar, see
@@ -171,8 +178,13 @@ struct LogOpts {
     /// Start the walk at `HEAD`, every local branch, every remote-tracking
     /// ref and every tag, not at `HEAD` alone. Each commit appears once. It
     /// cannot combine with a revision or a range.
-    #[arg(long, conflicts_with = "start")]
+    #[arg(long)]
     all: bool,
+
+    /// Continue the history of the one path under its old name when a
+    /// commit renames it.
+    #[arg(long)]
+    follow: bool,
 
     /// Print the refs that name each commit after its id: `HEAD`, the local
     /// branches, the tags (as `tag: <name>`) and the remote-tracking refs.
@@ -185,10 +197,10 @@ struct LogOpts {
     #[arg(long, conflicts_with_all = ["patch", "stat"])]
     graph: bool,
 
-    /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
-    /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
-    /// means `HEAD`.
-    start: Option<String>,
+    /// An optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`)
+    /// or symmetric range (`A...B`), then paths. The walk starts at `HEAD`
+    /// without a revision; an empty range side means `HEAD`.
+    args: Vec<String>,
 }
 
 impl LogOpts {
@@ -220,6 +232,12 @@ impl LogOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    // Arguments after `--` are paths. clap would drop the separator, so it
+    // never sees them.
+    let (args, explicit) = match args.iter().position(|a| a == "--") {
+        Some(at) => (&args[..at], Some(&args[at + 1..])),
+        None => (args, None),
+    };
     let opts = match clap_args::parse::<LogOpts>("kit log", args) {
         Ok(o) => o,
         Err(code) => return code,
@@ -263,11 +281,18 @@ pub fn run(args: &[String]) -> u8 {
         Ok(repo) => repo,
         Err(code) => return code,
     };
+    let (start, paths) = match split_args(&repo, &cwd, &opts, explicit) {
+        Ok(split) => split,
+        Err(code) => return code,
+    };
+    if opts.follow && paths.len() != 1 {
+        return emit_err("--follow requires exactly one path", exit::USAGE);
+    }
     // `-n <limit>` caps the *filtered* set, not the raw walk, so it
     // composes with `--author`/`--grep`/`--since`/`--until`/`--no-merges`
     // the way git's does.
     let query = Query {
-        start: opts.start.clone(),
+        start: start.clone(),
         all: opts.all,
         first_parent: opts.first_parent,
         filter: Filter {
@@ -278,12 +303,14 @@ pub fn run(args: &[String]) -> u8 {
             no_merges: opts.no_merges,
         },
         limit: opts.limit,
+        paths,
+        follow: opts.follow,
     };
     let entries = match log::history(&repo, &query) {
         Ok(Some(entries)) => entries,
         Ok(None) => {
             // No HEAD yet and no explicit revision → nothing to show.
-            if opts.start.is_none() && matches!(fmt, Format::Default | Format::Oneline) {
+            if start.is_none() && matches!(fmt, Format::Default | Format::Oneline) {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "no commits yet");
             }
@@ -357,6 +384,7 @@ fn print_entries(
                 c.parents.first().copied(),
                 c.tree_hash,
                 opts.stat,
+                &entry.paths,
             ) {
                 // The default format ends each commit with a blank line.
                 Ok(true) if fmt == Format::Default => {
@@ -420,6 +448,99 @@ fn print_graph_commit(
         let _ = writeln!(out, "{line}");
     }
     Ok(())
+}
+
+/// Split the positional arguments into the revision selection and the paths,
+/// in the form of the index. `explicit` holds the arguments after `--`. The
+/// error is the exit code, after the message.
+fn split_args(
+    repo: &libkit::Repo,
+    cwd: &std::path::Path,
+    opts: &LogOpts,
+    explicit: Option<&[String]>,
+) -> Result<(Option<String>, Vec<String>), u8> {
+    let mut positional = opts.args.iter();
+    let mut start = None;
+    let mut raw: Vec<&String> = Vec::new();
+    if explicit.is_some() {
+        start = positional.next().cloned();
+        if let Some(extra) = positional.next() {
+            let msg = format!("unexpected argument '{extra}' before '--'");
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+    } else if !opts.all
+        && let Some(first) = positional.next()
+    {
+        let in_worktree = cwd.join(first).symlink_metadata().is_ok();
+        if is_revision(repo, first) {
+            if in_worktree {
+                let msg = format!(
+                    "ambiguous argument '{first}': both revision and filename; \
+                     use '--' to separate paths from revisions"
+                );
+                return Err(emit_err(&msg, exit::USAGE));
+            }
+            start = Some(first.clone());
+        } else if in_worktree {
+            raw.push(first);
+        } else {
+            // Neither a path nor a revision: report the revision error.
+            start = Some(first.clone());
+        }
+    }
+    for arg in positional {
+        if cwd.join(arg).symlink_metadata().is_err() {
+            let msg = format!(
+                "ambiguous argument '{arg}': unknown revision or path not in the worktree; \
+                 use '--' to separate paths from revisions"
+            );
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+        raw.push(arg);
+    }
+    raw.extend(explicit.unwrap_or_default());
+    if opts.all && start.is_some() {
+        return Err(emit_err(
+            "--all does not combine with a revision or a range",
+            exit::USAGE,
+        ));
+    }
+    let root = repo.layout().worktree_root();
+    let mut paths = Vec::with_capacity(raw.len());
+    for arg in raw {
+        if arg.starts_with(':') || arg.contains(['*', '?', '[']) {
+            let msg = format!("'{arg}': globs and pathspec magic are not supported");
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+        let abs = cwd.join(arg);
+        let at_root = matches!(
+            (abs.canonicalize(), root.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        );
+        if at_root {
+            paths.push(String::new());
+            continue;
+        }
+        match super::index_path_for_arg(root, &abs) {
+            Ok(path) => paths.push(path),
+            Err(e) => return Err(emit_err(&e, exit::USAGE)),
+        }
+    }
+    Ok((start, paths))
+}
+
+/// Does `arg` name a revision or a range? Each side of a range resolves, and
+/// an empty side means `HEAD`. A file named `a..b` is not a range unless
+/// both `a` and `b` resolve.
+fn is_revision(repo: &libkit::Repo, arg: &str) -> bool {
+    let resolves = |rev: &str| {
+        rev.is_empty()
+            || libkit::revspec::resolve_revision(repo.store(), repo.layout(), rev).is_ok()
+    };
+    match arg.split_once("...").or_else(|| arg.split_once("..")) {
+        Some((a, b)) => resolves(a) && resolves(b),
+        None => !arg.is_empty() && resolves(arg),
+    }
 }
 
 /// Parse the value of `--since` or `--until`. A bad date is a usage error,
@@ -590,7 +711,8 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -614,7 +736,8 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
         };
         assert_eq!(opts.render_format(), Format::Oneline);
     }
@@ -638,7 +761,8 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -662,7 +786,8 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
         };
         assert_eq!(opts.render_format(), Format::Json);
     }
@@ -685,7 +810,8 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
         }
     }
 
