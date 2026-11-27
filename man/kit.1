@@ -2035,7 +2035,18 @@ overwrites an existing key file at the target path; and
 .Fl Fl print-pubkey
 emits the canonical keyid on stdout for trust-roots entries.
 .It Cm config Oo Ar key Oo Ar value Oc Oc Op Fl Fl format Ns = Ns Cm json
-Read or write a config key. With no
+Read or write a config key.
+.Fl Fl get-regexp Ar regex
+prints
+.Ql key value
+for each key with a value whose name matches.
+.Cm alias. Ns Ar name
+names kit arguments that run when
+.Ar name
+is typed as a command; it is user-scoped only, a value starting with
+.Ql \&!
+is refused, a built-in command always wins, and an alias cannot expand to
+another alias. With no
 .Ar key ,
 shows every configuration value; with a
 .Ar key

@@ -44,6 +44,10 @@ struct ConfigOpts {
     /// otherwise be repo-safe.
     #[arg(long, conflicts_with = "local")]
     global: bool,
+    /// Print `<key> <value>` for every key with a value whose name matches
+    /// this regular expression, such as `alias.`.
+    #[arg(long = "get-regexp", value_name = "REGEX", conflicts_with = "unset")]
+    get_regexp: Option<String>,
     /// Optional `<key>` to show, or `<key> <value>` pair to set.
     args: Vec<String>,
 }
@@ -72,6 +76,13 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
     let json = matches!(opts.format, ConfigFormat::Json);
+
+    if let Some(pattern) = opts.get_regexp.as_deref() {
+        if !opts.args.is_empty() {
+            return super::usage_error("kit config --get-regexp takes no positional arguments");
+        }
+        return get_regexp(&layered.merged, pattern);
+    }
 
     if let Some(raw_key) = opts.unset.as_deref() {
         if !opts.args.is_empty() {
@@ -125,6 +136,24 @@ pub fn run(args: &[String]) -> u8 {
     }
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
+    }
+    if let Some(name) = key.strip_prefix(config::ALIAS_PREFIX) {
+        if !config::valid_alias_name(name) {
+            return emit_err(
+                &format!("invalid alias name `{name}`: use letters, digits and `-`"),
+                exit::CONFIG_ERROR,
+            );
+        }
+        if let Err(e) = config::split_alias(value) {
+            return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
+        }
+        if crate::is_builtin(name) {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "warning: `{name}` is a built-in command, which always wins; the alias is ignored"
+            );
+        }
     }
     if key == "grant.webauthn_rp"
         && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
@@ -457,7 +486,39 @@ const CONFIG_KEYS: &[&str] = &[
     "user.identity",
 ];
 
+/// `kit config --get-regexp <regex>`: each key with a value whose name
+/// matches, as `<key> <value>`. Nothing matching exits 1, as in git.
+fn get_regexp(cfg: &Config, pattern: &str) -> u8 {
+    let matcher = match libkit::grep::Matcher::new(&[pattern], libkit::grep::Options::default()) {
+        Ok(m) => m,
+        Err(e) => return super::usage_error(&format!("invalid --get-regexp pattern: {e}")),
+    };
+    let mut rows: Vec<(String, String)> = CONFIG_KEYS
+        .iter()
+        .filter_map(|k| lookup(cfg, k).map(|v| ((*k).to_owned(), v.into_owned())))
+        .chain(
+            cfg.aliases
+                .iter()
+                .map(|(name, v)| (format!("{}{name}", config::ALIAS_PREFIX), v.clone())),
+        )
+        .filter(|(k, v)| !v.is_empty() && matcher.selects(k.as_bytes()))
+        .collect();
+    rows.sort();
+    if rows.is_empty() {
+        return exit::GENERAL_ERROR;
+    }
+    let mut stdout = std::io::stdout().lock();
+    for (k, v) in rows {
+        let _ = writeln!(stdout, "{k} {}", format::safe_text(&v));
+    }
+    exit::OK
+}
+
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
+    if let Some(name) = key.strip_prefix(config::ALIAS_PREFIX) {
+        return config::valid_alias_name(name)
+            .then(|| Cow::Borrowed(cfg.aliases.get(name).map_or("", String::as_str)));
+    }
     if let Some(name) = remote_admission_name(key) {
         return Some(Cow::Borrowed(
             cfg.remote_admission_headers

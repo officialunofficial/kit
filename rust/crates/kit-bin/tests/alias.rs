@@ -78,8 +78,8 @@ fn a_repository_config_cannot_define_an_alias() {
     let err = text(&out.stderr);
     assert!(err.contains("unknown command 'st'"), "{err}");
     // Any command that reads config names the dropped key.
-    let status = repo.run(&["status"]);
-    assert!(text(&status.stderr).contains("alias.st"), "{status:?}");
+    let shown = repo.run(&["config"]);
+    assert!(text(&shown.stderr).contains("alias.st"), "{shown:?}");
     let local = repo.run(&["config", "--local", "alias.st", "status"]);
     assert_eq!(local.status.code(), Some(78), "{local:?}");
 }
@@ -118,7 +118,7 @@ fn a_shell_alias_is_refused() {
     let repo = repo();
     let out = repo.run(&["config", "alias.x", "!echo hi"]);
     assert_eq!(out.status.code(), Some(78), "{out:?}");
-    assert!(repo.run(&["x"]).status.code() == Some(64));
+    assert_eq!(repo.run(&["x"]).status.code(), Some(64));
 }
 
 #[test]
@@ -143,7 +143,7 @@ const EXPANSIONS: &[&str] = &[
     "status",
     "status -s",
     "log --oneline",
-    "branch",
+    "branch --list",
     "rev-parse HEAD",
     "diff --stat",
     "show --stat HEAD",

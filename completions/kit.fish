@@ -622,3 +622,4 @@ complete -c kit -n "__fish_seen_subcommand_from stash" -s u -l include-untracked
 complete -c kit -n "__fish_seen_subcommand_from stash" -s a -l all -d "Also stash ignored files"
 complete -c kit -n "__fish_seen_subcommand_from stash" -a branch -d "Branch from the stash's base and pop it"
 complete -c kit -n "__fish_seen_subcommand_from switch checkout" -a "- '@{-1}'" -d "Return to the previous HEAD"
+complete -c kit -n "__fish_seen_subcommand_from config" -l get-regexp -d "List set keys whose names match a regex" -r

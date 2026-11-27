@@ -303,7 +303,20 @@ pub fn config_parse_one_iteration(input: &[u8]) {
             assert!(cfg.trusted_remote_endpoint.is_empty());
             assert!(cfg.http_ssl_ca_info.is_empty());
             assert!(cfg.pull_require_signed.is_empty());
+            assert!(cfg.aliases.is_empty());
         }
+    }
+    // An alias value that splits re-splits to the same arguments once each
+    // argument is quoted.
+    if let Ok(args) = libkit::config::split_alias(text) {
+        let quoted: Vec<String> = args
+            .iter()
+            .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        assert_eq!(
+            libkit::config::split_alias(&quoted.join(" ")).as_ref(),
+            Ok(&args)
+        );
     }
 }
 

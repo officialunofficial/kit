@@ -130,6 +130,7 @@ pub const REPO_FORBIDDEN_KEYS: &[&str] = &[
 #[must_use]
 pub fn is_repo_forbidden_key(key: &str) -> bool {
     REPO_FORBIDDEN_KEYS.contains(&key)
+        || key.starts_with(ALIAS_PREFIX)
         || key
             .strip_prefix("remote.")
             .and_then(|rest| rest.strip_suffix(".admission_headers"))
@@ -247,6 +248,128 @@ pub struct Config {
     /// STRENGTHENS durability (and slows writes); it cannot weaken
     /// anything.
     pub durability_objects: String,
+    /// `alias.<name>`: the kit arguments that run when `<name>` is typed as
+    /// a command, keyed by the lowercase name. User-scoped only
+    /// ([`is_repo_forbidden_key`]).
+    pub aliases: std::collections::BTreeMap<String, String>,
+}
+
+/// The section of an alias key.
+pub const ALIAS_PREFIX: &str = "alias.";
+
+/// The longest alias name.
+pub const MAX_ALIAS_NAME: usize = 64;
+
+/// Is `name` a valid alias name: 1 to [`MAX_ALIAS_NAME`] letters, digits
+/// and `-`, not starting with `-`?
+#[must_use]
+pub fn valid_alias_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ALIAS_NAME
+        && !name.starts_with('-')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Split an alias value into kit arguments. Arguments are separated by
+/// spaces or tabs; a `"..."` or `'...'` part stays one argument, and inside
+/// double quotes `\"` and `\\` stand for `"` and `\`. A value that starts
+/// with `!` (git's shell form) and an unclosed quote are errors.
+///
+/// # Errors
+/// The reason the value is refused.
+pub fn split_alias(value: &str) -> Result<Vec<String>, String> {
+    if value.trim_start().starts_with('!') {
+        return Err(
+            "the `!` shell form is not supported; an alias expands to kit arguments".to_owned(),
+        );
+    }
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_arg = false;
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if in_arg {
+                    args.push(std::mem::take(&mut current));
+                    in_arg = false;
+                }
+            }
+            '\'' => {
+                in_arg = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => current.push(c),
+                        None => return Err("unclosed `'` quote".to_owned()),
+                    }
+                }
+            }
+            '"' => {
+                in_arg = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\')) => current.push(c),
+                            Some(c) => {
+                                current.push('\\');
+                                current.push(c);
+                            }
+                            None => return Err("unclosed `\"` quote".to_owned()),
+                        },
+                        Some(c) => current.push(c),
+                        None => return Err("unclosed `\"` quote".to_owned()),
+                    }
+                }
+            }
+            c => {
+                in_arg = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_arg {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+/// Record `alias.<name> = val` in `cfg`. An empty value removes the alias.
+fn apply_alias(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
+    let name = &key[ALIAS_PREFIX.len()..];
+    if !valid_alias_name(name) {
+        return Err(format!(
+            "invalid alias name in `{key}`: use letters, digits and `-`"
+        ));
+    }
+    if val.is_empty() {
+        cfg.aliases.remove(name);
+        return Ok(());
+    }
+    split_alias(val).map_err(|e| format!("`{key}`: {e}"))?;
+    cfg.aliases.insert(name.to_owned(), val.to_owned());
+    Ok(())
+}
+
+/// The aliases of the user-scoped config. Only that file is read: aliases
+/// are user-scoped, so neither a repository config nor a `-c` override can
+/// add one.
+///
+/// # Errors
+/// As [`read_or_default`] for the user-scoped file.
+pub fn read_user_aliases(
+    environment: &Environment,
+    observer: &dyn Observer<ConfigEvent>,
+) -> Result<std::collections::BTreeMap<String, String>, ConfigError> {
+    let mut cfg = Config::default();
+    apply_file(
+        &mut cfg,
+        &user_config_path(environment)?,
+        ConfigScope::User,
+        observer,
+    )?;
+    Ok(cfg.aliases)
 }
 
 /// A named remote's stored address. `type` is a dispatch hint derived
@@ -950,6 +1073,7 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
         // upstream). Each remote endpoint still flows through the
         // per-endpoint gate, so a named remote cannot smuggle ambient
         // creds.
+        _ if key.starts_with(ALIAS_PREFIX) => apply_alias(cfg, key, val)?,
         _ if apply_section_kv(cfg, key, val)? => {}
         _ => return Err(format!("unknown config key `{key}`")),
     }
@@ -2174,6 +2298,44 @@ mod tests {
             Err(ConfigError::Rejected { location, reason }) => format!("{location}: {reason}"),
             other => panic!("expected a rejected config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn aliases_are_user_scoped_and_validated() {
+        let cfg = try_layer(
+            Some("alias.st = status\n"),
+            Some("alias.LG = log --oneline\n"),
+        )
+        .unwrap();
+        assert_eq!(cfg.aliases.len(), 1);
+        assert_eq!(
+            cfg.aliases.get("lg").map(String::as_str),
+            Some("log --oneline")
+        );
+        assert!(is_repo_forbidden_key("alias.anything"));
+        assert!(rejection(None, Some("alias.x = !echo hi\n")).contains("shell form"));
+        assert!(rejection(None, Some("alias.x = log \"open\n")).contains("unclosed"));
+        assert!(rejection(None, Some("alias.a_b = log\n")).contains("invalid alias name"));
+        assert!(rejection(None, Some("alias.-x = log\n")).contains("invalid alias name"));
+        // An empty value removes the alias.
+        let cfg = try_layer(None, Some("alias.st = status\nalias.st =\n")).unwrap();
+        assert!(cfg.aliases.is_empty());
+    }
+
+    #[test]
+    fn split_alias_quotes_and_escapes() {
+        let ok = |v: &str| split_alias(v).unwrap();
+        assert_eq!(ok("log  --oneline\t-n 3"), ["log", "--oneline", "-n", "3"]);
+        assert_eq!(ok("commit -m \"two words\""), ["commit", "-m", "two words"]);
+        assert_eq!(ok("commit -m 'it''s'"), ["commit", "-m", "its"]);
+        assert_eq!(ok(r#"x "a\"b\\c\d""#), ["x", r#"a"b\c\d"#]);
+        assert_eq!(ok("x \"\""), ["x", ""]);
+        assert!(ok("").is_empty());
+        assert!(split_alias("  !rm -rf /").is_err());
+        assert!(split_alias("x 'open").is_err());
+        assert!(valid_alias_name("co-2"));
+        assert!(!valid_alias_name(""));
+        assert!(!valid_alias_name(&"a".repeat(MAX_ALIAS_NAME + 1)));
     }
 
     #[test]

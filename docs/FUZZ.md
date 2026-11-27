@@ -53,7 +53,7 @@ from recurring.
 | `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ignore::parse_checked` / `ops::restore::parse_sparse_patterns` (never panics on any text; the checked parse agrees with the plain parse and refuses only past the pattern count or length limit) |
 | `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
 | `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse` / `UrlTokenStatement::parse` / `TokenTarget::parse`, the URL token verifier, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
-| `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key) |
+| `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key, aliases included) and `libkit::config::split_alias` (an accepted value's arguments, each quoted, split back to the same arguments) |
 | `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
@@ -133,7 +133,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_git_bridge::gitparse` `parse_commit`, `parse_tag`, `parse_tree`, `parse_person` | `git_commit_parse`, `git_tag_parse`, `git_tree_parse`, `git_object_parse` |
 | `kit_git_bridge::gitobj::GitObject::parse_raw`, `author::parse_timestamp`, `headers` `parse_identity`, `parse_hash`, `parse_signature` | `git_object_parse` |
 | `kit_keystore` encrypted key record `decode` | `software_key_record` |
-| `libkit::config` text parsing (`apply_text`) | `config_parse` |
+| `libkit::config` text parsing (`apply_text`), `split_alias` | `config_parse` |
 | `libkit::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_bin::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
 | `libkit::attest_signer::parse_algorithm`, `libkit::attest_signer::Kind::from_str` | None. They match a command-line word against a fixed list. Unit tests cover them. |

@@ -11,13 +11,13 @@ use std::path::PathBuf;
 use kit_core::layout::RepoLayout;
 use libkit::Observer;
 pub use libkit::config::{
-    AttestConfig, CONFIG_FILE, Config, ConfigError, ConfigEvent, ConfigScope, DEFAULT_BRANCH,
-    DEFAULT_KEY_BACKEND, DEFAULT_KEY_REF, DEFAULT_P256_KEY_REF, DEFAULT_REMOTE_NAME,
-    DEFAULT_SECP256K1_KEY_REF, DEFAULT_SIGNER, DEFAULT_SIGNING_KEY, KeyConfig, LayeredConfig,
-    MAX_CONFIG_BYTES, REPO_FORBIDDEN_KEYS, RemoteEntry, ResolvedRemote, USER_CONFIG_SUBPATH,
-    Upstream, apply_text, configured_remote_names, expand_user_identity, is_repo_forbidden_key,
-    lock, normalize_config_key, parse_pipe_list, resolve_remote, resolve_upstream,
-    validate_key_path, validate_value, write,
+    ALIAS_PREFIX, AttestConfig, CONFIG_FILE, Config, ConfigError, ConfigEvent, ConfigScope,
+    DEFAULT_BRANCH, DEFAULT_KEY_BACKEND, DEFAULT_KEY_REF, DEFAULT_P256_KEY_REF,
+    DEFAULT_REMOTE_NAME, DEFAULT_SECP256K1_KEY_REF, DEFAULT_SIGNER, DEFAULT_SIGNING_KEY, KeyConfig,
+    LayeredConfig, MAX_CONFIG_BYTES, REPO_FORBIDDEN_KEYS, RemoteEntry, ResolvedRemote,
+    USER_CONFIG_SUBPATH, Upstream, apply_text, configured_remote_names, expand_user_identity,
+    is_repo_forbidden_key, lock, normalize_config_key, parse_pipe_list, resolve_remote,
+    resolve_upstream, split_alias, valid_alias_name, validate_key_path, validate_value, write,
 };
 
 use crate::environment;
@@ -125,6 +125,20 @@ pub fn unset_upstream(
 /// Write one user-scoped key for the current command.
 pub fn write_user_kv(key: &str, value: &str) -> Result<(), ConfigError> {
     libkit::config::write_user_kv(&environment::current(), key, value)
+}
+
+/// The aliases of the user-scoped config for the current command. A `-c`
+/// override of an alias key is reported and dropped, as for any other
+/// user-scoped key.
+pub fn read_user_aliases() -> Result<std::collections::BTreeMap<String, String>, ConfigError> {
+    let environment = environment::current();
+    for (key, _) in &environment.config_overrides {
+        let key = normalize_config_key(key.trim());
+        if is_repo_forbidden_key(&key) {
+            StderrWarnings.event(&ConfigEvent::IgnoredOverride { key });
+        }
+    }
+    libkit::config::read_user_aliases(&environment, &StderrWarnings)
 }
 
 /// Remove one user-scoped key for the current command.

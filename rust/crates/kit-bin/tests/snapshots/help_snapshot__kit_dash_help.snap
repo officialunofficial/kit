@@ -176,6 +176,8 @@ commands:
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
   config --unset <key>  Remove a configuration value (idempotent; unknown key errors)
+  config --get-regexp <regex>  Print `key value` for each set key whose name matches
+  config alias.<name> <args>  Define a user-scoped alias: `kit <name>` runs `kit <args>`
   config [--local|--global] <key> <value>|--unset <key>  Force repo/user scope
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
