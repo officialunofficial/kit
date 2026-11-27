@@ -7,6 +7,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-26
+
+### Added
+
+- A server can refuse a ref with a typed `ContentWithheld` detail on `permission_denied`. Clients report "Part of this Kit is withheld." and never retry. A client that predates it reports access denied.
+
 ## [0.11.0] - 2026-11-26
 
 ### Breaking
