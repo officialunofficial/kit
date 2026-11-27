@@ -214,18 +214,31 @@ fn function_line(text: &[u8]) -> Option<Vec<u8>> {
     Some(text[..len].to_vec())
 }
 
-/// The hunks of the standard diff from `parent` to `target` with `context`
-/// lines of context, each as the commit-side lines it covers and the
-/// function line of its header. A port of the hunk grouping and the
-/// function line search of git's `xdl_emit_diff`: each search goes up from
-/// the line above the hunk's context to the line above the previous hunk's
-/// context, and a search that finds nothing keeps the previous name.
-fn standard_hunk_funcs(
+/// One line of the standard diff: its origin (`' '`, `'-'` or `'+'`) and
+/// its index in the parent (for `'-'`) or in the commit (otherwise).
+type StdLine = (u8, usize);
+
+/// One hunk of the standard diff: the 1-based first lines in the parent
+/// and in the commit, the function line of its header, and its lines.
+struct StdHunk {
+    old_begin: usize,
+    new_begin: usize,
+    func: Vec<u8>,
+    lines: Vec<StdLine>,
+}
+
+/// The hunks of the standard diff from `parent` to `target`, made of the
+/// changed `spans`, with `context` lines of context. A port of the hunk
+/// grouping and the function line search of git's `xdl_emit_diff`: each
+/// search goes up from the line above the hunk's context to the line
+/// above the previous hunk's context, and a search that finds nothing
+/// keeps the previous name.
+fn standard_hunks(
     p_lines: &[(&[u8], bool)],
     t_len: usize,
     spans: &[(Span, Span)],
     context: usize,
-) -> Vec<(Span, Vec<u8>)> {
+) -> Vec<StdHunk> {
     let mut out = Vec::new();
     let mut func = Vec::new();
     // The line above the previous hunk's context; `None` before the first.
@@ -236,13 +249,15 @@ fn standard_hunk_funcs(
         while last + 1 < spans.len() && spans[last + 1].0.start - spans[last].0.end <= 2 * context {
             last += 1;
         }
-        let (first, end) = (&spans[i], &spans[last]);
-        let s1 = first.0.start.saturating_sub(context);
-        let s2 = first.1.start.saturating_sub(context);
+        let group = &spans[i..=last];
+        let (first, end) = (&group[0], &group[group.len() - 1]);
+        // The lines before a change are equal in both versions, so the
+        // context above is the same number of lines on each side.
+        let before = context.min(first.0.start).min(first.1.start);
+        let (s1, s2) = (first.0.start - before, first.1.start - before);
         let after = context
             .min(p_lines.len().saturating_sub(end.0.end))
             .min(t_len.saturating_sub(end.1.end));
-        let e2 = end.1.end + after;
         if let Some(start) = s1.checked_sub(1) {
             let stop = limit.map_or(0, |l| l + 1);
             if let Some(found) = (stop..=start)
@@ -253,7 +268,21 @@ fn standard_hunk_funcs(
             }
         }
         limit = s1.checked_sub(1);
-        out.push((s2..e2, func.clone()));
+        let mut lines: Vec<StdLine> = (s2..first.1.start).map(|t| (b' ', t)).collect();
+        for (k, (old, new)) in group.iter().enumerate() {
+            lines.extend(old.clone().map(|p| (b'-', p)));
+            lines.extend(new.clone().map(|t| (b'+', t)));
+            let next = group.get(k + 1).map_or(new.end + after, |(_, n)| n.start);
+            lines.extend((new.end..next).map(|t| (b' ', t)));
+        }
+        // Like `xdl_emit_hunk_hdr`, a side with no lines starts one lower.
+        let has = |o: u8| lines.iter().any(|&(x, _)| x == o || x == b' ');
+        out.push(StdHunk {
+            old_begin: s1 + usize::from(has(b'-')),
+            new_begin: s2 + usize::from(has(b'+')),
+            func: func.clone(),
+            lines,
+        });
         i = last + 1;
     }
     out
@@ -275,17 +304,46 @@ fn split(text: &[u8]) -> Vec<(&[u8], bool)> {
     out
 }
 
-/// The hunks of the spans of `ranges`, the commit's set, for the changes
-/// it `touched`, between the parent's version `parent` and the commit's
-/// version `target`. A port of git's `dump_diff_hacky_one`: like git, a
-/// change that two spans share prints under the first one only.
+/// A range hunk being gathered: git's `rhunk` state.
+struct Open {
+    old_start: usize,
+    old_lines: usize,
+    new_start: usize,
+    new_lines: usize,
+    lines: Vec<HunkLine>,
+    changed: bool,
+    func: Vec<u8>,
+}
+
+impl Open {
+    /// The finished hunk with `pending` removals drained into it, or
+    /// nothing when it holds only context, as git suppresses it.
+    fn close(mut self, pending: &mut Vec<HunkLine>) -> Option<RangeHunk> {
+        if !pending.is_empty() {
+            self.old_lines += pending.len();
+            self.lines.append(pending);
+            self.changed = true;
+        }
+        self.changed.then_some(RangeHunk {
+            old_start: self.old_start,
+            old_lines: self.old_lines,
+            new_start: self.new_start,
+            new_lines: self.new_lines,
+            lines: self.lines,
+            func: self.func,
+        })
+    }
+}
+
+/// The hunks of the spans of `ranges`, the commit's set, between the
+/// parent's version `parent` and the commit's version `target`. A port of
+/// git's `line_range_callback`: the standard diff, with the largest span
+/// as the context when it is more than 3 lines, clipped to each range in
+/// turn. A removal waits for the next line of the commit: it joins the
+/// range hunk when that line is in the range or ends the hunk, and is
+/// dropped otherwise. A hunk with only context is not printed.
 #[must_use]
-pub fn hunks(
-    ranges: &RangeSet,
-    touched: &[Change],
-    parent: &[u8],
-    target: &[u8],
-) -> Vec<RangeHunk> {
+pub fn hunks(ranges: &RangeSet, parent: &[u8], target: &[u8]) -> Vec<RangeHunk> {
     let (p_lines, t_lines) = (split(parent), split(target));
     let line = |lines: &[(&[u8], bool)], origin: u8, n: usize| {
         let (text, newline) = lines.get(n).copied().unwrap_or((&[], true));
@@ -295,90 +353,81 @@ pub fn hunks(
             newline,
         }
     };
-    // git prints the hunks of the standard diff clipped to the ranges, with
-    // the largest span as the context when it is more than 3 lines.
     let context = ranges
         .spans()
         .iter()
         .map(ExactSizeIterator::len)
         .fold(3, usize::max);
-    let standard = standard_hunk_funcs(
+    let spans = ranges.spans();
+    let mut out = Vec::new();
+    let mut cur = 0;
+    let mut open: Option<Open> = None;
+    let mut pending: Vec<HunkLine> = Vec::new();
+    // The 1-based parent line of the first pending removal.
+    let mut pending_at = 0;
+    let standard = standard_hunks(
         &p_lines,
         t_lines.len(),
         &changed_line_spans(parent, target),
         context,
     );
-    let mut out = Vec::new();
-    let mut j = 0;
-    for span in ranges.spans() {
-        let (t_start, t_end) = (span.start, span.end);
-        while j < touched.len() && touched[j].target.end < t_start {
-            j += 1;
-        }
-        if j == touched.len() || touched[j].target.start > t_end {
-            continue;
-        }
-        let mut j_last = j;
-        while j_last < touched.len() && touched[j_last].target.start < t_end {
-            j_last += 1;
-        }
-        if j_last > j {
-            j_last -= 1;
-        }
-        let (first, last) = (&touched[j], &touched[j_last]);
-        let at = first.target.start;
-        let func = standard
-            .iter()
-            .rev()
-            .find(|(cover, _)| cover.start <= at)
-            .map(|(_, f)| f.clone())
-            .unwrap_or_default();
-        let p_start = if t_start < first.target.start {
-            first
-                .parent
-                .start
-                .saturating_sub(first.target.start - t_start)
-        } else {
-            first.parent.start
-        };
-        let p_end = if t_end > last.target.end {
-            last.parent.end + (t_end - last.target.end)
-        } else {
-            last.parent.end
-        };
-        // git takes the old start from the old line where the standard diff
-        // stands, so an empty span at the top is `-1,0`, and `-0,0` only
-        // when the file did not exist.
-        let old_start = if p_lines.is_empty() { 0 } else { p_start + 1 };
-        let mut lines = Vec::new();
-        let mut t_cur = t_start;
-        while j < touched.len() && touched[j].target.start < t_end {
-            let change = &touched[j];
-            while t_cur < change.target.start {
-                lines.push(line(&t_lines, b' ', t_cur));
-                t_cur += 1;
+    for hunk in &standard {
+        let (mut pre, mut post) = (hunk.old_begin, hunk.new_begin);
+        for &(origin, n) in &hunk.lines {
+            if origin == b'-' {
+                if pending.is_empty() {
+                    pending_at = pre;
+                }
+                pre += 1;
+                pending.push(line(&p_lines, b'-', n));
+                continue;
             }
-            for k in change.parent.clone() {
-                lines.push(line(&p_lines, b'-', k));
+            let at = post - 1;
+            let cur_pre = pre;
+            post += 1;
+            if origin == b' ' {
+                pre += 1;
             }
-            while t_cur < change.target.end && t_cur < t_end {
-                lines.push(line(&t_lines, b'+', t_cur));
-                t_cur += 1;
+            while cur < spans.len() && at >= spans[cur].end {
+                if let Some(h) = open.take() {
+                    out.extend(h.close(&mut pending));
+                }
+                pending.clear();
+                cur += 1;
             }
-            j += 1;
+            if cur >= spans.len() || at < spans[cur].start {
+                pending.clear();
+                continue;
+            }
+            let h = open.get_or_insert_with(|| Open {
+                old_start: if pending.is_empty() {
+                    cur_pre
+                } else {
+                    pending_at
+                },
+                old_lines: 0,
+                new_start: at + 1,
+                new_lines: 0,
+                lines: Vec::new(),
+                changed: false,
+                func: hunk.func.clone(),
+            });
+            if !pending.is_empty() {
+                h.old_lines += pending.len();
+                h.lines.append(&mut pending);
+                h.changed = true;
+            }
+            h.lines.push(line(&t_lines, origin, n));
+            h.new_lines += 1;
+            if origin == b'+' {
+                h.changed = true;
+            } else {
+                h.old_lines += 1;
+            }
         }
-        while t_cur < t_end {
-            lines.push(line(&t_lines, b' ', t_cur));
-            t_cur += 1;
-        }
-        out.push(RangeHunk {
-            old_start,
-            old_lines: p_end.saturating_sub(p_start),
-            new_start: t_start + 1,
-            new_lines: t_end - t_start,
-            lines,
-            func,
-        });
+    }
+    if let Some(h) = open.take() {
+        out.extend(h.close(&mut pending));
     }
     out
 }
@@ -417,12 +466,7 @@ mod tests {
         let (parent, touched) = map_across(&set(&[0..3]), &ch);
         assert_eq!(touched.len(), 1);
         assert_eq!(parent.spans(), [0..2]);
-        let h = hunks(
-            &set(&[0..3]),
-            &touched,
-            b"a\nb\nc\nd\n",
-            b"a\nB\nB2\nc\nd\n",
-        );
+        let h = hunks(&set(&[0..3]), b"a\nb\nc\nd\n", b"a\nB\nB2\nc\nd\n");
         assert_eq!(
             (
                 h[0].old_start,
@@ -442,8 +486,7 @@ mod tests {
 
     /// The hunks of `ranges` for the change from `parent` to `target`.
     fn hunks_of(ranges: &[Span], parent: &[u8], target: &[u8]) -> Vec<RangeHunk> {
-        let (_, touched) = map_across(&set(ranges), &changes(parent, target));
-        hunks(&set(ranges), &touched, parent, target)
+        hunks(&set(ranges), parent, target)
     }
 
     #[test]
@@ -567,9 +610,9 @@ mod tests {
     #[test]
     fn a_creation_empties_the_range() {
         let ch = changes(b"", b"a\nb\n");
-        let (parent, touched) = map_across(&set(&[1..2]), &ch);
+        let (parent, _) = map_across(&set(&[1..2]), &ch);
         assert!(parent.is_empty());
-        let h = hunks(&set(&[1..2]), &touched, b"", b"a\nb\n");
+        let h = hunks(&set(&[1..2]), b"", b"a\nb\n");
         assert_eq!(
             (
                 h[0].old_start,
@@ -659,10 +702,19 @@ mod tests {
                 }
             }
             prop_assert_eq!(lines_of(&mapped), want);
-            // Every hunk line is a line of its version, and each touched
-            // change's lines appear.
-            let h = hunks(&ranges, &touched, &p, &t);
-            prop_assert_eq!(h.is_empty(), touched.is_empty());
+            // Every hunk changes something, stays inside the range, and
+            // its counts match its lines, whose commit side is the
+            // commit's lines in order.
+            let t_lines: Vec<&[u8]> = t.split_inclusive(|&b| b == b'\n').map(|l| &l[..l.len() - 1]).collect();
+            for h in hunks(&ranges, &p, &t) {
+                prop_assert!(h.lines.iter().any(|l| l.origin != b' '));
+                prop_assert!(h.new_start > start && h.new_start - 1 + h.new_lines <= end);
+                let new: Vec<&[u8]> = h.lines.iter().filter(|l| l.origin != b'-').map(|l| l.text.as_slice()).collect();
+                let old = h.lines.iter().filter(|l| l.origin != b'+').count();
+                prop_assert_eq!(new.len(), h.new_lines);
+                prop_assert_eq!(old, h.old_lines);
+                prop_assert_eq!(&new[..], &t_lines[h.new_start - 1..h.new_start - 1 + h.new_lines]);
+            }
         }
     }
 }

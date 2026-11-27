@@ -62,10 +62,10 @@ fn without_blob_ids(line: &str) -> String {
     }
 }
 
-/// Whether `git log -L` prints the `index` and `new file mode` lines and
-/// the function line of the standard diff output, as git 2.54 and later
-/// do.
-fn git_prints_file_headers() -> bool {
+/// Whether the installed git prints `log -L` as kit does: git 2.54 and
+/// later clip the standard diff to each range, with its file headers and
+/// function lines. Older git prints a change two ranges share only once.
+fn git_clips_log_l_like_kit() -> bool {
     let out = Command::new("git").arg("--version").output().unwrap();
     let text = stdout(&out);
     let version = text.trim().trim_start_matches("git version ");
@@ -358,7 +358,7 @@ impl Twin {
 
 #[test]
 fn output_matches_git_log_l() {
-    if !git_available() {
+    if !git_available() || !git_clips_log_l_like_kit() {
         return;
     }
     let t = Twin::new();
@@ -376,21 +376,7 @@ fn output_matches_git_log_l() {
         &["-L", "4,-2:g.txt"],
         &["-L", "5,8:f.rs", "HEAD~3"],
     ] {
-        let (mut ours, theirs) = t.both(args);
-        if !git_prints_file_headers() {
-            ours.retain(|l| {
-                l != "index" && !l.starts_with("index ") && !l.starts_with("new file mode ")
-            });
-            for l in &mut ours {
-                if let Some(end) = l.strip_prefix("@@ ").and_then(|r| r.find(" @@ ")) {
-                    l.truncate(end + 6);
-                }
-                // Older git prints an insertion at the top as `-0,0`.
-                if let Some(rest) = l.strip_prefix("@@ -1,0 ") {
-                    *l = format!("@@ -0,0 {rest}");
-                }
-            }
-        }
+        let (ours, theirs) = t.both(args);
         assert_eq!(ours, theirs, "{args:?}");
     }
 }

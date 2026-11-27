@@ -234,7 +234,7 @@ fn carry(
                 created: parent_blob.is_none(),
                 old: parent_file,
                 new: target_file,
-                hunks: hunks(set, &touched, &parent_text, &target),
+                hunks: hunks(set, &parent_text, &target),
             });
         }
     }
