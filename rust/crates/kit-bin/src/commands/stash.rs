@@ -38,6 +38,10 @@ struct SaveOpts {
     /// Include untracked, non-ignored files (also included by default).
     #[arg(short = 'u', long)]
     include_untracked: bool,
+    /// Also save the files the ignore rules match, and remove them from the
+    /// worktree. `.kit` and `.git` are never saved.
+    #[arg(short = 'a', long)]
+    all: bool,
     /// Files or directory prefixes to save.
     paths: Vec<String>,
 }
@@ -79,6 +83,14 @@ enum StashCmd {
         #[arg(default_value = "0")]
         index: String,
     },
+    /// Create a branch at the commit the stash was made on, switch to it,
+    /// and pop the entry with its staged state (default: entry 0).
+    Branch {
+        /// The new branch.
+        name: String,
+        #[arg(default_value = "0")]
+        index: String,
+    },
 }
 
 /// Parse a stash entry reference. Accepts a bare index (`2`) or git's
@@ -111,6 +123,7 @@ pub fn run(args: &[String]) -> u8 {
                 | "drop"
                 | "clear"
                 | "show"
+                | "branch"
                 | "-h"
                 | "--help"
         )
@@ -140,6 +153,13 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
 
+    let json = matches!(opts.format, StashFormat::Json);
+    // `branch` switches through `checkout`, which takes the worktree lock
+    // itself, so it takes the lock only for the restore that follows.
+    if let StashCmd::Branch { name, index } = &opts.sub {
+        return stash_branch(&store, &layout, name, index, json);
+    }
+
     // Commands that mutate the worktree/index/manifest must serialise
     // against other worktree commands: `save`/`pop`/`apply`/`drop`/`clear`.
     // (`apply` writes the worktree; `clear` rewrites the manifest.)
@@ -153,10 +173,9 @@ pub fn run(args: &[String]) -> u8 {
             Ok(l) => Some(l),
             Err(code) => return code,
         },
-        StashCmd::List | StashCmd::Show { .. } => None,
+        StashCmd::List | StashCmd::Show { .. } | StashCmd::Branch { .. } => None,
     };
 
-    let json = matches!(opts.format, StashFormat::Json);
     // `lock` is held until this binding drops at the end of `run`, so the
     // worktree stays serialised across the whole `dispatch` call.
     let code = dispatch(opts.sub, &store, &layout, json);
@@ -197,6 +216,9 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
             } else {
                 format!("On {branch}: {}", save.message)
             };
+            if save.all && !save.paths.is_empty() {
+                return emit_err("stash push --all does not take paths", exit::USAGE);
+            }
             let cwd =
                 std::env::current_dir().unwrap_or_else(|_| layout.worktree_root().to_path_buf());
             let mut paths = Vec::new();
@@ -221,7 +243,7 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
                 }
                 paths.push(path);
             }
-            match stash::save_paths(store, layout, &effective, &paths) {
+            match stash::save_paths_with(store, layout, &effective, &paths, save.all) {
                 Ok(()) => {
                     let mut stderr = std::io::stderr().lock();
                     let _ = writeln!(
@@ -337,6 +359,8 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
             }
             Err(e) => emit_err(&e, exit::USAGE),
         },
+        // `run` handles `branch` before it takes the lock.
+        StashCmd::Branch { .. } => emit_err("stash branch: not reached", exit::SOFTWARE),
         StashCmd::Show { index } => match parse_stash_index(&index) {
             Ok(i) => match stash::render_stash_show(store, layout, i) {
                 Ok(output) => {
@@ -349,6 +373,62 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
             Err(e) => emit_err(&e, exit::USAGE),
         },
     }
+}
+
+/// `stash branch <name> [<stash>]`: create `name` at the commit the entry
+/// was made on, switch to it, then pop the entry with its staged state.
+/// The entry is dropped only after the restore succeeds.
+fn stash_branch(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    name: &str,
+    spec: &str,
+    json: bool,
+) -> u8 {
+    let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
+    let index = match parse_stash_index(spec) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&e, exit::USAGE),
+    };
+    if let Err(e) = kit_core::refs::check_new_name(name, kit_core::refs::RefNameKind::Branch) {
+        return emit_err(&format!("stash branch: {e}"), exit::USAGE);
+    }
+    let entries = match stash::list(layout) {
+        Ok(l) => l.entries,
+        Err(e) => return emit_err(&format!("stash branch: {e}"), exit::GENERAL_ERROR),
+    };
+    let Some(entry) = entries.get(index) else {
+        return emit_err(
+            &format!("stash branch: stash@{{{index}}} does not exist"),
+            exit::GENERAL_ERROR,
+        );
+    };
+    if entry.parent_hash == kit_core::hash::ZERO {
+        return emit_err(
+            &format!(
+                "stash branch: stash@{{{index}}} was saved before the first commit, so it has no commit to branch from"
+            ),
+            exit::GENERAL_ERROR,
+        );
+    }
+    if matches!(kit_core::refs::read_ref(layout, name), Ok(Some(_))) {
+        return emit_err(
+            &format!("stash branch: branch '{name}' already exists"),
+            exit::CANTCREAT,
+        );
+    }
+    let base = kit_core::hash::to_hex(&entry.parent_hash);
+    let code = super::checkout::run(&["-b".to_owned(), name.to_owned(), base]);
+    if code != exit::OK {
+        return code;
+    }
+    let lock = match super::acquire_worktree_lock(layout) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let code = restore_entry(store, layout, index, true, true, json);
+    drop(lock);
+    code
 }
 
 /// Restore stash entry `index` into the worktree. `drop_entry` chooses

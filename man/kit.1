@@ -1475,15 +1475,29 @@ renames a tree to a path that does not exist and updates its links.
 .Cm repair
 fixes the links of a tree that was moved by hand. On-disk format:
 .Pa docs/specs/SPEC-WORKTREE.md .
-.It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
+.It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref | Cm branch Ar name Op Ar ref Oc
 .Cm stash push Fl u
 or
 .Fl Fl include-untracked
 includes non-ignored untracked files (also included by default).
-.Fl a
-and
+.Cm stash push Fl a
+or
 .Fl Fl all
-are not supported.
+also saves the files the ignore rules match and removes them from the
+working tree;
+.Cm pop
+puts them back.
+.Pa .kit
+and
+.Pa .git
+are never saved, and
+.Fl a
+does not combine with paths.
+.Cm stash branch Ar name Op Ar ref
+creates
+.Ar name
+at the commit the stash was made on, switches to it, and pops the entry
+with its staged state. A failed restore keeps the entry.
 .Cm stash push Op Fl Fl Ar path ...
 saves only matching files or directory prefixes relative to the current directory.
 Other worktree files and staged entries stay unchanged.

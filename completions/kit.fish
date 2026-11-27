@@ -609,4 +609,6 @@ function __kit_argument_names
 end
 complete -c kit -n 'test (count (commandline -opc)) -gt 1' -a '(__kit_argument_names)'
 complete -c kit -n "__fish_seen_subcommand_from stash" -s u -l include-untracked -d "Include non-ignored untracked files"
+complete -c kit -n "__fish_seen_subcommand_from stash" -s a -l all -d "Also stash ignored files"
+complete -c kit -n "__fish_seen_subcommand_from stash" -a branch -d "Branch from the stash's base and pop it"
 complete -c kit -n "__fish_seen_subcommand_from switch checkout" -a "- '@{-1}'" -d "Return to the previous HEAD"

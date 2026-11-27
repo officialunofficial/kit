@@ -202,7 +202,7 @@ _kit_complete() {
             fi
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show -u --include-untracked -m --message" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show branch -u --include-untracked -a --all -m --message" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )

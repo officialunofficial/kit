@@ -222,6 +222,7 @@ commands:
   stash [--format=json]  Stash working dir changes (save WIP; -m for a message;
                     --format=json emits a JSON outcome, or JSONL on `list`)
   stash save|push -m <msg>  Stash with a message
+  stash push -a|--all  Also stash ignored files, such as build output
   stash list        List stash entries (printed as stash@{N})
   stash pop [--index] [<n>|stash@{n}]    Apply and remove a stash entry (default
                     0; --index also restores the staged state, like git)
@@ -230,6 +231,8 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
+  stash branch <name> [<n>|stash@{n}]  Branch from the stash's base commit and
+                    pop the entry there, staged state included
   clone [--sparse ...] [-b <branch>] [-o <name>] [--tags|--no-tags] <url>  Clone a repository
                     (-b checks out <branch> instead of the remote default;
                     -o names the cloned remote <name> instead of `default`)

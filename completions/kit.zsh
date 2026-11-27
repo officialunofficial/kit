@@ -559,8 +559,11 @@ _kit() {
                         'drop[remove stash entry]' \
                         'clear[remove all stash entries]' \
                         'show[show diff of stash entry]' \
+                        'branch[branch from the stash base and pop it]' \
                         '-u[include non-ignored untracked files]' \
-                        '--include-untracked[include non-ignored untracked files]'
+                        '--include-untracked[include non-ignored untracked files]' \
+                        '-a[also stash ignored files]' \
+                        '--all[also stash ignored files]'
                     ;;
                 remote)
                     _values 'remote subcommand' \

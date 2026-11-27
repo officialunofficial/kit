@@ -127,6 +127,22 @@ pub fn save_paths(
     message: &str,
     paths: &[String],
 ) -> StashResult<()> {
+    save_paths_with(store, layout, message, paths, false)
+}
+
+/// [`save_paths`] that, with `include_ignored`, also saves the untracked
+/// files the ignore rules match and removes them from the worktree, as
+/// `stash push --all` does. `.kit` and `.git` are never saved.
+///
+/// # Errors
+/// As [`save_paths`].
+pub fn save_paths_with(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    message: &str,
+    paths: &[String],
+    include_ignored: bool,
+) -> StashResult<()> {
     if message.len() > MAX_MESSAGE_LEN {
         return Err(StashError::MessageTooLong);
     }
@@ -136,8 +152,11 @@ pub fn save_paths(
     // that references them.
     let mut staged = read_stash_index(store, layout, paths)?;
     let batch = store.batch();
-    let mut tree_hash =
-        worktree::build_tree_filtered(&batch, layout.worktree_root(), Some(&staged))?;
+    let mut tree_hash = if include_ignored {
+        worktree::build_tree_including_ignored(&batch, layout.worktree_root(), Some(&staged))?
+    } else {
+        worktree::build_tree_filtered(&batch, layout.worktree_root(), Some(&staged))?
+    };
     let head_hash = refs::resolve_head(layout)?;
 
     let base = base_index(store, head_hash)?;
@@ -192,13 +211,7 @@ pub fn save_paths(
     // Paths the reset must not touch. A path in HEAD that the snapshot lacks
     // is an ignored, untracked file the reset would overwrite, so refuse
     // before the manifest or the worktree changes.
-    let head_tree = match head_hash {
-        Some(hh) => match store.read_object(&hh)? {
-            Object::Commit(c) => Some(c.tree_hash),
-            _ => None,
-        },
-        None => None,
-    };
+    let head_tree = commit_tree(store, head_hash)?;
     let root = layout.worktree_root();
     check_reset_paths(store, head_tree, tree_hash, root)?;
     let patterns = selected_patterns(paths);
@@ -250,6 +263,18 @@ pub fn save_paths(
     };
     index::write_index(layout, &remaining)?;
     Ok(())
+}
+
+/// The tree of `commit`, or `None` when there is no commit or the object
+/// is not a commit.
+fn commit_tree(store: &ObjectStore, commit: Option<Hash>) -> StashResult<Option<Hash>> {
+    Ok(match commit {
+        Some(h) => match store.read_object(&h)? {
+            Object::Commit(c) => Some(c.tree_hash),
+            _ => None,
+        },
+        None => None,
+    })
 }
 
 fn read_stash_index(
@@ -1730,6 +1755,22 @@ mod tests {
         pop(&store, &layout, 0).unwrap();
         assert_eq!(fs::read(r.join("new/u.txt")).unwrap(), b"untracked");
         assert_eq!(fs::read(r.join("top.log")).unwrap(), b"ignored");
+    }
+
+    #[test]
+    fn save_with_ignored_takes_and_returns_ignored_files() {
+        let (dir, layout, store) =
+            repo_with_head(&[("a.txt", b"one"), (".kitignore", b"*.log\nbuild/\n")]);
+        let r = dir.path();
+        put(r, "top.log", b"ignored");
+        put(r, "build/out.o", b"object");
+        save_paths_with(&store, &layout, "wip", &[], true).unwrap();
+        assert!(!r.join("top.log").exists());
+        assert!(!r.join("build").exists());
+        assert!(r.join(".kit").is_dir());
+        pop(&store, &layout, 0).unwrap();
+        assert_eq!(fs::read(r.join("top.log")).unwrap(), b"ignored");
+        assert_eq!(fs::read(r.join("build/out.o")).unwrap(), b"object");
     }
 
     #[test]
