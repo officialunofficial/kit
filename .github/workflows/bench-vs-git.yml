@@ -1,0 +1,41 @@
+name: "Bench: kit vs git"
+
+# Temporary: runs scripts/bench-vs-git.sh on hosted runners for this branch.
+
+on:
+  push:
+    branches:
+      - claude/project-thread-qo0kjb
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: bench-vs-git-${{ matrix.os }}
+          protoc: "false"
+      - name: Install hyperfine
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -y -q hyperfine; else brew install hyperfine; fi
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked -p kit-bin --bin kit
+      - name: Bench
+        run: |
+          scripts/bench-vs-git.sh rust/target/release/kit bench-results | tee bench.log
+          { echo '```'; sed -n '/== summary/,$p' bench.log; cat bench-results/sizes.txt bench-results/provenance.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
+        with:
+          name: bench-results-${{ matrix.os }}
+          path: bench-results
