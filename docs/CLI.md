@@ -1133,12 +1133,16 @@ Branches / refs:
   clobber guard and output. `-c` creates (refuses to clobber), `-C`
   create-or-resets, then switches. `switch -`, `switch @{-1}`, and
   `checkout -` return to the previous HEAD, detached when it was detached.
-  A successful HEAD change atomically saves one previous HEAD in the local
-  per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
-  `no previous branch`. Running an older kit's gc on a repository a newer kit
-  uses can prune the previous HEAD; `switch -` then reports `previous HEAD
-  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
-  for N greater than 1 is not supported.
+  `switch @{-N}` and `checkout @{-N}` return to the N-th previous HEAD, and
+  `@{-N}` names its commit in any revision argument, such as
+  `kit log @{-2}`. Each tree records its last 16 previous HEADs, so N runs
+  from 1 to 16; N past the record is an error. A successful HEAD change
+  atomically updates the local per-worktree `HEAD_HISTORY` and
+  `PREVIOUS_HEAD` files (SPEC-WORKTREE). A missing or unreadable record
+  reports `no previous branch`. Running an older kit's gc on a repository a
+  newer kit uses can prune a previous HEAD; switching to it then reports
+  `previous HEAD <id> was pruned; nothing to switch back to` and changes
+  nothing.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`

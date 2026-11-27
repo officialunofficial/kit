@@ -569,6 +569,7 @@ namespace); they are operation scratch state consumed by
 .kit/MERGE_HEAD           64-hex plus '\n'  — other parent of an in-progress merge
 .kit/CHERRY_PICK_HEAD     64-hex plus '\n'  — commit being applied by a cherry-pick
 .kit/PREVIOUS_HEAD        HEAD encoding — previous checkout/switch target (per worktree)
+.kit/HEAD_HISTORY         HEAD encoding lines — last 16 previous targets (per worktree, SPEC-WORKTREE)
 .kit/ORIG_HEAD            64-hex plus '\n'  — HEAD before the operation (for --abort)
 .kit/MERGE_MSG            raw bytes      — pending merge commit message
 .kit/CHERRY_PICK_MSG      raw bytes      — pending cherry-pick commit message
