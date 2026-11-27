@@ -222,7 +222,15 @@ pub fn run(args: &[String]) -> u8 {
                  conflict markers; resolve it and `kit add` it"
             ));
         }
-        libkit::conflict::ensure_staged(&layout, &store, records).map_err(|e| e.to_string())
+        libkit::conflict::ensure_staged(&layout, &store, records).map_err(|e| e.to_string())?;
+        libkit::rerere::record(
+            &layout,
+            &store,
+            super::conflict::rerere(&layout),
+            records,
+            &super::conflict::Notes,
+        );
+        Ok(())
     };
     let request = libkit::commit::Request {
         message: &msg,

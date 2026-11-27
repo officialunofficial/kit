@@ -122,6 +122,7 @@ fn start(
             exec: &[],
             autosquash: false,
             update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         },
         &TestSigning,
         editor,
@@ -136,6 +137,7 @@ fn resume(f: &Fixture, skip: bool, editor: &mut Script) -> Result<Outcome, Error
         skip,
         &TestSigning,
         editor,
+        libkit::rerere::Settings::default(),
         &NoopObserver,
     )
 }
@@ -255,6 +257,7 @@ fn an_upstream_limits_the_replay_to_the_commits_after_it() {
         exec: &[],
         autosquash: false,
         update_refs: false,
+        rerere: libkit::rerere::Settings::default(),
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -288,6 +291,7 @@ fn a_named_branch_is_the_one_that_moves() {
         exec: &[],
         autosquash: false,
         update_refs: false,
+        rerere: libkit::rerere::Settings::default(),
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -321,6 +325,7 @@ fn an_unknown_upstream_or_branch_is_an_error() {
             exec: &[],
             autosquash: false,
             update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         };
         let err = rebase::start(
             &l.f.layout,
@@ -505,6 +510,7 @@ fn reword_asks_the_editor_for_a_message_and_an_empty_reply_keeps_the_old_one() {
             exec: &[],
             autosquash: false,
             update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         },
         &TestSigning,
         &mut script,

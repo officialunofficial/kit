@@ -1197,8 +1197,8 @@ Branches / refs:
   and `diff` shows, for each, the change from the conflict with markers
   to the file now. `forget <path>` drops the recorded resolution of the
   current conflict at `<path>`. `clear` deletes every entry. `gc` deletes
-  entries resolved more than `gc.rerereResolved` days ago (default 60)
-  and unresolved entries older than `gc.rerereUnresolved` days (default
+  entries resolved `gc.rerereResolved` or more days ago (default 60) and
+  unresolved entries `gc.rerereUnresolved` or more days old (default
   15). With no subcommand, `rerere` does nothing: kit records and replays
   as part of each operation. The cache lives in `.kit/rr-cache/`, shared by
   linked worktrees; [SPEC-RERERE](specs/SPEC-RERERE.md) gives its format.

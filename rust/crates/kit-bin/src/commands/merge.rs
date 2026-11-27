@@ -115,6 +115,7 @@ pub fn run(args: &[String]) -> u8 {
                 no_ff: false,
                 message: opts.message.as_deref(),
                 strategy,
+                rerere: super::conflict::rerere(&layout),
             },
             json,
         )
@@ -303,7 +304,13 @@ fn print_merge_stat_trees(store: &ObjectStore, old_tree: Option<Hash>, new_tree:
 }
 
 fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
-    let merged = match merge::resume(layout, store, &super::signing::Configured) {
+    let merged = match merge::resume(
+        layout,
+        store,
+        &super::signing::Configured,
+        super::conflict::rerere(layout),
+        &super::conflict::Notes,
+    ) {
         Ok(merged) => merged,
         Err(failure) => return fail(failure, json),
     };

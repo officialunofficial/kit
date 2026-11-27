@@ -212,6 +212,13 @@ fn start(
         if let Err(e) = conflict_state::write_conflicts(layout.worktree_state_dir(), &records) {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
+        libkit::rerere::replay(
+            layout,
+            store,
+            super::conflict::rerere(layout),
+            &records,
+            &super::conflict::Notes,
+        );
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -377,6 +384,13 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
     if let Err(e) = libkit::conflict::ensure_staged(layout, store, &records) {
         return super::fail(e);
     }
+    libkit::rerere::record(
+        layout,
+        store,
+        super::conflict::rerere(layout),
+        &records,
+        &super::conflict::Notes,
+    );
 
     let idx = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,

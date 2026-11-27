@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect gc sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -336,6 +336,9 @@ complete -c kit -n "__fish_seen_subcommand_from keygen" \
 complete -c kit -n "__fish_seen_subcommand_from bisect; \
     and not __fish_seen_subcommand_from start good bad reset" \
     -a "start good bad reset"
+complete -c kit -n "__fish_seen_subcommand_from rerere; \
+    and not __fish_seen_subcommand_from status diff forget clear gc" \
+    -a "status diff forget clear gc"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview without deleting"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune move lock unlock repair" -a "add list remove prune move lock unlock repair"

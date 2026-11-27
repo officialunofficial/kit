@@ -291,6 +291,9 @@ commands:
   bisect run <cmd>...  Auto-bisect: run <cmd> per candidate, classify by
                      exit status (0=good/125=skip/1-127=bad), print first bad
   bisect reset       End bisect and restore original state
+  rerere [status | diff | forget <path> | clear | gc]
+                    Inspect and maintain recorded conflict resolutions
+                    (on with `rerere.enabled`)
   gc [-n] [--grace-secs SECS]
                     Reclaim unreachable objects older than the grace
                     window (default 14d); -n/--dry-run previews
@@ -446,6 +449,7 @@ mod tests {
             "cherry-pick",
             "rebase",
             "bisect",
+            "rerere",
             "sparse-checkout",
             "self",
             "serve",

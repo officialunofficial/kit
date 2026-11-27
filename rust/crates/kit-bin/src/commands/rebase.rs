@@ -171,6 +171,7 @@ fn request<'a>(
     exec: &'a [String],
     autosquash: bool,
     update_refs: bool,
+    rerere: libkit::rerere::Settings,
 ) -> Option<Request<'a>> {
     let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
         (None, [onto]) => (onto.as_str(), None, None),
@@ -187,6 +188,7 @@ fn request<'a>(
         exec,
         autosquash,
         update_refs,
+        rerere,
     })
 }
 
@@ -235,13 +237,22 @@ pub fn run(args: &[String]) -> u8 {
     let result = if opts.abort {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
-        rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
+        rebase::resume(
+            &layout,
+            &store,
+            opts.skip,
+            &signing,
+            &mut editor,
+            super::conflict::rerere(&layout),
+            &Notes,
+        )
     } else if let Some(request) = request(
         &opts,
         favor,
         &exec,
         autosquash(&opts, &layout),
         update_refs(&opts, &layout),
+        super::conflict::rerere(&layout),
     ) {
         rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
@@ -271,6 +282,7 @@ pub(super) fn rebase_onto(
         exec: &[],
         autosquash: false,
         update_refs: false,
+        rerere: super::conflict::rerere(layout),
     };
     let signing = super::signing::Configured;
     match rebase::start(

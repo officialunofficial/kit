@@ -51,9 +51,9 @@ fn entries(repo: &Repo) -> Vec<PathBuf> {
     out
 }
 
-/// `main` is `base` then `M`, which sets `f.txt` to `main`. `topic`, made
-/// from `base`, sets it to `topic` in `T` and adds `g.txt` in `G`, which
-/// sets `g.txt` on `main` too in `M2`. `HEAD` is `topic`, and rerere is on.
+/// `main` is `base` then `M` and `MG`, which change `f.txt` and `g.txt`.
+/// `topic`, made from `base`, changes them differently in `T` and `G`.
+/// `HEAD` is `topic`, and rerere is on.
 fn setup() -> Repo {
     let repo = Repo::new();
     repo.ok(&["config", "rerere.enabled", "true"]);
@@ -61,7 +61,7 @@ fn setup() -> Repo {
     repo.commit_file("g.txt", b"base g\n", "base g");
     repo.ok(&["branch", "topic"]);
     repo.commit_file("f.txt", b"main\n", "M");
-    repo.commit_file("g.txt", b"main g\n", "M2");
+    repo.commit_file("g.txt", b"main g\n", "MG");
     repo.ok(&["switch", "topic"]);
     repo.commit_file("f.txt", b"topic\n", "T");
     repo.commit_file("g.txt", b"topic g\n", "G");
@@ -139,7 +139,11 @@ fn rerere_is_off_by_default() {
     resolve_first_without_record(&repo);
     repo.ok(&["rebase", "--abort"]);
     let out = repo.run(&["rebase", "main"]);
-    assert!(!stderr(&out).contains("previous resolution"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("previous resolution"),
+        "{}",
+        stderr(&out)
+    );
     assert!(read(&repo, "f.txt").contains("<<<<<<< ours"));
     assert!(entries(&repo).is_empty());
 }
@@ -198,7 +202,11 @@ fn cherry_pick_records_and_replays() {
     repo.ok(&["add", "a.txt"]);
     let out = repo.run(&["cherry-pick", "--continue"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stderr(&out).contains("Recorded resolution"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Recorded resolution"),
+        "{}",
+        stderr(&out)
+    );
 
     repo.ok(&["reset", "--hard", &main]);
     let out = repo.run(&["cherry-pick", feature]);
@@ -234,7 +242,11 @@ fn forget_drops_the_recorded_resolution() {
     assert!(!entry.join("postimage").exists());
     repo.ok(&["rebase", "--abort"]);
     let out = repo.run(&["rebase", "main"]);
-    assert!(!stderr(&out).contains("previous resolution"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("previous resolution"),
+        "{}",
+        stderr(&out)
+    );
     assert!(read(&repo, "f.txt").contains("<<<<<<< ours"));
 
     let out = repo.run(&["rerere", "forget", "no-such.txt"]);
@@ -283,7 +295,11 @@ fn a_malformed_entry_is_ignored_with_a_warning() {
     }
     let out = repo.run(&["rebase", "main"]);
     assert!(stderr(&out).contains("warning"), "{}", stderr(&out));
-    assert!(!stderr(&out).contains("previous resolution"), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("previous resolution"),
+        "{}",
+        stderr(&out)
+    );
     assert!(read(&repo, "f.txt").contains("<<<<<<< ours"));
 }
 

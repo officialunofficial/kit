@@ -16,6 +16,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit rebase -i` takes `edit` lines, which replay a commit and stop so it can be amended or followed by new commits, and `exec` lines, which run a shell command and stop the rebase when it fails. `kit rebase -x/--exec <cmd>` adds an `exec` line after each replayed commit. A paused rebase whose plan holds `edit` or `exec` marks its `actions` state file with a version line; any other plan keeps the format that 0.11 reads.
 - `kit commit --fixup <rev>` and `--squash <rev>` write `fixup! <subject>` and `squash! <subject>` commits, and `kit rebase --autosquash` moves each one to just after the commit it names and folds it in, with or without `-i`. `rebase.autosquash = true` turns it on for `rebase -i`, and `--no-autosquash` turns it off.
 - `kit rebase --update-refs` moves every other local branch that points at a replayed commit to its replacement, so a stack of branches stays stacked. With `-i` the todo list shows an `update-ref` line for each. The branches move only at the finish and only if none moved during the rebase; `--abort` moves none, and a branch checked out in another worktree is left out with a warning. `rebase.updateRefs = true` turns it on. A paused rebase that will move branches keeps them in a new `rebase-apply/update-refs` file.
+- `rerere.enabled = true` records how each text conflict of a merge, cherry-pick, revert or rebase was resolved, and writes the same resolution into the file the next time that conflict appears, with its sides in either order. The resolution stays unstaged unless `rerere.autoUpdate = true`. `kit rerere status`, `diff`, `forget`, `clear` and `gc` inspect and maintain the cache in `.kit/rr-cache/` (SPEC-RERERE); `gc.rerereResolved` and `gc.rerereUnresolved` set how many days `gc` keeps entries.
 
 ### Breaking
 
@@ -25,6 +26,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_core::ops::rebase::RebaseAction` gains `Edit` and `Exec`, and `RebaseState` gains `exec`. `libkit::rebase::parse_todo` returns a `Plan`, `libkit::rebase::Request` gains `exec`, `libkit::rebase::Outcome` gains `Stopped` and `ExecFailed`, and `TodoError::EditUnsupported` is replaced by `TodoError::MissingCommand`.
 - `libkit::rebase::Request` gains `autosquash`, and `libkit::config::Config` gains `rebase_autosquash`.
 - `kit_core::ops::rebase::RebaseAction` gains `UpdateRef`, and `RebaseState` gains `update_refs` and `ref_updates`. `libkit::rebase::Request` gains `update_refs`, `Plan` gains `update_refs`, `Outcome::Finished` gains `updated_refs`, and `libkit::config::Config` gains `rebase_update_refs`.
+- `libkit::merge::Request` and `libkit::rebase::Request` gain `rerere`, and `libkit::merge::resume` and `libkit::rebase::resume` take the rerere settings, plus an observer for `merge::resume`. `libkit::conflict::Event` gains `ReusedResolution`, `RecordedPreimage`, `RecordedResolution` and `RerereWarning`, and `libkit::config::Config` gains `rerere_enabled`, `rerere_auto_update`, `gc_rerere_resolved` and `gc_rerere_unresolved`.
 
 ## [0.11.1] - 2026-11-26
 

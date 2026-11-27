@@ -1335,6 +1335,42 @@ resolve conflicts as in
 .Cm merge .
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
+.It Cm rerere Oo Cm status | Cm diff | Cm forget Ar path | Cm clear | Cm gc Oc
+Inspect and maintain recorded conflict resolutions.
+With
+.Cm rerere.enabled
+set to
+.Cm true ,
+.Cm merge ,
+.Cm cherry-pick ,
+.Cm revert
+and
+.Cm rebase
+record how each text conflict was resolved when the operation continues or
+its merge is committed, and write that resolution into the file the next
+time the same conflict appears, with its sides in either order. The file is
+left unstaged unless
+.Cm rerere.autoUpdate
+is
+.Cm true .
+.Cm status
+lists the current conflicts that have an entry,
+.Cm diff
+shows the change from each conflict to its file now,
+.Cm forget
+drops the recorded resolution at
+.Ar path ,
+.Cm clear
+deletes every entry, and
+.Cm gc
+deletes entries older than
+.Cm gc.rerereResolved
+.Pq default 60
+or, with no resolution,
+.Cm gc.rerereUnresolved
+.Pq default 15
+days. The cache lives in
+.Pa .kit/rr-cache/ .
 .It Cm gc Oo Fl n | Fl Fl dry-run Oc Oo Fl Fl grace-secs Ar secs Oc
 Reclaim unreachable objects (mark-and-sweep). Keeps everything reachable from
 the retention roots (refs, stash, in-progress operations, attestations, and the
@@ -1775,6 +1811,10 @@ emits JSON instead of the default plain output. Recognized keys include
 .Cm ssh.identity_file ,
 .Cm rebase.autosquash ,
 .Cm rebase.updateRefs ,
+.Cm rerere.enabled ,
+.Cm rerere.autoUpdate ,
+.Cm gc.rerereResolved ,
+.Cm gc.rerereUnresolved ,
 and
 .Cm gc.auto .
 Setting

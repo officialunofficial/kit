@@ -94,17 +94,24 @@ conflict, kit looks up each text conflict by its id:
   The index keeps the conflict, so the operation does not continue until
   the user stages the file, unless `rerere.autoUpdate` is `true`, in which
   case kit stages the postimage as a regular file.
-- Otherwise kit creates the entry's `side1` and `side2` if they are absent
-  and prints `Recorded preimage for '<path>'`.
+- With no entry, kit creates the entry's `side1` and `side2`, and
+  `version` if it is absent, and prints `Recorded preimage for '<path>'`.
+- A valid entry with no `postimage` is left as it is.
+
+kit replays only a path whose file holds exactly the markers of its
+conflict, so a conflict that §3 skips never takes part.
 
 ## 7. Recording
 
 When the user continues a rebase, cherry-pick or revert, or commits a
 merge, after resolving its conflicts, kit records the staged content of
-each text conflict as the `postimage` of its entry, creating the entry if
-needed, and prints `Recorded resolution for '<path>'.` A path resolved by
-deletion records nothing. A postimage equal to the staged content is left
-as it is, with no message.
+each tracked conflict as the `postimage` of its entry and prints
+`Recorded resolution for '<path>'.` A conflict is tracked when its entry
+exists and is valid: replay (§6) creates it when the conflict appears, so
+a conflict that appeared while the cache was off, or that §3 skips, is not
+recorded. A path staged as a deletion, a symlink or an executable records
+nothing. A postimage equal to the staged content is left as it is, with no
+message.
 
 ## 8. Maintenance
 
@@ -112,6 +119,8 @@ as it is, with no message.
   at `<path>`, so the next resolution is recorded afresh.
 - `kit rerere clear` deletes every entry.
 - `kit rerere gc` deletes each entry whose `postimage` was last modified
-  more than `gc.rerereResolved` days ago (default 60), and each entry with
-  no postimage whose `side1` was last modified more than
-  `gc.rerereUnresolved` days ago (default 15).
+  `gc.rerereResolved` or more days ago (default 60), and each entry with
+  no postimage whose `side1` was last modified `gc.rerereUnresolved` or
+  more days ago (default 15). A directory whose name is not an id stays.
+- A cache failure never stops the operation that met it: kit warns and
+  goes on without the cache.

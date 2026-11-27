@@ -55,6 +55,7 @@ pub mod rebase;
 pub mod ref_cmd;
 pub mod reflog;
 pub mod remote;
+pub mod rerere;
 pub mod reset;
 pub mod restore;
 pub mod rev_list;

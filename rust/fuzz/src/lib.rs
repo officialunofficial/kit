@@ -3168,6 +3168,38 @@ pub fn rebase_autosquash_one_iteration(input: &[u8]) {
     assert_eq!(twice, once, "arranging an arrangement changes nothing");
 }
 
+/// Cache entries (`rerere_entry`): `kit_core::ops::rerere::entry_is_valid`
+/// never panics on any entry name and sides. The input is the name, a NUL,
+/// `side1`, a NUL and `side2`. An entry is valid only when its name is the
+/// id of its sorted sides, and the sides of any conflict make a valid entry
+/// under their id, whatever their order.
+pub fn rerere_entry_one_iteration(input: &[u8]) {
+    use kit_core::ops::rerere::{conflict_id, entry_is_valid, is_id, sorted_sides};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mut parts = input.splitn(3, |b| *b == 0);
+    let name = String::from_utf8_lossy(parts.next().unwrap_or_default());
+    let side1 = parts.next().unwrap_or_default();
+    let side2 = parts.next().unwrap_or_default();
+    if entry_is_valid(&name, side1, side2) {
+        assert!(is_id(&name), "a valid name is an id");
+        assert!(side1 <= side2, "valid sides are sorted");
+        assert_eq!(conflict_id(side2, side1), name, "the name is the id");
+    }
+    let id = conflict_id(side1, side2);
+    assert_eq!(
+        id,
+        conflict_id(side2, side1),
+        "the order of the sides is ignored"
+    );
+    let (a, b) = sorted_sides(side1, side2);
+    assert!(entry_is_valid(&id, a, b), "the sides make a valid entry");
+    assert_eq!(
+        entry_is_valid(&id, side1, side2),
+        side1 <= side2,
+        "unsorted sides are invalid"
+    );
+}
+
 /// Hex secrets (`secret_hex_parse`): `keys::parse_secret_hex` never panics on
 /// any text. It accepts exactly 64 hex digits in either case, and the
 /// secret equals the digits. A refusal never shows the text.
@@ -4387,6 +4419,14 @@ mod tests {
             b"\xff\nfixup! \xff\n",
         ] {
             run_one(case, rebase_autosquash_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_rerere_entry() {
+        run_iterated_unit(rerere_entry_one_iteration).unwrap();
+        for case in [&b""[..], b"\0a\0b", b"\0b\0a", b"00\0\0", b"\xff\0\0\xff"] {
+            run_one(case, rerere_entry_one_iteration).unwrap();
         }
     }
 

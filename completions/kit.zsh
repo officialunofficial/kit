@@ -71,6 +71,7 @@ _kit() {
         'revert:Create a new commit undoing a previous commit'
         'rebase:Replay commits onto a different base'
         'bisect:Binary search for a bad commit'
+        'rerere:Reuse recorded conflict resolutions'
         'gc:Reclaim unreachable objects'
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
@@ -482,6 +483,14 @@ _kit() {
                         'good[mark a commit as good]' \
                         'bad[mark a commit as bad]' \
                         'reset[end bisect and restore HEAD]'
+                    ;;
+                rerere)
+                    _values 'rerere subcommand' \
+                        'status[list tracked conflicts]' \
+                        'diff[show changes from each tracked conflict]' \
+                        'forget[drop a recorded resolution]' \
+                        'clear[delete every entry]' \
+                        'gc[delete old entries]'
                     ;;
                 self)
                     if (( CURRENT == 2 )); then

@@ -327,6 +327,8 @@ pub struct Request<'a> {
     /// its replacement when the rebase finishes, as `--update-refs` does.
     /// With `interactive`, the todo list shows an `update-ref` line for each.
     pub update_refs: bool,
+    /// Whether recorded conflict resolutions are reused and recorded.
+    pub rerere: crate::rerere::Settings,
 }
 
 /// The steps of a rebase, as [`parse_todo`] reads them from a todo list.
@@ -521,7 +523,15 @@ pub fn start(
     }
     restore_worktree_and_index(layout, store, onto_tree).map_err(Error::Worktree)?;
     refs::write_head_detached(layout, &onto).map_err(Error::DetachHead)?;
-    replay(layout, store, Some(signer), signing, editor, observer)
+    replay(
+        layout,
+        store,
+        Some(signer),
+        signing,
+        editor,
+        request.rerere,
+        observer,
+    )
 }
 
 /// The plan before the `--exec` steps and the editor: every candidate as a
@@ -582,6 +592,7 @@ pub fn resume(
     skip: bool,
     signing: &dyn Signing,
     editor: &mut dyn Editor,
+    rerere: crate::rerere::Settings,
     observer: &dyn Observer<Event>,
 ) -> Result<Outcome, Error> {
     if !is_rebase_in_progress(layout) {
@@ -606,11 +617,12 @@ pub fn resume(
             &records,
             signing,
             editor,
+            rerere,
             observer,
         )?;
     }
     // Either no commit was paused, or the paused commit is consumed now.
-    replay(layout, store, None, signing, editor, observer)
+    replay(layout, store, None, signing, editor, rerere, observer)
 }
 
 /// Drop the paused front commit with no replacement. Discard its material.
@@ -650,12 +662,14 @@ fn commit_resolved_commit(
     records: &[ConflictRecord],
     signing: &dyn Signing,
     editor: &mut dyn Editor,
+    rerere: crate::rerere::Settings,
     observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     if let Some(path) = conflict::first_unresolved_marker(layout.worktree_root(), records)? {
         return Err(Error::UnresolvedMarkers(path));
     }
     conflict::ensure_staged(layout, store, records)?;
+    crate::rerere::record(layout, store, rerere, records, &ConflictEvents(observer));
     let Some(&target) = state.todo.first() else {
         return Err(Error::InconsistentState);
     };
@@ -755,6 +769,7 @@ fn replay(
     signer: Option<Box<dyn Signer>>,
     signing: &dyn Signing,
     editor: &mut dyn Editor,
+    rerere: crate::rerere::Settings,
     observer: &dyn Observer<Event>,
 ) -> Result<Outcome, Error> {
     let mut state = read_state(layout).map_err(Error::ReadState)?;
@@ -847,6 +862,7 @@ fn replay(
             // step as material to discard.
             conflict_state::write_result_tree(&rebase_dir, &result.tree_hash)
                 .map_err(Error::WriteConflicts)?;
+            crate::rerere::replay(layout, store, rerere, &records, &ConflictEvents(observer));
             return Ok(Outcome::Paused {
                 replaying: target,
                 conflicts: records,

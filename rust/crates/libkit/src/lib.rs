@@ -65,6 +65,9 @@ pub mod rebase;
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod remote;
 pub mod repo;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod rerere;
 pub mod revspec;
 pub mod signer;
 pub mod signing;

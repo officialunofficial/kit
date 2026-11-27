@@ -461,6 +461,7 @@ fn merge_fetched(
             no_ff: true,
             message: Some(&message),
             strategy: libkit::merge::Strategy::ThreeWay(favor),
+            rerere: super::conflict::rerere(layout),
         },
         json,
     )

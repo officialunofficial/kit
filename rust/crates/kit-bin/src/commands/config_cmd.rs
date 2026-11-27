@@ -138,12 +138,22 @@ pub fn run(args: &[String]) -> u8 {
             | "push.attestations"
             | "rebase.autosquash"
             | "rebase.updaterefs"
+            | "rerere.autoupdate"
+            | "rerere.enabled"
     ) {
         let value = value.to_ascii_lowercase();
         if !matches!(value.as_str(), "true" | "false") {
             return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
         }
         value
+    } else if matches!(key, "gc.rerereresolved" | "gc.rerereunresolved") {
+        if value.parse::<u64>().is_err() {
+            return emit_err(
+                &format!("{key} must be a whole number of days"),
+                exit::CONFIG_ERROR,
+            );
+        }
+        value.to_owned()
     } else if key == "user.identity" {
         match config::expand_user_identity(value) {
             Ok(v) => v,
@@ -286,6 +296,10 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
         "rebase.autosquash" => Ok(take_nonempty(&mut cfg.rebase_autosquash)),
         "rebase.updaterefs" => Ok(take_nonempty(&mut cfg.rebase_update_refs)),
+        "rerere.enabled" => Ok(take_nonempty(&mut cfg.rerere_enabled)),
+        "rerere.autoupdate" => Ok(take_nonempty(&mut cfg.rerere_auto_update)),
+        "gc.rerereresolved" => Ok(take_nonempty(&mut cfg.gc_rerere_resolved)),
+        "gc.rerereunresolved" => Ok(take_nonempty(&mut cfg.gc_rerere_unresolved)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -351,6 +365,10 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "push.attestations" => value.clone_into(&mut cfg.push_attestations),
         "rebase.autosquash" => value.clone_into(&mut cfg.rebase_autosquash),
         "rebase.updaterefs" => value.clone_into(&mut cfg.rebase_update_refs),
+        "rerere.enabled" => value.clone_into(&mut cfg.rerere_enabled),
+        "rerere.autoupdate" => value.clone_into(&mut cfg.rerere_auto_update),
+        "gc.rerereresolved" => value.clone_into(&mut cfg.gc_rerere_resolved),
+        "gc.rerereunresolved" => value.clone_into(&mut cfg.gc_rerere_unresolved),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -412,6 +430,8 @@ const CONFIG_KEYS: &[&str] = &[
     "durability.objects",
     "fetch.attestations",
     "gc.auto",
+    "gc.rerereresolved",
+    "gc.rerereunresolved",
     "push.attestations",
     "grant.webauthn_rp",
     "rebase.autosquash",
@@ -425,6 +445,8 @@ const CONFIG_KEYS: &[&str] = &[
     "remote_bucket",
     "remote_endpoint",
     "remote_type",
+    "rerere.autoupdate",
+    "rerere.enabled",
     "signer",
     "signing_key",
     "ssh.identity_file",
@@ -467,6 +489,18 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         } else {
             "false"
         })),
+        "rerere.enabled" => Some(Cow::Borrowed(if cfg.rerere_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "rerere.autoupdate" => Some(Cow::Borrowed(if cfg.rerere_auto_update_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "gc.rerereresolved" => Some(Cow::Owned(cfg.gc_rerere_resolved_days().to_string())),
+        "gc.rerereunresolved" => Some(Cow::Owned(cfg.gc_rerere_unresolved_days().to_string())),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

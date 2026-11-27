@@ -22,6 +22,7 @@ pub mod blame;
 pub mod pull_state;
 pub mod rebase;
 pub mod recovery;
+pub mod rerere;
 pub mod restore;
 pub mod stash;
 

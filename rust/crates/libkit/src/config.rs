@@ -211,6 +211,18 @@ pub struct Config {
     /// `rebase.updaterefs`: `true` turns on `--update-refs`. Empty means
     /// off.
     pub rebase_update_refs: String,
+    /// `rerere.enabled`: `true` records conflict resolutions and reuses
+    /// them. Empty means off.
+    pub rerere_enabled: String,
+    /// `rerere.autoupdate`: `true` stages a reused resolution. Empty means
+    /// off.
+    pub rerere_auto_update: String,
+    /// `gc.rerereresolved`: days `kit rerere gc` keeps an entry with a
+    /// recorded resolution. Empty means 60.
+    pub gc_rerere_resolved: String,
+    /// `gc.rerereunresolved`: days `kit rerere gc` keeps an entry with no
+    /// recorded resolution. Empty means 15.
+    pub gc_rerere_unresolved: String,
     /// Fetch portable attestations unless explicitly disabled.
     pub fetch_attestations: String,
     /// Publish locally authored attestations only when true.
@@ -421,6 +433,30 @@ impl Config {
     #[must_use]
     pub fn rebase_update_refs_enabled(&self) -> bool {
         self.rebase_update_refs.eq_ignore_ascii_case("true")
+    }
+
+    /// Whether conflict resolutions are recorded and reused.
+    #[must_use]
+    pub fn rerere_enabled(&self) -> bool {
+        self.rerere_enabled.eq_ignore_ascii_case("true")
+    }
+
+    /// Whether a reused resolution is staged.
+    #[must_use]
+    pub fn rerere_auto_update_enabled(&self) -> bool {
+        self.rerere_auto_update.eq_ignore_ascii_case("true")
+    }
+
+    /// The days `kit rerere gc` keeps an entry with a recorded resolution.
+    #[must_use]
+    pub fn gc_rerere_resolved_days(&self) -> u64 {
+        self.gc_rerere_resolved.parse().unwrap_or(60)
+    }
+
+    /// The days `kit rerere gc` keeps an entry with no recorded resolution.
+    #[must_use]
+    pub fn gc_rerere_unresolved_days(&self) -> u64 {
+        self.gc_rerere_unresolved.parse().unwrap_or(15)
     }
 
     /// Return a Config with documented defaults filled in.
@@ -843,6 +879,9 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.rebase_update_refs = val.to_ascii_lowercase();
         }
+        "rerere.enabled" | "rerere.autoupdate" | "gc.rerereresolved" | "gc.rerereunresolved" => {
+            apply_rerere_kv(cfg, key, val)?;
+        }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.fetch_attestations = val.to_ascii_lowercase();
@@ -962,6 +1001,25 @@ pub fn normalize_config_key(key: &str) -> String {
     }
 }
 
+/// Apply one of the keys of the recorded-resolution cache.
+fn apply_rerere_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
+    let field = match key {
+        "rerere.enabled" => &mut cfg.rerere_enabled,
+        "rerere.autoupdate" => &mut cfg.rerere_auto_update,
+        "gc.rerereresolved" => &mut cfg.gc_rerere_resolved,
+        _ => &mut cfg.gc_rerere_unresolved,
+    };
+    if key.starts_with("rerere.") {
+        expect_one_of(key, val, &["true", "false"])?;
+        *field = val.to_ascii_lowercase();
+    } else if val.parse::<u64>().is_ok() {
+        val.clone_into(field);
+    } else {
+        return Err(format!("{key} must be a whole number of days"));
+    }
+    Ok(())
+}
+
 /// Apply a `<section>.<name>.<field>` key (named remotes, branch
 /// upstreams). Returns `Ok(true)` if the key matched a known section/field,
 /// `Ok(false)` if it did not, and an error if the name is not valid.
@@ -1029,12 +1087,16 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("durability.objects", cfg.durability_objects.as_str()),
         ("fetch.attestations", cfg.fetch_attestations.as_str()),
         ("gc.auto", cfg.gc_auto.as_str()),
+        ("gc.rerereresolved", cfg.gc_rerere_resolved.as_str()),
+        ("gc.rerereunresolved", cfg.gc_rerere_unresolved.as_str()),
         ("push.attestations", cfg.push_attestations.as_str()),
         ("rebase.autosquash", cfg.rebase_autosquash.as_str()),
         ("rebase.updaterefs", cfg.rebase_update_refs.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
+        ("rerere.autoupdate", cfg.rerere_auto_update.as_str()),
+        ("rerere.enabled", cfg.rerere_enabled.as_str()),
     ] {
         if !v.is_empty() {
             out.push_str(k);

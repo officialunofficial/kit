@@ -136,6 +136,8 @@ pub struct Request<'a> {
     pub message: Option<&'a str>,
     /// How the trees merge.
     pub strategy: Strategy,
+    /// Whether recorded conflict resolutions are reused and recorded.
+    pub rerere: crate::rerere::Settings,
 }
 
 /// How [`start`] merges the trees, as git's `-s` and `-X`.
@@ -325,6 +327,7 @@ pub fn start(
         conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
         conflict_state::write_conflicts(layout.worktree_state_dir(), &records)
             .map_err(Error::WriteState)?;
+        crate::rerere::replay(layout, store, request.rerere, &records, observer);
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
@@ -392,6 +395,8 @@ pub fn resume(
     layout: &RepoLayout,
     store: &ObjectStore,
     signing: &dyn Signing,
+    rerere: crate::rerere::Settings,
+    observer: &dyn Observer<conflict::Event>,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
     // A stop after the merge commit and before the state was cleared leaves
@@ -412,6 +417,7 @@ pub fn resume(
         return Err(Error::UnresolvedMarkers(path));
     }
     conflict::ensure_staged(layout, store, &records)?;
+    crate::rerere::record(layout, store, rerere, &records, observer);
 
     let idx = read_or_seed_index_from_head(layout, store).map_err(Error::Worktree)?;
     let tree = worktree::build_tree_from_index(store, &idx).map_err(Error::BuildTree)?;
