@@ -571,6 +571,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `-n`.
 - **`config`.** kit accepts a fixed set of keys. `user.name`, `user.email` and
   `core.*` are unknown keys. An unknown key is an error.
+- **Aliases.** `alias.<name>` lives in the user config only; a repository
+  config or a `-c` override that sets one is ignored with a warning. An alias
+  expands to kit arguments. The `!<shell command>` form is refused, an alias
+  that names another alias is an error, and a built-in command name always
+  wins over an alias.
 
 ## Deferred flags
 

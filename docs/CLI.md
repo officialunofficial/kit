@@ -2201,6 +2201,21 @@ Config / keys / version:
   are mutually exclusive; neither is needed for the common case, where
   scope is chosen automatically by whether the key is in
   `REPO_FORBIDDEN_KEYS`.
+- `kit config --get-regexp <regex>` &mdash; print `<key> <value>` for every
+  key with a value whose name matches `<regex>`, such as
+  `kit config --get-regexp alias.`. It exits `1` when nothing matches, as
+  git does.
+- `kit config alias.<name> <args>` &mdash; define an alias: typing
+  `kit <name> [<more>...]` runs `kit <args> [<more>...]`. Aliases live in
+  the user config only, so the set goes there automatically; a repository
+  config or a `-c alias.<name>=...` override that sets one is ignored with a
+  warning, and `--local` is refused. `<args>` splits at spaces, and a
+  `"..."` or `'...'` quoted part stays one argument (inside double quotes,
+  `\"` and `\\` stand for `"` and `\`). A value that starts with `!` is
+  refused: kit aliases never run a shell. An alias whose name is a built-in
+  command is ignored, with a warning when you set it, and an alias whose
+  expansion starts with another alias is an error (exit `64`). Names are
+  letters, digits and `-`, and match without regard to case.
 - `kit config <key> <value>` &mdash; set a configuration value. Config
   **section** and **variable** names are matched **case-insensitively**
   (canonicalized to lowercase), like git &mdash; so `user.Name`, `USER.EMAIL`,
@@ -2378,8 +2393,8 @@ Security-sensitive keys are **user-scoped only**. Kit warns and ignores them
 if a repo's `.kit/config` sets them (a hostile repo must not be able to
 redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
-`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
-`remote.<name>.admission_headers` &mdash; live in the user config
+`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`,
+`alias.<name>` and `remote.<name>.admission_headers` &mdash; live in the user config
 (`$XDG_CONFIG_HOME/kit/config`); set them with `kit config <key> <value>`,
 which routes them to the user scope automatically.
 
@@ -2398,6 +2413,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `alias.<name>` | kit arguments | unset | User-scoped only. See `kit config alias.<name>` above. |
 | `rebase.updateRefs` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase` move the branches stacked on the rebased commits, as `--update-refs` does; `--no-update-refs` overrides it |
 | `rebase.autosquash` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase -i` arrange `fixup!` and `squash!` commits as `--autosquash` does; `--no-autosquash` overrides it. It does not apply to a rebase without `-i`, as in git 2.44 and later |
 | `rerere.enabled` | `true` / `false` | `false` | Repo or user config. `true` records conflict resolutions and replays them; see `kit rerere` |
