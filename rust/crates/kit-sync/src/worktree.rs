@@ -263,6 +263,7 @@ pub fn restore_worktree_and_index_from(
     tree_hash: Hash,
     base_tree: Option<Hash>,
 ) -> Result<(), String> {
+    let _session = store.read_session();
     let mut stats = Vec::new();
     kit_core::ops::restore::restore_tree_to_worktree_observed(
         store,
@@ -292,6 +293,7 @@ pub(crate) fn restore_worktree_and_index_progress(
     base_tree: Option<Hash>,
     observer: &dyn crate::Observer<crate::SyncEvent>,
 ) -> Result<(), String> {
+    let _session = store.read_session();
     let mut stats = Vec::new();
     let mut report =
         |done, total| observer.event(&crate::SyncEvent::RestoreProgress { done, total });
@@ -504,6 +506,7 @@ pub(crate) fn check_restore_safe(
     options: &RestoreOptions,
     expected: &Expected<'_>,
 ) -> Result<(), String> {
+    let _session = store.read_session();
     let root = layout.worktree_root();
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
@@ -575,7 +578,7 @@ pub(crate) fn check_restore_safe(
     // A real directory that only holds a target path is no conflict: the
     // restore writes beside its contents. Its descendants are checked as
     // paths of their own.
-    let is_real_dir = |path: &str| fs::symlink_metadata(root.join(path)).is_ok_and(|m| m.is_dir());
+    let is_real_dir = |path: &str| listed_is_dir(root, &listings, path);
     if let Some(path) = worktree_paths.iter().find(|path| {
         !index_tracks_path_or_descendant(&tracked, path)
             && target_writes.iter().any(|target| {
@@ -591,10 +594,10 @@ pub(crate) fn check_restore_safe(
     // repository in it is refused here. An untracked path, and so a symlink, on
     // the way to a written path was refused above.
     for path in &target_writes {
-        let dir = root.join(path);
-        if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+        if !is_real_dir(path) {
             continue;
         }
+        let dir = root.join(path);
         if let Some(entry) =
             nested_repository(&dir).map_err(|e| format!("check untracked paths: {e}"))?
         {
@@ -627,6 +630,35 @@ pub(crate) fn check_restore_safe(
     }
 
     Ok(())
+}
+
+/// Whether `path` is a real directory, not a symlink to one. The walk's
+/// listings answer when they show `path`, or show that it or an ancestor is
+/// absent or not a directory, so a checkout into an empty directory stats
+/// none of the paths it writes. Otherwise the disk answers.
+fn listed_is_dir(root: &Path, listings: &core_worktree::DirListings, path: &str) -> bool {
+    // The byte offset in `path` of the component being looked up.
+    let mut start = 0;
+    loop {
+        let parent = if start == 0 { "" } else { &path[..start - 1] };
+        let Some(listing) = listings.get(parent) else {
+            return fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_dir());
+        };
+        let rest = &path[start..];
+        let (name, more) = rest
+            .split_once('/')
+            .map_or((rest, false), |(name, _)| (name, true));
+        if !listing
+            .iter()
+            .any(|(listed, is_dir)| *is_dir && listed == name)
+        {
+            return false;
+        }
+        if !more {
+            return true;
+        }
+        start += name.len() + 1;
+    }
 }
 
 fn restore_paths(
@@ -1075,6 +1107,48 @@ mod tests {
             local_changes_message("a b"),
             "restore would overwrite local changes; commit, stash, or reset 'a b' first"
         );
+    }
+
+    /// The walk's listings answer whether a path is a real directory as the
+    /// disk would, for listed, unlisted and absent paths and for a symlink.
+    #[test]
+    fn listed_is_dir_answers_as_the_disk_does() {
+        let repo = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(repo.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let root = repo.path();
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/file"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("b", root.join("a/link")).unwrap();
+        let mut listings = core_worktree::DirListings::default();
+        let snapshot = kit_core::store::EphemeralSink::new(&store);
+        core_worktree::build_tree_filtered_listed_with_source(
+            &snapshot,
+            &snapshot,
+            root,
+            None,
+            &mut listings,
+        )
+        .unwrap();
+        for path in [
+            "a",
+            "a/b",
+            "a/file",
+            "a/link",
+            "a/missing",
+            "a/b/c",
+            "a/file/c",
+            "gone",
+            "gone/x",
+        ] {
+            let disk = fs::symlink_metadata(root.join(path)).is_ok_and(|m| m.is_dir());
+            assert_eq!(listed_is_dir(root, &listings, path), disk, "{path}");
+        }
+        // With no listings the disk answers.
+        let none = core_worktree::DirListings::default();
+        assert!(listed_is_dir(root, &none, "a/b"));
+        assert!(!listed_is_dir(root, &none, "a/file"));
     }
 
     fn put(store: &ObjectStore, obj: &Object) -> Hash {

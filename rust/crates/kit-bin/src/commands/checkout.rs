@@ -343,6 +343,9 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         sparse_patterns: None,
     };
 
+    // One read session spans the safety gate, the restore and the index
+    // build, so each tree of the target is verified once.
+    let _session = store.read_session();
     // HEAD's tree, read before HEAD is advanced below. Without `--force`
     // the safety gate has proven the worktree matches it, so entries
     // identical between it and the target are skipped rather than

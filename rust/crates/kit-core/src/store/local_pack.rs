@@ -427,6 +427,7 @@ impl LocalPacks {
 
     /// Resolve known indexed locations, then the loose path, then any pair
     /// discovered by a fresh scan. Stop at the first copy the caller accepts.
+    #[cfg(test)]
     pub(super) fn lookup<T>(
         &self,
         store: &ObjectStore,
@@ -656,6 +657,37 @@ impl Location {
         }
         let mut contents = self.open()?;
         Ok(crate::store::read_header_prefix(&mut contents, head))
+    }
+
+    /// Read the whole object into `buf`, reusing its allocation: the offset
+    /// of the object's bytes in `buf`. A packed copy gives its frame header
+    /// and the bytes in one read when it can, and the bytes follow the header
+    /// in `buf`, so nothing is moved. At most `limit` bytes are read; a
+    /// longer object fails with [`StoreError::ObjectTooLarge`].
+    pub(super) fn read_into(&self, buf: &mut Vec<u8>, limit: usize) -> StoreResult<usize> {
+        if let Self::Cached(index, frame, file, checked) = self {
+            if frame.len as usize > limit {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            if let Some(start) = index.read_frame_into(file, *frame, *checked, buf)? {
+                return Ok(start);
+            }
+        }
+        let contents = self.open()?;
+        let len = usize::try_from(contents.len)
+            .ok()
+            .filter(|&len| len <= limit)
+            .ok_or(StoreError::ObjectTooLarge)?;
+        buf.clear();
+        buf.reserve(len);
+        contents.take(limit as u64 + 1).read_to_end(buf)?;
+        if buf.len() > limit {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        if self.is_packed() && buf.len() != len {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        }
+        Ok(0)
     }
 
     /// The length of the frame a packed copy occupies. `None` for a loose file.

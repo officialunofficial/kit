@@ -97,6 +97,10 @@ blake3 = { version = "1.8.7", features = ["rayon"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 
+# Publish restored files with `O_TMPFILE` and `linkat`.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+
 # Queue directory writeback before the terminal device flush.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 rustix = { version = "1.1.6", features = ["fs"] }

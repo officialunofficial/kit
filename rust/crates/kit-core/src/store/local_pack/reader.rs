@@ -627,6 +627,28 @@ impl Locator {
         self.check_frame_len(&header, frame)
     }
 
+    /// [`Self::open_frame`] and the whole payload in one read, into `buf`
+    /// after the frame header: the offset of the payload in `buf`. `None`
+    /// when that read fails, so the caller reads the frame as it does without
+    /// this path and a damaged pack gives the same error.
+    pub(super) fn read_frame_into(
+        &self,
+        file: &File,
+        frame: Frame,
+        checked: bool,
+        buf: &mut Vec<u8>,
+    ) -> StoreResult<Option<usize>> {
+        self.confirm_pack(file, checked)?;
+        let start = self.frame_start(frame)?;
+        buf.clear();
+        buf.resize(ENTRY_FRAME_LEN + frame.len as usize, 0);
+        if read_spooled(file, start, buf).is_err() {
+            return Ok(None);
+        }
+        self.check_frame_len(&buf[..ENTRY_FRAME_LEN], frame)?;
+        Ok(Some(ENTRY_FRAME_LEN))
+    }
+
     /// [`Self::open_frame`], then the first bytes of the payload up to
     /// `head.len()`, fewer when the frame is shorter: how many came. The frame
     /// header and those bytes come in one read. `None` when that read fails, so

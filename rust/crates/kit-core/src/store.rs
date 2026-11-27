@@ -56,6 +56,7 @@ mod format;
 mod local_pack;
 mod memory;
 mod memory_overlay;
+mod session;
 mod source;
 mod tree_budget;
 pub(crate) use local_pack::Catalog as PackCatalog;
@@ -65,6 +66,7 @@ pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES, SealJo
 pub(crate) use local_pack::{PackSweep, Verify};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
+pub use session::ReadSession;
 pub use source::{
     ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
 };
@@ -345,7 +347,7 @@ impl BulkWriter<'_> {
     /// path-layout invariant is violated.
     pub fn reuse_object(&mut self, h: &Hash) -> StoreResult<Vec<Hash>> {
         let _guard = self.store.lock_writer()?;
-        self.store.packs.lookup(self.store, h, true, |location| {
+        self.store.lookup_in_session(h, true, None, |location| {
             let mut contents = location.open()?;
             let (object_type, _) = head_at(&mut contents)?;
             let children = if location.is_packed()
@@ -427,6 +429,15 @@ struct PackWrites {
     pack_dir_prepared: std::sync::atomic::AtomicBool,
 }
 
+/// What [`ObjectStore::read_blob_into`] read.
+#[derive(Debug)]
+pub enum BlobRead {
+    /// A blob, whose payload is this range of the caller's buffer.
+    Payload(std::ops::Range<usize>),
+    /// Any other object, decoded.
+    Object(Box<Object>),
+}
+
 /// Local content-addressed object store backed by the filesystem.
 #[derive(Debug, Clone)]
 pub struct ObjectStore {
@@ -443,6 +454,9 @@ pub struct ObjectStore {
     /// `durability.objects = per-object` onto it for deployments that
     /// want the strict historical schedule.
     default_policy: SyncPolicy,
+    /// The read session open on this store, shared by its clones. See
+    /// [`ReadSession`].
+    session: Arc<session::SessionSlot>,
     /// Test-only counter of physical reads (`read_raw` calls) this store
     /// has performed. There is no read-side equivalent of `syncer` to
     /// inject a recording double against, so this is a plain counter
@@ -480,6 +494,7 @@ impl ObjectStore {
             pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
+            session: Arc::default(),
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -518,6 +533,7 @@ impl ObjectStore {
             pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
+            session: Arc::default(),
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -660,8 +676,7 @@ impl ObjectStore {
     /// # Errors
     /// Returns a lookup failure or `ObjectNotFound` for a confirmed miss.
     pub fn check_presence(&self, h: &Hash) -> StoreResult<()> {
-        self.packs
-            .lookup(self, h, true, |location| location.present())
+        self.lookup_in_session(h, true, None, |location| location.present())
     }
 
     /// Write `bytes` to the store, returning their BLAKE3 hash. Atomic:
@@ -866,7 +881,28 @@ impl ObjectStore {
     ) -> StoreResult<T> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        self.packs.lookup_in(self, h, true, currency, use_location)
+        self.lookup_in_session(h, true, currency, use_location)
+    }
+
+    /// Look `h` up with the caller's currency, or else with the open read
+    /// session's, so one check per pack stands for every read in the
+    /// session.
+    fn lookup_in_session<T>(
+        &self,
+        h: &Hash,
+        refresh: bool,
+        currency: Option<&local_pack::Currency>,
+        use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        if currency.is_some() {
+            return self
+                .packs
+                .lookup_in(self, h, refresh, currency, use_location);
+        }
+        let session = self.session.current();
+        let currency = session.as_deref().and_then(session::SessionState::currency);
+        self.packs
+            .lookup_in(self, h, refresh, currency, use_location)
     }
 
     fn verify_at(location: &local_pack::Location, h: &Hash, bytes: &[u8]) -> StoreResult<()> {
@@ -993,7 +1029,7 @@ impl ObjectStore {
         h: &Hash,
         currency: Option<&local_pack::Currency>,
     ) -> StoreResult<crate::object::ObjectType> {
-        self.packs.lookup_in(self, h, true, currency, |location| {
+        self.lookup_in_session(h, true, currency, |location| {
             let mut prologue = [0; 6];
             match location.read_head(&mut prologue)? {
                 Ok(6) => parse_type(&prologue),
@@ -1027,7 +1063,7 @@ impl ObjectStore {
     fn gc_probe(&self, h: &Hash, verify: bool) -> StoreResult<crate::object::ObjectType> {
         use crate::object::ObjectType;
 
-        self.packs.lookup(self, h, true, |location| {
+        self.lookup_in_session(h, true, None, |location| {
             if let Some(ty) = self.gc_probe_in_one_read(&location, h, verify)? {
                 #[cfg(test)]
                 self.gc_one_read_probes.fetch_add(1, Ordering::Relaxed);
@@ -1153,7 +1189,7 @@ impl ObjectStore {
         h: &Hash,
         currency: Option<&local_pack::Currency>,
     ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        self.packs.lookup_in(self, h, true, currency, |location| {
+        self.lookup_in_session(h, true, currency, |location| {
             let mut head = [0; 10];
             let len = location.read_head(&mut head)??;
             head_of(&head[..len])
@@ -1185,7 +1221,11 @@ impl ObjectStore {
         h: &Hash,
         currency: Option<&local_pack::Currency>,
     ) -> StoreResult<Object> {
-        self.read_with_in(h, currency, |location| {
+        let session = self.session.current();
+        if let Some(tree) = session.as_deref().and_then(|s| s.tree(h)) {
+            return Ok(Object::Tree(tree));
+        }
+        let object = self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             let (actual, decoded) = verified_id_and_object(&bytes);
             check_hash(h, &actual)?;
@@ -1200,6 +1240,41 @@ impl ObjectStore {
                 ));
             }
             Ok(object)
+        })?;
+        if let (Some(session), Object::Tree(tree)) = (session.as_deref(), &object) {
+            session.keep_tree(*h, tree);
+        }
+        Ok(object)
+    }
+
+    /// [`Self::read_object`] for a reader that writes a blob's bytes out and
+    /// keeps no [`Object`]: the object is read into `buf`, whose allocation
+    /// is reused from one call to the next, and verified there. A blob comes
+    /// back as the range of its payload in `buf`, so its bytes are read once
+    /// and never copied or moved. Any other object comes back decoded, with
+    /// the same outcome, object or error, as [`Self::read_object`].
+    pub fn read_blob_into(&self, h: &Hash, buf: &mut Vec<u8>) -> StoreResult<BlobRead> {
+        self.read_with_in(h, None, |location| {
+            let start = location.read_into(buf, MAX_RAW_OBJECT_SIZE)?;
+            let bytes = &buf[start..];
+            let (actual, decoded) = verified_id_and_object(bytes);
+            check_hash(h, &actual)?;
+            if decoded.is_none() && serialize::is_canonical_blob(bytes) {
+                return Ok(BlobRead::Payload(
+                    start + serialize::BLOB_PROLOGUE_LEN..buf.len(),
+                ));
+            }
+            let object = match decoded {
+                Some(object) => object,
+                None => serialize::deserialize(bytes)?,
+            };
+            if location.is_packed() && matches!(object, Object::Delta(_)) {
+                return Err(local_pack::invalid_at(
+                    location.path(),
+                    "delta object in local pack",
+                ));
+            }
+            Ok(BlobRead::Object(Box::new(object)))
         })
     }
 
@@ -1300,13 +1375,11 @@ impl ObjectStore {
     }
 
     fn size_lookup(&self, h: &Hash, refresh: bool) -> StoreResult<u64> {
-        self.packs
-            .lookup(self, h, refresh, |location| location.size())
+        self.lookup_in_session(h, refresh, None, |location| location.size())
     }
 
     pub(crate) fn known_object(&self, h: &Hash) -> bool {
-        self.packs
-            .lookup(self, h, false, |location| location.present())
+        self.lookup_in_session(h, false, None, |location| location.present())
             .is_ok()
     }
 

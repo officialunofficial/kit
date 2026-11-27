@@ -457,3 +457,33 @@ fn a_guard_from_another_store_cannot_make_a_view() {
     let guard = other.prune_guard().unwrap();
     assert!(store.guarded(&guard).is_err());
 }
+
+#[test]
+fn a_read_session_checks_each_pair_once_for_reads_and_presence_checks() {
+    let (_dir, layout, _, _, chunks) = three_pairs();
+    settle(&ObjectStore::open(&layout).unwrap());
+    let store = reader(&layout, true);
+    {
+        let _session = store.read_session();
+        for id in &chunks {
+            assert!(store.contains(id));
+            store.read_object(id).unwrap();
+            let mut buf = Vec::new();
+            store.read_blob_into(id, &mut buf).unwrap();
+        }
+        let counts: Vec<_> = locators(&store).iter().map(|l| checks(l)).collect();
+        assert_eq!(counts.len(), 3);
+        assert!(
+            counts.iter().all(|&n| (1..=2).contains(&n)),
+            "each pair is checked once for the session: {counts:?}"
+        );
+    }
+    // Once the session closes, its guard no longer keeps a pair from being
+    // retired, so each read checks its pair again.
+    let before: usize = locators(&store).iter().map(|l| checks(l)).sum();
+    for id in &chunks[..10] {
+        store.read_object(id).unwrap();
+    }
+    let after: usize = locators(&store).iter().map(|l| checks(l)).sum();
+    assert!(after >= before + 10, "{before} then {after}");
+}
