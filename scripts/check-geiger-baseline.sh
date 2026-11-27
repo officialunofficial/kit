@@ -35,7 +35,7 @@ ceiling_for() {
     case "$1" in
         kit-bin)               echo 0  ;;
         kit-client)            echo 0  ;;
-        kit-core)              echo 5  ;;
+        kit-core)              echo 3  ;;
         kit-keystore)          echo 0  ;;
         kit-attest)            echo 0  ;;
         kit-rpc)               echo 0  ;;

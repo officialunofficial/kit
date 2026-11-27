@@ -107,6 +107,10 @@ All triggers use the branch `^main$`. No pull request starts a build by itself.
 A maintainer comment `/gcbrun` starts the pull request triggers for the current
 head. Run it once on the final head of a pull request, not on every push.
 
+The release pull request gets one `/gcbrun` before it merges. That run is the
+full Cloud Build gate of the release candidate. Pull requests of other kinds
+merge on the GitHub checks and need no `/gcbrun` unless a maintainer asks for it.
+
 | Trigger | Configuration | Runs |
 |---|---|---|
 | `kit-ci-pr`, `kit-ci-main` | `ci.yaml` | A pull request after `/gcbrun`, and a manual run on `main`. A push to `main` starts nothing, because the trigger watches a sentinel path. Run `gcloud builds triggers run kit-ci-main --branch=main`. |
