@@ -1085,7 +1085,7 @@ Branches / refs:
   `ours` is the current branch and `theirs` the text before the reverted
   commit. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [-X <option>] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   `--onto <newbase> <upstream> [<branch>]` replays the commits of
@@ -1114,11 +1114,26 @@ Branches / refs:
   the first line (nothing to fold into) and is rejected before any
   mutation. Removing every line resets the branch to the base. A
   `reword`/`squash` whose replay hits a conflict still reopens the editor
-  on `--continue`. `edit` (stop-to-amend) is not yet supported.
+  on `--continue`. `edit`/`e` replays the commit, then stops with clean
+  files and index and exits 0. Amend the commit with `kit commit --amend`,
+  add commits, or leave it, then run `kit rebase --continue`; staged or
+  changed files that the next commit would overwrite stop the continue,
+  so commit them first. After a conflict on an `edit` line, `--continue`
+  commits the resolution and goes on without a second stop. `exec`/`x
+  <command>` runs the rest of the line with `sh -c` in the worktree root.
+  A command that exits non-zero, or that cannot start, stops the rebase
+  after its line with exit 1; `--continue` goes on with the next line.
+  `--skip` at an `edit` or `exec` stop is an error, since no commit is
+  paused. `-x <cmd>`/`--exec <cmd>` adds an `exec <cmd>` line after each
+  commit of the plan, or after the last commit of a squash or fixup
+  chain; with several, the lines go in the order given, and with `-i`
+  they show in the todo list. A command is one line and not empty.
   `--format=json` emits one JSON object to stdout on the top-level
   outcomes: `{"ok":true,"kind":"up-to-date"|"rebased"|"aborted",...}` on
-  success, `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
-  "error":"..."}` on a conflict pause. Best-effort on the interactive
+  success, `{"ok":true,"kind":"stopped","commit":"<hex>"}` at an `edit`
+  stop, `{"ok":false,"kind":"exec-failed","command":"...","status":<n>|null,
+  "error":"..."}` at a failed `exec`, and `{"ok":false,"kind":"conflict",
+  "conflicts":[<path>,...],"error":"..."}` on a conflict pause. Best-effort on the interactive
   (`-i`) editing path and a handful of deep internal errors (for example, signer
   setup), which stay stderr-only.
 - `kit bisect start | good | bad | skip | reset | run <cmd> [args…]` &mdash;
@@ -1241,7 +1256,7 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`). `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X` |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X` |
 
 Remote / sync:
 

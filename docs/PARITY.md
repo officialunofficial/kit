@@ -304,6 +304,12 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   Git's order depends on its sort. Copy detection (`-C`), break detection
   (`-B`) and the `diff.renames` and `diff.renameLimit` config keys are not
   supported; `show` and `log` have no rename flags and use the default 50%.
+- **`rebase` `edit` and `exec` stops.** At an `edit` stop, `--continue`
+  does not commit staged changes into the edited commit, as Git does;
+  commit them with `kit commit --amend` first. `--skip` at an `edit` or
+  `exec` stop is an error. An `exec` command that leaves files changed
+  does not stop the rebase. kit has no `break`, `label`, `reset` or
+  `merge` todo lines, and no `--reschedule-failed-exec`.
 - **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
   `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
   ort` and `-s recursive`. Other strategies and options, such as
@@ -500,9 +506,6 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
-  file of a paused rebase holds a closed list of keywords, and a new keyword
-  would change that state format.
 - `stash push -a` / `--all` &mdash; ignored files are not included.
 - `switch @{-N}` with N greater than 1 &mdash; kit retains only the previous
   HEAD. `switch -`, `checkout -`, and `@{-1}` are supported.
