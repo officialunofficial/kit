@@ -25,6 +25,10 @@
 //!   recovery log holds the commits that `commit --amend`, `reset`, `rebase`
 //!   and `stash pop` replaced. Suffix steps may follow it.
 //!
+//! - **Previous HEAD**: `@{-N}`, for N from 1 to 16, the N-th previous HEAD
+//!   of this worktree from its `HEAD_HISTORY` record: a branch's tip, or the
+//!   commit of a detached HEAD. Suffix steps may follow it.
+//!
 //! The grammar has no pathspecs, no `:/text` message search, no reflog
 //! (`<ref>@{n}`) syntax and no ranges. A caller splits `A..B` before it
 //! passes each end here.
@@ -63,6 +67,15 @@ pub enum Error {
     #[error("revision '{spec}': {detail}")]
     BadSuffix {
         /// The full spec that the caller supplied.
+        spec: String,
+        /// What went wrong.
+        detail: String,
+    },
+    /// `@{-N}` does not name a usable previous HEAD: the record holds fewer
+    /// than N, cannot be read, or names a branch or commit that is gone.
+    #[error("revision '{spec}': {detail}")]
+    Previous {
+        /// The `@{-N}` token.
         spec: String,
         /// What went wrong.
         detail: String,
@@ -256,6 +269,38 @@ fn resolve_recovery(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Res
     Ok(record.superseded)
 }
 
+/// Resolve `@{-N}` to the commit of the N-th previous HEAD.
+fn resolve_previous(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    base: &str,
+    n: usize,
+) -> Result<Hash, Error> {
+    let fail = |detail: String| Error::Previous {
+        spec: base.to_owned(),
+        detail,
+    };
+    let head = refs::nth_previous_head(layout, n)
+        .map_err(|e| fail(format!("read the previous HEADs: {e}")))?
+        .ok_or_else(|| {
+            fail(format!(
+                "this tree records no previous HEAD that far back (at most {})",
+                refs::HEAD_HISTORY_MAX
+            ))
+        })?;
+    match head {
+        refs::Head::Branch(b) => match refs::read_ref(layout, &b) {
+            Ok(Some(h)) => Ok(h),
+            _ => Err(fail(format!("branch '{b}' no longer exists"))),
+        },
+        refs::Head::Detached(h) if store.contains(&h) => Ok(h),
+        refs::Head::Detached(h) => Err(fail(format!(
+            "commit {} was pruned by gc",
+            hash::to_hex(&h)
+        ))),
+    }
+}
+
 /// Follow tag objects to the first object that is not a tag, so an annotated
 /// or signed tag becomes the object it points at. A non-tag object, an
 /// unreadable object, or a chain longer than 16 tags stops the walk. The
@@ -292,6 +337,9 @@ pub fn tree_of(store: &ObjectStore, h: &Hash) -> Result<Hash, Error> {
 fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<Hash, Error> {
     if base.starts_with(RECOVERY_PREFIX) {
         return resolve_recovery(store, layout, base);
+    }
+    if let Some(n) = refs::parse_previous_spec(base) {
+        return resolve_previous(store, layout, base, n);
     }
     // 1. HEAD.
     if base == "HEAD" {

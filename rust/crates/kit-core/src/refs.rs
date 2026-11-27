@@ -664,12 +664,145 @@ pub fn fuzz_parse_previous_head(raw: &[u8]) -> Option<Head> {
     parse_previous_head(raw).ok()
 }
 
-/// Atomically save one previous HEAD. The caller holds the worktree lock.
-pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
-    let body = match head {
+/// The most previous HEADs that `HEAD_HISTORY` holds, so the largest N of
+/// `@{-N}` (SPEC-WORKTREE).
+pub const HEAD_HISTORY_MAX: usize = 16;
+
+/// The largest `HEAD_HISTORY` file a reader accepts.
+const HEAD_HISTORY_MAX_BYTES: u64 = 64 * 1024;
+
+/// One previous HEAD in the HEAD encoding, newline included.
+fn encode_previous_head(head: &Head) -> String {
+    match head {
         Head::Branch(branch) => format!("{HEAD_REF_PREFIX}{branch}\n"),
         Head::Detached(h) => format!("{}\n", crate::hash::to_hex(h)),
+    }
+}
+
+/// Parse a `HEAD_HISTORY` body, oldest first. A last line with no newline
+/// is a torn write and is ignored. More than [`HEAD_HISTORY_MAX`] complete
+/// lines, or a line that is not in the HEAD encoding, is an error.
+fn parse_head_history(raw: &[u8]) -> RefResult<Vec<Head>> {
+    let mut out = Vec::new();
+    for line in raw.split_inclusive(|&b| b == b'\n') {
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        if out.len() == HEAD_HISTORY_MAX {
+            return Err(RefError::InvalidHead);
+        }
+        out.push(parse_previous_head(line)?);
+    }
+    Ok(out)
+}
+
+/// Exercise the `HEAD_HISTORY` parser without filesystem I/O.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_parse_head_history(raw: &[u8]) -> Option<Vec<Head>> {
+    parse_head_history(raw).ok()
+}
+
+/// Encode a record as `HEAD_HISTORY` bytes, for the fuzz round trip.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_encode_head_history(record: &[Head]) -> Vec<u8> {
+    record
+        .iter()
+        .map(encode_previous_head)
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// The previous HEADs of this worktree, oldest first (SPEC-WORKTREE). A
+/// missing record reads as the one entry in `PREVIOUS_HEAD`, and so does a
+/// record whose last entry is not `PREVIOUS_HEAD`, which an older kit left
+/// stale.
+///
+/// # Errors
+/// [`RefError::InvalidHead`] for a malformed record or `PREVIOUS_HEAD`;
+/// [`RefError::Io`] when a file cannot be read.
+pub fn read_head_history(layout: &RepoLayout) -> RefResult<Vec<Head>> {
+    let previous = match read_previous_head(layout) {
+        Ok(head) => head,
+        Err(RefError::NoHead) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
+    let raw = match bounded_read::read_capped(
+        &layout.worktree_state_dir().join("HEAD_HISTORY"),
+        HEAD_HISTORY_MAX_BYTES,
+    ) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![previous]),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(RefError::InvalidHead),
+        Err(e) => return Err(RefError::Io(e)),
+    };
+    let record = parse_head_history(&raw)?;
+    if record.last() == Some(&previous) {
+        Ok(record)
+    } else {
+        Ok(vec![previous])
+    }
+}
+
+/// The N-th previous HEAD of this worktree, counted from 1, or `None` when
+/// the record holds fewer.
+///
+/// # Errors
+/// As [`read_head_history`].
+pub fn nth_previous_head(layout: &RepoLayout, n: usize) -> RefResult<Option<Head>> {
+    if n == 0 {
+        return Ok(None);
+    }
+    let record = read_head_history(layout)?;
+    Ok(record.len().checked_sub(n).map(|i| record[i].clone()))
+}
+
+/// The N of a `@{-N}` revision: a positive decimal number of at most two
+/// digits with no leading zero. Anything else is `None`.
+#[must_use]
+pub fn parse_previous_spec(spec: &str) -> Option<usize> {
+    let digits = spec.strip_prefix("@{-")?.strip_suffix('}')?;
+    if digits.is_empty()
+        || digits.len() > 2
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Record `old` as the newest previous HEAD: write `PREVIOUS_HEAD`, then
+/// append to `HEAD_HISTORY` and keep its last [`HEAD_HISTORY_MAX`] entries.
+/// A malformed record is replaced. The caller holds the worktree lock.
+///
+/// # Errors
+/// [`RefError::Io`] when a file cannot be read or written.
+pub fn record_previous_head(layout: &RepoLayout, old: &Head) -> RefResult<()> {
+    let mut record = match read_head_history(layout) {
+        Ok(record) => record,
+        Err(RefError::InvalidHead) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    // `PREVIOUS_HEAD` first: a crash before the record is written leaves a
+    // stale record, which reads as `PREVIOUS_HEAD` alone.
+    write_previous_head(layout, old)?;
+    record.push(old.clone());
+    let excess = record.len().saturating_sub(HEAD_HISTORY_MAX);
+    record.drain(..excess);
+    let body: String = record.iter().map(encode_previous_head).collect();
+    crate::durable::write_pointer(
+        &layout.worktree_state_dir().join("HEAD_HISTORY"),
+        body.as_bytes(),
+        Parents::Existing,
+    )?;
+    Ok(())
+}
+
+/// Atomically save one previous HEAD. The caller holds the worktree lock.
+pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
+    let body = encode_previous_head(head);
     crate::durable::write_pointer(
         &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
         body.as_bytes(),
@@ -1745,6 +1878,96 @@ mod tests {
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
+    }
+
+    // --- previous HEADs --------------------------------------------------
+
+    #[test]
+    fn previous_spec_accepts_one_or_two_digits_without_a_leading_zero() {
+        assert_eq!(parse_previous_spec("@{-1}"), Some(1));
+        assert_eq!(parse_previous_spec("@{-16}"), Some(16));
+        assert_eq!(parse_previous_spec("@{-99}"), Some(99));
+        for bad in [
+            "@{-0}", "@{-01}", "@{-100}", "@{-}", "@{1}", "@{-1", "@{-x}", "@{--1}",
+        ] {
+            assert_eq!(parse_previous_spec(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn head_history_is_bounded_and_keeps_the_newest() {
+        let (_d, layout) = fresh_repo();
+        for i in 0..20 {
+            record_previous_head(&layout, &Head::Branch(format!("b{i}"))).unwrap();
+        }
+        let record = read_head_history(&layout).unwrap();
+        assert_eq!(record.len(), HEAD_HISTORY_MAX);
+        assert_eq!(record.first(), Some(&Head::Branch("b4".into())));
+        assert_eq!(
+            nth_previous_head(&layout, 1).unwrap(),
+            Some(Head::Branch("b19".into()))
+        );
+        assert_eq!(
+            nth_previous_head(&layout, 16).unwrap(),
+            Some(Head::Branch("b4".into()))
+        );
+        assert_eq!(nth_previous_head(&layout, 17).unwrap(), None);
+        assert_eq!(nth_previous_head(&layout, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn head_history_parser_rules() {
+        let line = |b: &str| format!("ref: refs/heads/{b}\n");
+        let hex = format!("{}\n", hash::to_hex(&h("x")));
+        let two = format!("{}{hex}", line("a"));
+        assert_eq!(
+            parse_head_history(two.as_bytes()).unwrap(),
+            vec![Head::Branch("a".into()), Head::Detached(h("x"))]
+        );
+        // A torn tail is ignored.
+        let torn = format!("{two}ref: refs/he");
+        assert_eq!(parse_head_history(torn.as_bytes()).unwrap().len(), 2);
+        // Seventeen complete lines, or a bad line, are refused.
+        let long: String = (0..17).map(|i| line(&format!("b{i}"))).collect();
+        assert!(parse_head_history(long.as_bytes()).is_err());
+        assert!(parse_head_history(b"junk\n").is_err());
+        assert!(parse_head_history(hex.to_uppercase().as_bytes()).is_err());
+        assert_eq!(parse_head_history(b"").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_missing_record_falls_back_to_previous_head() {
+        let (_d, layout) = fresh_repo();
+        assert!(read_head_history(&layout).unwrap().is_empty());
+        write_previous_head(&layout, &Head::Branch("old".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("old".into())]
+        );
+        record_previous_head(&layout, &Head::Branch("new".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("old".into()), Head::Branch("new".into())]
+        );
+        // An older kit moves PREVIOUS_HEAD alone; the record is then stale.
+        write_previous_head(&layout, &Head::Branch("other".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("other".into())]
+        );
+    }
+
+    #[test]
+    fn a_malformed_record_is_replaced_on_the_next_switch() {
+        let (_d, layout) = fresh_repo();
+        write_previous_head(&layout, &Head::Branch("a".into())).unwrap();
+        fs::write(layout.worktree_state_dir().join("HEAD_HISTORY"), b"junk\n").unwrap();
+        assert!(read_head_history(&layout).is_err());
+        record_previous_head(&layout, &Head::Branch("b".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("b".into())]
+        );
     }
 
     // --- name grammar ---------------------------------------------------

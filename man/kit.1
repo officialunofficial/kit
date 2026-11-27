@@ -993,7 +993,7 @@ a branch at
 .Ar start
 .Pq default HEAD
 and switch to it.
-.It Cm switch Ar branch | - | @{-1}
+.It Cm switch Ar branch | - | @{-N}
 Switch branches (git
 .Cm switch ) .
 A thin front-end over
@@ -1003,10 +1003,16 @@ Use
 .Cm switch - , checkout - ,
 or
 .Cm switch @{-1}
-to return to the previous HEAD, detached if it was detached.
-Only one previous HEAD is stored, atomically, in the per-worktree
+to return to the previous HEAD, detached if it was detached, and
+.Cm switch @{-N}
+for the N-th previous HEAD.
+.Li @{-N}
+also names that commit in any revision argument.
+Each tree records its last 16 previous HEADs, atomically, in the per-worktree
+.Pa HEAD_HISTORY
+and
 .Pa PREVIOUS_HEAD
-file. Older selections are not supported.
+files; N past the record is an error.
 .It Cm switch Oo Fl c | Fl C Oc Ar new Op Ar start
 Create
 .Pq Fl c , or create-or-reset Fl C

@@ -1573,6 +1573,17 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
         };
         assert_eq!(wire.as_bytes(), input);
     }
+    if let Some(record) = kit_core::refs::fuzz_parse_head_history(input) {
+        assert!(record.len() <= kit_core::refs::HEAD_HISTORY_MAX);
+        // The complete lines re-encode to the input up to any torn tail.
+        let encoded = kit_core::refs::fuzz_encode_head_history(&record);
+        assert!(input.starts_with(&encoded));
+        assert!(!input[encoded.len()..].contains(&b'\n'));
+        assert_eq!(
+            kit_core::refs::fuzz_parse_head_history(&encoded).as_ref(),
+            Some(&record)
+        );
+    }
     let state = kit_core::ops::pull_state::PullState {
         target: kit_core::hash::hash(input),
         before_tree: kit_core::hash::hash(&input[..input.len() / 2]),

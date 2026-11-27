@@ -297,10 +297,10 @@ fn collect_tree_roots(
         add(state.before_tree, roots);
     }
 
-    match refs::read_previous_head(tree) {
-        Ok(refs::Head::Detached(h)) => add(h, roots),
-        Ok(refs::Head::Branch(_)) | Err(refs::RefError::NoHead) => {}
-        Err(e) => return Err(e.into()),
+    for head in refs::read_head_history(tree)? {
+        if let refs::Head::Detached(h) = head {
+            add(h, roots);
+        }
     }
 
     // ORIG_HEAD (written by reset and by the in-progress ops below).

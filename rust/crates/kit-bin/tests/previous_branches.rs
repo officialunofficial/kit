@@ -80,7 +80,8 @@ fn at_minus_n_names_earlier_branches() {
     assert_eq!(rev(r, "@{-2}~1"), rev(r, "main"));
     ok(r, &["switch", "@{-2}"]);
     assert_eq!(current(r), "b1");
-    ok(r, &["checkout", "@{-3}"]);
+    // The record is now main, b0, b1, b2, b3, so @{-2} is b2.
+    ok(r, &["checkout", "@{-2}"]);
     assert_eq!(current(r), "b2");
 }
 

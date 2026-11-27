@@ -48,7 +48,12 @@ fn previous_head_toggles_branches_and_detached_commits() {
     ok(p, &["switch", "main"]);
     ok(p, &["switch", "-"]);
     assert!(!run_in(p, &["symbolic-ref", "HEAD"]).status.success());
-    assert!(!run_in(p, &["switch", "@{-2}"]).status.success());
+    // The record is main, other, main, other, <hash>, main: `@{-6}` is the
+    // first main. That switch adds a seventh entry, so `@{-8}` is past the
+    // record.
+    ok(p, &["switch", "@{-6}"]);
+    assert!(String::from_utf8_lossy(&ok(p, &["symbolic-ref", "HEAD"]).stdout).contains("main"));
+    assert!(!run_in(p, &["switch", "@{-8}"]).status.success());
 }
 
 #[test]

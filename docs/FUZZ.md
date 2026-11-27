@@ -42,7 +42,7 @@ from recurring.
 | `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/name_rules.rs` | `TreeEntry::validate_name`, `index::validate_index_path`, `refs::validate_ref_name`, `refs::validate_ref_name_grammar`, `refs::check_new_ref_name` (never panic; a name that breaks a stated rule is refused; an index path holds only valid entry names; a new ref name is accepted exactly when `validate_ref_name` accepts it) |
 | `fuzz_targets/fetch_cursor_record.rs` | `kit_sync::cursor::parse` (an accepted record survives a write and a parse) |
-| `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
+| `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip), the `PREVIOUS_HEAD` and `HEAD_HISTORY` parsers (an accepted record holds at most 16 entries and its complete lines re-encode to the input, less a torn tail with no newline) |
 | `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
 | `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/conflict_state_decode.rs` | `ops::conflict_state::deserialize_conflicts` (an accepted list survives a serialize and deserialize round trip) |
@@ -119,7 +119,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_core::transfer::decode_packlist` | `merkle_packlist` |
 | `kit_core::sparse::decode_sparse_response`, `decode_sparse_cache` | `sparse_wire_decode` |
 | `kit_core::verify` closure manifest `decode` | `verify_closure` |
-| `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash` | `ref_wire_decode` |
+| `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash`, the `PREVIOUS_HEAD` and `HEAD_HISTORY` parsers | `ref_wire_decode` |
 | `kit_sync::cursor::parse` | `fetch_cursor_record` |
 | `kit_core::index::deserialize` | `index_decode` |
 | `kit_core::history_order` `TimestampDiscovery::decode` | `history_order_decode` |

@@ -58,6 +58,7 @@
 //! | `git/`                   | common   | `kit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
 //! | `PREVIOUS_HEAD`          | worktree | [`crate::refs`]         |
+//! | `HEAD_HISTORY`           | worktree | [`crate::refs`]         |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
 //! | `PULL_HEAD`              | worktree | `kit-sync`              |
 //! | `index`                  | worktree | [`crate::index`]        |
