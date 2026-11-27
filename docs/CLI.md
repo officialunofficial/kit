@@ -255,11 +255,20 @@ Working-tree commands:
   each tree's `HEAD`, index, stash and in-progress operation state as roots,
   together with the shared refs. If a tree's state cannot be read, gc stops
   before it removes anything and names the linked tree.
-- `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
+- `kit stash [save|push|list|pop|apply|drop|clear|show|branch] [--format=json]` &mdash;
   save/restore WIP
   changes. `push` is another name for `save`. `push -u` and
   `push --include-untracked` explicitly include non-ignored untracked files
-  (kit also includes them by default). `-a`/`--all` is not supported.
+  (kit also includes them by default). `push -a`/`--all` also saves the
+  files the ignore rules match, such as build output, and removes them from
+  the worktree; `pop` puts them back. `.kit/` and `.git/` are never saved.
+  `-a` does not combine with paths (exit 64).
+  `branch <name> [<stash>]` creates `<name>` at the commit the stash was
+  made on, switches to it, then restores the entry with its staged state
+  (as `pop --index` does) and drops it. It refuses an existing branch, an
+  invalid name (exit 64) and a stash made before the first commit. The
+  entry is dropped only after the restore succeeds; if the restore fails,
+  the branch stays checked out and the entry stays on the stack.
   `push [--] <path>...` saves only the named files or directory prefixes,
   relative to the current directory, and leaves other worktree and index
   entries alone. Globs, pathspec magic, and paths containing `..` are not supported. Pop and apply

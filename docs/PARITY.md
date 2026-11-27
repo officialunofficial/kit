@@ -576,7 +576,6 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `stash push -a` / `--all` &mdash; ignored files are not included.
 - `switch @{-N}` with N greater than 1 &mdash; kit retains only the previous
   HEAD. `switch -`, `checkout -`, and `@{-1}` are supported.
 - `stash push` pathspec glob and magic syntax &mdash; kit accepts file and
