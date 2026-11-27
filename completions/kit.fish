@@ -284,6 +284,10 @@ complete -c kit -n "__fish_seen_subcommand_from rebase" \
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l no-autosquash -d "Ignore rebase.autosquash"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l update-refs -d "Move the branches stacked on the replayed commits"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l no-update-refs -d "Ignore rebase.updateRefs"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l exec -s x -d "Run a shell command after each replayed commit" -r
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"

@@ -159,7 +159,12 @@ fn rebase_exit_code(error: &rebase::Error) -> u8 {
         rebase::Error::Signing(inner) => signing_exit_code(inner),
         // The todo list contradicts the rules of the command, or a step
         // needs the default editor and there is no terminal for it.
-        rebase::Error::Todo(_) | rebase::Error::BadExecCommand(_) => exit::USAGE,
+        rebase::Error::Todo(_)
+        | rebase::Error::BadExecCommand(_)
+        | rebase::Error::NoSuchUpdateRef(_)
+        | rebase::Error::UpdateRefOfRebasedBranch(_) => exit::USAGE,
+        // A stacked branch moved under the rebase; nothing moved.
+        rebase::Error::StackedBranchMoved(..) => exit::GENERAL_ERROR,
         rebase::Error::Editor(e) if crate::editor::is_no_terminal(e) => exit::USAGE,
         // An object of the wrong kind, a commit that cannot be encoded, or
         // a `HEAD` that the rebase lost.
@@ -179,7 +184,8 @@ fn rebase_exit_code(error: &rebase::Error) -> u8 {
         | rebase::Error::WriteRef(_)
         | rebase::Error::ReattachHead(_)
         | rebase::Error::RestoreRef(_)
-        | rebase::Error::RestoreHead(_) => exit::CANTCREAT,
+        | rebase::Error::RestoreHead(_)
+        | rebase::Error::UpdateStackedRef(..) => exit::CANTCREAT,
         rebase::Error::InProgress(_)
         | rebase::Error::NoRebaseInProgress
         | rebase::Error::NoSuchCommit { .. }

@@ -14,7 +14,8 @@
 //!   `refs/remotes/<remote>` ref.
 //! - **Stash** entries — each stashed commit and its recorded parent.
 //! - **In-progress operations** — merge (`MERGE_HEAD`), cherry-pick
-//!   (`CHERRY_PICK_HEAD`), rebase (`onto` + every `todo`/`done` commit),
+//!   (`CHERRY_PICK_HEAD`), rebase (`onto` + every `todo`/`done` commit and
+//!   the commits that `--update-refs` moves branches to),
 //!   the `ORIG_HEAD` saved by those ops and by `reset`, and the conflict
 //!   sidecar's base/ours/theirs blob hashes.
 //! - **Attestations** — a stored envelope pins its subject while the
@@ -348,6 +349,13 @@ fn collect_tree_roots(
         add(st.onto, roots);
         for h in st.todo.into_iter().chain(st.done) {
             add(h, roots);
+        }
+        // The commits that `--update-refs` moves branches to at the finish.
+        for update in st.ref_updates {
+            add(update.old, roots);
+            if let Some(new) = update.new {
+                add(new, roots);
+            }
         }
     }
 
@@ -2012,6 +2020,8 @@ mod tests {
             &rebase::RebaseState {
                 favor: crate::ops::merge::Favor::None,
                 exec: Vec::new(),
+                update_refs: Vec::new(),
+                ref_updates: Vec::new(),
                 head_name: "main".to_owned(),
                 orig_head: kept,
                 onto: kept,
@@ -2193,6 +2203,8 @@ mod tests {
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
                     exec: Vec::new(),
+                    update_refs: Vec::new(),
+                    ref_updates: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: kept,
@@ -2209,6 +2221,8 @@ mod tests {
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
                     exec: Vec::new(),
+                    update_refs: Vec::new(),
+                    ref_updates: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: kept,
                     onto: gone,
@@ -2225,12 +2239,36 @@ mod tests {
                 &rebase::RebaseState {
                     favor: crate::ops::merge::Favor::None,
                     exec: Vec::new(),
+                    update_refs: Vec::new(),
+                    ref_updates: Vec::new(),
                     head_name: "main".to_owned(),
                     orig_head: gone,
                     onto: kept,
                     todo: vec![],
                     actions: vec![],
                     done: vec![gone],
+                },
+            )
+            .unwrap();
+        };
+        let rebase_update_ref: Setup = |md, kept, gone| {
+            rebase::write_state(
+                md,
+                &rebase::RebaseState {
+                    favor: crate::ops::merge::Favor::None,
+                    exec: Vec::new(),
+                    update_refs: Vec::new(),
+                    ref_updates: vec![rebase::RefUpdate {
+                        branch: "stacked".to_owned(),
+                        old: kept,
+                        new: Some(gone),
+                    }],
+                    head_name: "main".to_owned(),
+                    orig_head: kept,
+                    onto: kept,
+                    todo: vec![],
+                    actions: vec![],
+                    done: vec![],
                 },
             )
             .unwrap();
@@ -2247,7 +2285,7 @@ mod tests {
             }]);
             index::write_index(md, &idx).unwrap();
         };
-        let cases: [(&str, Setup); 8] = [
+        let cases: [(&str, Setup); 9] = [
             ("merge head", merge),
             ("merge orig head", merge_orig),
             ("cherry-pick head", cherry_pick),
@@ -2256,6 +2294,7 @@ mod tests {
             ("rebase todo", rebase_todo),
             ("rebase onto", rebase_onto),
             ("rebase done", rebase_done),
+            ("rebase update-ref", rebase_update_ref),
         ];
         for (name, setup) in cases.into_iter().chain([("staged blob", staged)]) {
             let (d, s) = repo();

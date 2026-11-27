@@ -133,7 +133,11 @@ pub fn run(args: &[String]) -> u8 {
     }
     let normalized_value = if matches!(
         key,
-        "fetch.attestations" | "gc.auto" | "push.attestations" | "rebase.autosquash"
+        "fetch.attestations"
+            | "gc.auto"
+            | "push.attestations"
+            | "rebase.autosquash"
+            | "rebase.updaterefs"
     ) {
         let value = value.to_ascii_lowercase();
         if !matches!(value.as_str(), "true" | "false") {
@@ -281,6 +285,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "gc.auto" => Ok(take_nonempty(&mut cfg.gc_auto)),
         "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
         "rebase.autosquash" => Ok(take_nonempty(&mut cfg.rebase_autosquash)),
+        "rebase.updaterefs" => Ok(take_nonempty(&mut cfg.rebase_update_refs)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -345,6 +350,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "gc.auto" => value.clone_into(&mut cfg.gc_auto),
         "push.attestations" => value.clone_into(&mut cfg.push_attestations),
         "rebase.autosquash" => value.clone_into(&mut cfg.rebase_autosquash),
+        "rebase.updaterefs" => value.clone_into(&mut cfg.rebase_update_refs),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -409,6 +415,7 @@ const CONFIG_KEYS: &[&str] = &[
     "push.attestations",
     "grant.webauthn_rp",
     "rebase.autosquash",
+    "rebase.updaterefs",
     "http.sslcainfo",
     "key.backend",
     "key.default_ref",
@@ -451,6 +458,11 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
         "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),
         "rebase.autosquash" => Some(Cow::Borrowed(if cfg.rebase_autosquash_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "rebase.updaterefs" => Some(Cow::Borrowed(if cfg.rebase_update_refs_enabled() {
             "true"
         } else {
             "false"

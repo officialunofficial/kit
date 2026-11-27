@@ -1063,7 +1063,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Oo Fl Fl autosquash | Fl Fl no-autosquash Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl Fl autosquash | Fl Fl no-autosquash Oc Oo Fl Fl update-refs | Fl Fl no-update-refs Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
 With
@@ -1135,6 +1135,24 @@ turns it on for
 .Fl i ,
 and
 .Fl Fl no-autosquash
+turns it off.
+.Fl Fl update-refs
+moves every other local branch that points at a replayed commit to that
+commit's replacement when the rebase finishes; with
+.Fl i
+the todo list shows an
+.Cm update-ref Ar refs/heads/branch
+line for each, which can be deleted or typed. A branch checked out in another
+worktree is left out with a warning. If a branch moved during the rebase, no
+branch moves and the rebase stays in progress;
+.Fl Fl abort
+moves no branch. Each moved branch's old tip goes to the recovery log.
+Setting
+.Cm rebase.updateRefs
+to
+.Cm true
+turns it on, and
+.Fl Fl no-update-refs
 turns it off.
 .Fl X Cm ours
 and
@@ -1756,6 +1774,7 @@ emits JSON instead of the default plain output. Recognized keys include
 .Cm ssh.user_known_hosts_file ,
 .Cm ssh.identity_file ,
 .Cm rebase.autosquash ,
+.Cm rebase.updateRefs ,
 and
 .Cm gc.auto .
 Setting

@@ -3066,10 +3066,22 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
             commits,
             "one commit for each step but exec"
         );
+        let count = |kind: RebaseAction| plan.actions.iter().filter(|a| **a == kind).count();
         assert_eq!(
             plan.exec.len(),
-            plan.actions.len() - commits,
+            count(RebaseAction::Exec),
             "one command for each exec"
+        );
+        assert_eq!(
+            plan.update_refs.len(),
+            count(RebaseAction::UpdateRef),
+            "one branch for each update-ref"
+        );
+        assert!(
+            plan.update_refs
+                .iter()
+                .all(|b| kit_core::refs::validate_ref_name(b)),
+            "an update-ref names a valid branch"
         );
         assert!(
             plan.todo.iter().all(|h| candidates.contains(h)),
@@ -3096,6 +3108,7 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
                 | RebaseAction::Fixup
                 | RebaseAction::Edit
                 | RebaseAction::Exec
+                | RebaseAction::UpdateRef
         )));
     }
     let line = format!("pick {}\n", kit_core::hash::to_hex(&candidates[0]));
@@ -4389,6 +4402,8 @@ mod tests {
             b"\x03edit 0\n",
             b"\x03drop\n",
             b"\x03p a\nr b\ns c\nf d\nd e\n",
+            b"\x03update-ref refs/heads/a\nu refs/heads/..\n",
+            b"\x03u refs/tags/v1\n",
             b"\x03\xff\xfe",
         ] {
             run_one(case, rebase_todo_parse_one_iteration).unwrap();

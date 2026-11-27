@@ -94,6 +94,8 @@ fn rebase_state_persists_and_reloads_after_simulated_crash() {
     let state = RebaseState {
         favor: kit_core::ops::Favor::None,
         exec: Vec::new(),
+        update_refs: Vec::new(),
+        ref_updates: Vec::new(),
         head_name: "feature/foo".to_string(),
         orig_head: hash::hash(b"orig"),
         onto: hash::hash(b"onto"),

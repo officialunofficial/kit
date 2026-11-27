@@ -55,6 +55,14 @@ struct RebaseOpts {
     /// Turn off `rebase.autosquash` for this rebase.
     #[arg(long = "no-autosquash", conflicts_with_all = ["cont", "abort", "skip"])]
     no_autosquash: bool,
+    /// Move every other local branch that points at a replayed commit to its
+    /// replacement when the rebase finishes, so a stack stays stacked.
+    #[arg(long = "update-refs",
+          conflicts_with_all = ["cont", "abort", "skip", "no_update_refs"])]
+    update_refs: bool,
+    /// Turn off `rebase.updateRefs` for this rebase.
+    #[arg(long = "no-update-refs", conflicts_with_all = ["cont", "abort", "skip"])]
+    no_update_refs: bool,
     /// Resolve every content conflict to one side: `ours` (the base being
     /// rebased onto, as in git) or `theirs` (the commit being replayed).
     #[arg(short = 'X', long = "strategy-option",
@@ -104,6 +112,15 @@ impl Observer<Event> for Notes {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "reword: empty message; keeping the original");
             }
+            Event::UpdateRefSkipped { branch, at } => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(
+                    stderr,
+                    "warning: not updating '{}': it is checked out at {}",
+                    kit_core::protocol::escape_terminal_text(branch, false),
+                    super::display_path(&at.to_string_lossy())
+                );
+            }
             _ => {}
         }
     }
@@ -134,6 +151,15 @@ fn autosquash(opts: &RebaseOpts, layout: &RepoLayout) -> bool {
         && crate::config::read_or_default(layout).is_ok_and(|cfg| cfg.rebase_autosquash_enabled())
 }
 
+/// Whether the rebase moves the stacked branches: the flags, else
+/// `rebase.updateRefs`. A config that cannot be read leaves it off.
+fn update_refs(opts: &RebaseOpts, layout: &RepoLayout) -> bool {
+    if opts.update_refs || opts.no_update_refs {
+        return opts.update_refs;
+    }
+    crate::config::read_or_default(layout).is_ok_and(|cfg| cfg.rebase_update_refs_enabled())
+}
+
 const USAGE: &str = "usage: kit rebase [-i] <revspec> | kit rebase [-i] --onto <newbase> \
                      <upstream> [<branch>] | kit rebase --continue | --abort | --skip";
 
@@ -144,6 +170,7 @@ fn request<'a>(
     favor: libkit::merge::Favor,
     exec: &'a [String],
     autosquash: bool,
+    update_refs: bool,
 ) -> Option<Request<'a>> {
     let (onto, upstream, branch) = match (opts.onto.as_deref(), opts.revisions.as_slice()) {
         (None, [onto]) => (onto.as_str(), None, None),
@@ -159,6 +186,7 @@ fn request<'a>(
         favor,
         exec,
         autosquash,
+        update_refs,
     })
 }
 
@@ -208,7 +236,13 @@ pub fn run(args: &[String]) -> u8 {
         return abort(&layout, &store, json);
     } else if opts.cont || opts.skip {
         rebase::resume(&layout, &store, opts.skip, &signing, &mut editor, &Notes)
-    } else if let Some(request) = request(&opts, favor, &exec, autosquash(&opts, &layout)) {
+    } else if let Some(request) = request(
+        &opts,
+        favor,
+        &exec,
+        autosquash(&opts, &layout),
+        update_refs(&opts, &layout),
+    ) {
         rebase::start(&layout, &store, &request, &signing, &mut editor, &Notes)
     } else {
         return super::usage_error(USAGE);
@@ -236,6 +270,7 @@ pub(super) fn rebase_onto(
         favor,
         exec: &[],
         autosquash: false,
+        update_refs: false,
     };
     let signing = super::signing::Configured;
     match rebase::start(
@@ -310,12 +345,19 @@ pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
             old,
             new,
             replayed,
+            updated_refs,
         } => {
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(
                 stderr,
                 "Successfully rebased and updated refs/heads/{branch}."
             );
+            if !updated_refs.is_empty() {
+                let _ = writeln!(stderr, "Updated the following refs with --update-refs:");
+                for name in updated_refs {
+                    let _ = writeln!(stderr, "\trefs/heads/{name}");
+                }
+            }
             drop(stderr);
             if json {
                 let mut obj = JsonObject::new();
@@ -324,7 +366,8 @@ pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
                     .field_str("branch", branch)
                     .field_hash("old", old)
                     .field_hash("new", new)
-                    .field_u64("commits_replayed", *replayed as u64);
+                    .field_u64("commits_replayed", *replayed as u64)
+                    .field_raw("updated_refs", &json_string_array(updated_refs));
                 let mut stdout = std::io::stdout().lock();
                 let _ = writeln!(stdout, "{}", obj.finish());
             }

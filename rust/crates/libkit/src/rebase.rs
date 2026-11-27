@@ -31,8 +31,9 @@ use kit_core::ops::conflict_state::{
 use kit_core::ops::merge::Favor;
 pub use kit_core::ops::rebase::RebaseAction;
 use kit_core::ops::rebase::{
-    RebaseError, RebaseState, autosquash, cleanup_rebase, collect_commits_to_replay,
-    is_rebase_in_progress, is_valid_exec_command, read_state, rebase_dir_path, write_state,
+    RebaseError, RebaseState, RefUpdate, autosquash, cleanup_rebase, collect_commits_to_replay,
+    is_rebase_in_progress, is_valid_exec_command, read_state, rebase_dir_path, with_update_refs,
+    write_state,
 };
 use kit_core::ops::recovery::{self, RecoveryEntry, RecoveryError};
 use kit_core::protocol::escape_terminal_text;
@@ -64,6 +65,9 @@ pub enum TodoError {
     /// An `exec` line has no command.
     #[error("missing command on todo line: '{0}'")]
     MissingCommand(String),
+    /// An `update-ref` line does not name one `refs/heads/<branch>`.
+    #[error("update-ref takes one refs/heads/<branch>: '{0}'")]
+    BadUpdateRef(String),
     /// A line starts with a word that is no command.
     #[error("unknown rebase command '{0}'")]
     UnknownCommand(String),
@@ -219,6 +223,36 @@ pub enum Error {
     /// The conflict workflow failed.
     #[error(transparent)]
     Conflict(#[from] conflict::Error),
+    /// An `update-ref` step names a branch that does not exist.
+    #[error("update-ref names no local branch: '{}'", escape_terminal_text(.0, false))]
+    NoSuchUpdateRef(String),
+    /// An `update-ref` step names the branch being rebased.
+    #[error(
+        "update-ref cannot name the branch being rebased: '{}'",
+        escape_terminal_text(.0, false)
+    )]
+    UpdateRefOfRebasedBranch(String),
+    /// The local branches cannot be listed or read.
+    #[error("read branches: {0}")]
+    ReadBranches(RefError),
+    /// The trees that hold a branch cannot be listed.
+    #[error(transparent)]
+    OtherTrees(#[from] crate::worktrees::Error),
+    /// The registry lock of the trees cannot be taken.
+    #[error("worktree registry lock: {0}")]
+    Registry(kit_core::repo_lock::LockError),
+    /// A branch that `--update-refs` moves no longer points where it did
+    /// when the rebase started. No branch moved, and the rebase is still in
+    /// progress.
+    #[error(
+        "branch '{0}' moved during the rebase, so no branch was updated; run \
+         `kit rebase --abort`, or put '{0}' back at {1} and run `kit rebase --continue`"
+    )]
+    StackedBranchMoved(String, String),
+    /// A branch that `--update-refs` moves cannot be written. The branches
+    /// moved before it are put back.
+    #[error("update branch '{0}': {1}")]
+    UpdateStackedRef(String, RefError),
 }
 
 /// What a rebase reports to its [`Observer`].
@@ -230,6 +264,14 @@ pub enum Event {
     /// An editor returned an empty message for a reword. The original message
     /// stays.
     EmptyReword,
+    /// `--update-refs` leaves a branch where it is because another tree has
+    /// it checked out.
+    UpdateRefSkipped {
+        /// The branch.
+        branch: String,
+        /// The root of the tree that has it checked out.
+        at: std::path::PathBuf,
+    },
 }
 
 /// Forwards the events of the conflict workflow to the observer of a rebase.
@@ -277,6 +319,10 @@ pub struct Request<'a> {
     /// [`kit_core::ops::rebase::autosquash`]. With `interactive`, the todo
     /// list opens arranged.
     pub autosquash: bool,
+    /// Move every other local branch that points at a replayed commit to
+    /// its replacement when the rebase finishes, as `--update-refs` does.
+    /// With `interactive`, the todo list shows an `update-ref` line for each.
+    pub update_refs: bool,
 }
 
 /// The steps of a rebase, as [`parse_todo`] reads them from a todo list.
@@ -288,6 +334,8 @@ pub struct Plan {
     pub actions: Vec<RebaseAction>,
     /// The command of each `exec` step, in order.
     pub exec: Vec<String>,
+    /// The branch of each `update-ref` step, in order.
+    pub update_refs: Vec<String>,
 }
 
 /// How a rebase has ended or paused.
@@ -332,6 +380,8 @@ pub enum Outcome {
         new: Hash,
         /// The count of commits that were replayed.
         replayed: usize,
+        /// The other branches that moved, as `--update-refs` asks.
+        updated_refs: Vec<String>,
     },
 }
 
@@ -431,24 +481,7 @@ pub fn start(
         });
     }
 
-    let seed = if request.autosquash {
-        let subjects: Vec<(Hash, String)> = candidates
-            .iter()
-            .map(|&h| (h, commit_subject(store, h)))
-            .collect();
-        let (todo, actions) = autosquash(&subjects).into_iter().unzip();
-        Plan {
-            todo,
-            actions,
-            exec: Vec::new(),
-        }
-    } else {
-        Plan {
-            todo: candidates.clone(),
-            actions: vec![RebaseAction::Pick; candidates.len()],
-            exec: Vec::new(),
-        }
-    };
+    let seed = seed_plan(layout, store, request, &head_name, &candidates, observer)?;
     let seed = with_exec(seed, request.exec);
     let plan = if request.interactive {
         if candidates.is_empty() {
@@ -459,6 +492,8 @@ pub fn start(
     } else {
         seed
     };
+    let plan = drop_held_update_refs(layout, plan, observer)?;
+    let ref_updates = ref_updates_for(layout, &head_name, &plan.update_refs)?;
     let state = RebaseState {
         head_name,
         orig_head,
@@ -468,6 +503,8 @@ pub fn start(
         exec: plan.exec,
         done: Vec::new(),
         favor: request.favor,
+        update_refs: plan.update_refs,
+        ref_updates,
     };
     let signer = signing.open(layout)?;
     let onto_tree = commit_tree(store, onto)?;
@@ -481,6 +518,50 @@ pub fn start(
     restore_worktree_and_index(layout, store, onto_tree).map_err(Error::Worktree)?;
     refs::write_head_detached(layout, &onto).map_err(Error::DetachHead)?;
     replay(layout, store, Some(signer), signing, editor, observer)
+}
+
+/// The plan before the `--exec` steps and the editor: every candidate as a
+/// pick, arranged by `--autosquash` and followed by `--update-refs` steps
+/// when the request asks for them.
+fn seed_plan(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    request: &Request<'_>,
+    head_name: &str,
+    candidates: &[Hash],
+    observer: &dyn Observer<Event>,
+) -> Result<Plan, Error> {
+    let seed = if request.autosquash {
+        let subjects: Vec<(Hash, String)> = candidates
+            .iter()
+            .map(|&h| (h, commit_subject(store, h)))
+            .collect();
+        let (todo, actions) = autosquash(&subjects).into_iter().unzip();
+        Plan {
+            todo,
+            actions,
+            ..Plan::default()
+        }
+    } else {
+        Plan {
+            todo: candidates.to_vec(),
+            actions: vec![RebaseAction::Pick; candidates.len()],
+            ..Plan::default()
+        }
+    };
+    let seed = if request.update_refs {
+        let tips = stacked_branches(layout, head_name, candidates, observer)?;
+        let (actions, update_refs) =
+            with_update_refs(&seed.todo, &seed.actions, &seed.update_refs, &tips);
+        Plan {
+            actions,
+            update_refs,
+            ..seed
+        }
+    } else {
+        seed
+    };
+    Ok(seed)
 }
 
 /// Continue a paused rebase. With `skip`, drop the paused commit and discard
@@ -683,6 +764,17 @@ fn replay(
         // A result tree from an earlier conflict is stale now. A later pause
         // must not make an abort or a skip read it.
         conflict_state::clear_result_tree(&rebase_dir);
+        if action == RebaseAction::UpdateRef {
+            // The branch moves at the finish to the commit `HEAD` names now.
+            let head = head_or(layout, state.onto);
+            let branch = state.front_update_ref().unwrap_or_default().to_owned();
+            if let Some(update) = state.ref_updates.iter_mut().find(|u| u.branch == branch) {
+                update.new = Some(head);
+            }
+            state.consume_front();
+            write_state(layout, &state).map_err(Error::PersistState)?;
+            continue;
+        }
         if action == RebaseAction::Exec {
             // The step is consumed and saved before the command runs, so a
             // continue after a failure goes on with the next step.
@@ -786,6 +878,10 @@ fn replay(
         Ok(None) => return Err(Error::HeadMissingAtFinish),
         Err(e) => return Err(Error::ReadFinalHead(e)),
     };
+    // The stacked branches move first, all or none. A branch that moved
+    // since the start stops the finish before any change, and the rebase
+    // stays in progress.
+    let updated_refs = move_stacked_branches(layout, &state, observer)?;
     // The replayed history supersedes the old tip. Record the old tip before
     // the branch moves, while the lock is held. The state pins it until the
     // cleanup below, and the record keeps it alive after.
@@ -814,7 +910,192 @@ fn replay(
         old: state.orig_head,
         new: final_head,
         replayed: state.done.len(),
+        updated_refs,
     })
+}
+
+/// The local branches but `head_name` whose tips are among `candidates`,
+/// sorted by name, for `--update-refs`. A branch that another tree has
+/// checked out is left out with an [`Event::UpdateRefSkipped`].
+fn stacked_branches(
+    layout: &RepoLayout,
+    head_name: &str,
+    candidates: &[Hash],
+    observer: &dyn Observer<Event>,
+) -> Result<Vec<(String, Hash)>, Error> {
+    let replayed: std::collections::HashSet<&Hash> = candidates.iter().collect();
+    let mut tips = Vec::new();
+    for branch in refs::list_refs(layout).map_err(Error::ReadBranches)? {
+        let Some(tip) = branch.hash else { continue };
+        if branch.name == head_name || !replayed.contains(&tip) {
+            continue;
+        }
+        if let Some(at) = crate::worktrees::checked_out_elsewhere(layout, &branch.name)? {
+            observer.event(&Event::UpdateRefSkipped {
+                branch: branch.name,
+                at,
+            });
+            continue;
+        }
+        tips.push((branch.name, tip));
+    }
+    Ok(tips)
+}
+
+/// Remove the `update-ref` steps of branches that another tree has checked
+/// out, with an [`Event::UpdateRefSkipped`] for each branch.
+fn drop_held_update_refs(
+    layout: &RepoLayout,
+    plan: Plan,
+    observer: &dyn Observer<Event>,
+) -> Result<Plan, Error> {
+    let mut held: Vec<String> = Vec::new();
+    for branch in &plan.update_refs {
+        if held.contains(branch) || !refs::validate_ref_name(branch) {
+            continue;
+        }
+        if let Some(at) = crate::worktrees::checked_out_elsewhere(layout, branch)? {
+            observer.event(&Event::UpdateRefSkipped {
+                branch: branch.clone(),
+                at,
+            });
+            held.push(branch.clone());
+        }
+    }
+    if held.is_empty() {
+        return Ok(plan);
+    }
+    let mut out = Plan {
+        todo: plan.todo,
+        exec: plan.exec,
+        ..Plan::default()
+    };
+    let mut branches = plan.update_refs.into_iter();
+    for action in plan.actions {
+        if action == RebaseAction::UpdateRef {
+            let Some(branch) = branches.next() else {
+                continue;
+            };
+            if held.contains(&branch) {
+                continue;
+            }
+            out.update_refs.push(branch);
+        }
+        out.actions.push(action);
+    }
+    Ok(out)
+}
+
+/// One [`RefUpdate`] for each branch that an `update-ref` step names, with
+/// its tip now. A branch that does not exist, or the branch being rebased,
+/// fails the rebase before any change.
+fn ref_updates_for(
+    layout: &RepoLayout,
+    head_name: &str,
+    branches: &[String],
+) -> Result<Vec<RefUpdate>, Error> {
+    let mut updates: Vec<RefUpdate> = Vec::new();
+    for branch in branches {
+        if updates.iter().any(|u| &u.branch == branch) {
+            continue;
+        }
+        if branch == head_name {
+            return Err(Error::UpdateRefOfRebasedBranch(branch.clone()));
+        }
+        let old = refs::read_ref(layout, branch)
+            .map_err(Error::ReadBranches)?
+            .ok_or_else(|| Error::NoSuchUpdateRef(branch.clone()))?;
+        updates.push(RefUpdate {
+            branch: branch.clone(),
+            old,
+            new: None,
+        });
+    }
+    Ok(updates)
+}
+
+/// Move the branches of `state.ref_updates` whose steps ran, all or none,
+/// and record their old tips for recovery. Return the branches that moved.
+///
+/// The worktree registry lock is held throughout, so no tree checks a
+/// branch out meanwhile. A branch that another tree has checked out by now
+/// stays, with an [`Event::UpdateRefSkipped`]. Every other branch must still
+/// point where it pointed at the start, or nothing moves. Each move is a
+/// compare-and-swap; when one fails, the branches moved before it go back.
+fn move_stacked_branches(
+    layout: &RepoLayout,
+    state: &RebaseState,
+    observer: &dyn Observer<Event>,
+) -> Result<Vec<String>, Error> {
+    let pending: Vec<(&RefUpdate, Hash)> = state
+        .ref_updates
+        .iter()
+        .filter_map(|u| u.new.filter(|new| *new != u.old).map(|new| (u, new)))
+        .collect();
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _registry = kit_core::repo_lock::acquire_default(
+        layout.common_dir(),
+        kit_core::repo_lock::WORKTREES_REGISTRY_LOCK,
+    )
+    .map_err(Error::Registry)?;
+    let mut moves = Vec::with_capacity(pending.len());
+    for (update, new) in pending {
+        if let Some(at) = crate::worktrees::checked_out_elsewhere(layout, &update.branch)? {
+            observer.event(&Event::UpdateRefSkipped {
+                branch: update.branch.clone(),
+                at,
+            });
+            continue;
+        }
+        let now = refs::read_ref(layout, &update.branch).map_err(Error::ReadBranches)?;
+        if now != Some(update.old) {
+            return Err(Error::StackedBranchMoved(
+                update.branch.clone(),
+                hash::to_hex(&update.old)[..TODO_ABBREV].to_owned(),
+            ));
+        }
+        moves.push((update, new));
+    }
+    for (done, &(update, new)) in moves.iter().enumerate() {
+        let written = refs::write_ref_recording_history(
+            layout,
+            &update.branch,
+            RefWriteCondition::Match(update.old),
+            &new,
+        );
+        if let Err(e) = written {
+            for &(back, back_new) in &moves[..done] {
+                let _ = refs::write_ref_recording_history(
+                    layout,
+                    &back.branch,
+                    RefWriteCondition::Match(back_new),
+                    &back.old,
+                );
+            }
+            return Err(match e {
+                RefError::Conflict(_) => Error::StackedBranchMoved(
+                    update.branch.clone(),
+                    hash::to_hex(&update.old)[..TODO_ABBREV].to_owned(),
+                ),
+                other => Error::UpdateStackedRef(update.branch.clone(), other),
+            });
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for (update, _) in &moves {
+        let entry = RecoveryEntry {
+            timestamp: now,
+            op: "rebase".to_owned(),
+            superseded: update.old,
+            branch: update.branch.clone(),
+        };
+        recovery::record(layout, &entry).map_err(Error::Recovery)?;
+    }
+    Ok(moves.into_iter().map(|(u, _)| u.branch.clone()).collect())
 }
 
 /// The parent, message, author and time of a replayed commit.
@@ -840,7 +1121,7 @@ fn plan_step_commit(
     observer: &dyn Observer<Event>,
 ) -> Result<StepCommit, Error> {
     match action {
-        RebaseAction::Exec => Err(Error::InconsistentState),
+        RebaseAction::Exec | RebaseAction::UpdateRef => Err(Error::InconsistentState),
         RebaseAction::Pick | RebaseAction::Edit => {
             let original = read_commit(store, target)?;
             Ok(StepCommit {
@@ -984,10 +1265,15 @@ fn edit_todo(
     let mut template = String::new();
     let mut commits = seed.todo.iter();
     let mut commands = seed.exec.iter();
+    let mut branches = seed.update_refs.iter();
     for &action in &seed.actions {
         if action == RebaseAction::Exec {
             if let Some(command) = commands.next() {
                 let _ = writeln!(template, "exec {command}");
+            }
+        } else if action == RebaseAction::UpdateRef {
+            if let Some(branch) = branches.next() {
+                let _ = writeln!(template, "update-ref refs/heads/{branch}");
             }
         } else if let Some(h) = commits.next() {
             let _ = writeln!(
@@ -1011,6 +1297,8 @@ fn edit_todo(
          #   f, fixup  <commit>  = fold into the previous commit, discard this message\n\
          #   e, edit   <commit>  = use the commit, then stop to amend it\n\
          #   x, exec   <command> = run the command with sh; a failure stops the rebase\n\
+         #   u, update-ref <ref> = move the branch refs/heads/<name> to the commit\n\
+         #                         above when the rebase finishes\n\
          #   d, drop   <commit>  = remove the commit\n\
          #\n\
          # Reorder lines to reorder commits. Deleting a line drops that commit.\n\
@@ -1034,7 +1322,8 @@ fn abbreviate(h: &Hash) -> String {
 /// A line is a command and a commit. The command is `pick`, `reword`,
 /// `squash`, `fixup`, `edit` or `drop`, or the first letter. The commit is a
 /// prefix of the hash of one of `candidates`. An `exec` or `x` line holds a
-/// shell command instead: the rest of the line. A blank line and a line that
+/// shell command instead: the rest of the line. An `update-ref` or `u` line
+/// holds one `refs/heads/<branch>`. A blank line and a line that
 /// starts with `#` are ignored. A `drop` line must still name a commit, so a
 /// typo is caught.
 ///
@@ -1069,6 +1358,18 @@ pub fn parse_todo(candidates: &[Hash], edited: &str) -> Result<Plan, TodoError> 
                 plan.exec.push(command.to_owned());
                 continue;
             }
+            "u" | "update-ref" => {
+                let branch = match (parts.next(), parts.next()) {
+                    (Some(full), None) => full.strip_prefix("refs/heads/"),
+                    _ => None,
+                };
+                let branch = branch
+                    .filter(|b| refs::validate_ref_name(b))
+                    .ok_or_else(|| TodoError::BadUpdateRef(line.to_owned()))?;
+                plan.actions.push(RebaseAction::UpdateRef);
+                plan.update_refs.push(branch.to_owned());
+                continue;
+            }
             "d" | "drop" => {
                 resolve_todo_hash(candidates, parts.next(), line)?;
                 continue;
@@ -1094,6 +1395,7 @@ fn with_exec(plan: Plan, commands: &[String]) -> Plan {
     }
     let mut out = Plan {
         todo: plan.todo,
+        update_refs: plan.update_refs,
         ..Plan::default()
     };
     let mut existing = plan.exec.into_iter();
@@ -1101,6 +1403,9 @@ fn with_exec(plan: Plan, commands: &[String]) -> Plan {
         out.actions.push(action);
         if action == RebaseAction::Exec {
             out.exec.extend(existing.next());
+            continue;
+        }
+        if !action.takes_commit() {
             continue;
         }
         let next = plan.actions[i + 1..].iter().find(|a| a.takes_commit());

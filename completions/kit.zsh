@@ -422,6 +422,8 @@ _kit() {
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
                         '(--no-autosquash)--autosquash[fold fixup! and squash! commits into their targets]' \
                         '(--autosquash)--no-autosquash[ignore rebase.autosquash]' \
+                        '(--no-update-refs)--update-refs[move the branches stacked on the replayed commits]' \
+                        '(--update-refs)--no-update-refs[ignore rebase.updateRefs]' \
                         '--onto[replay onto this revision instead of the upstream]:newbase:' \
                         '*'{-x,--exec}'[run a shell command after each replayed commit]:command:' \
                         '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \

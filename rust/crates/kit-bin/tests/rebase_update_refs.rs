@@ -38,7 +38,12 @@ impl Editor {
             ("SED", sed.to_owned()),
             (
                 "TODO_LOG",
-                self.dir.path().join("todo.log").to_str().unwrap().to_owned(),
+                self.dir
+                    .path()
+                    .join("todo.log")
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
             ),
         ]
     }

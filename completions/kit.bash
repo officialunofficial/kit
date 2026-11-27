@@ -136,7 +136,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete -l --list --author --help" -- "$cur") )
             ;;
         rebase)
-            COMPREPLY=( $(compgen -W "-i --interactive --autosquash --no-autosquash --onto -X --strategy-option -x --exec --continue --skip --abort --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-i --interactive --autosquash --no-autosquash --update-refs --no-update-refs --onto -X --strategy-option -x --exec --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
             COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline -X --strategy-option --format --help" -- "$cur") )

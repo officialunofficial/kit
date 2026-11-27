@@ -16,6 +16,10 @@
 //! - `done`       : newline-separated list of replayed commits
 //! - `strategy-option` : `ours` or `theirs`, the side every replayed
 //!   commit's conflicts resolve to; absent when conflicts stop the rebase
+//! - `update-refs` : one line per branch that `--update-refs` moves at the
+//!   finish, `<old> <new> <branch>`, with `-` as `<new>` until the
+//!   `update-ref <branch>` step runs; absent when no branch moves. An
+//!   `update-ref` step takes no commit and needs the versioned `actions`
 //!
 //! Trailing newlines are tolerated on read and always written.
 //!
@@ -50,6 +54,7 @@ const ACTIONS_FILE: &str = "actions";
 /// The first line of an `actions` file that holds an `edit` or `exec` step.
 const ACTIONS_V2_HEADER: &str = "kit-rebase-actions 2";
 const STRATEGY_OPTION_FILE: &str = "strategy-option";
+const UPDATE_REFS_FILE: &str = "update-refs";
 const MAX_STRATEGY_OPTION_BYTES: u64 = 64;
 
 const MAX_HEAD_NAME_BYTES: u64 = 4096;
@@ -122,6 +127,10 @@ pub enum RebaseAction {
     /// Run a shell command. It takes no commit; its command is the next
     /// entry of [`RebaseState::exec`].
     Exec,
+    /// Record `HEAD` as the commit that a branch moves to at the finish. It
+    /// takes no commit; its branch is the next entry of
+    /// [`RebaseState::update_refs`].
+    UpdateRef,
 }
 
 impl RebaseAction {
@@ -135,14 +144,16 @@ impl RebaseAction {
             RebaseAction::Fixup => "fixup",
             RebaseAction::Edit => "edit",
             RebaseAction::Exec => "exec",
+            RebaseAction::UpdateRef => "update-ref",
         }
     }
 
-    /// `true` for every action but [`RebaseAction::Exec`]: the action
-    /// replays the next commit of the todo list.
+    /// `true` for every action but [`RebaseAction::Exec`] and
+    /// [`RebaseAction::UpdateRef`]: the action replays the next commit of the
+    /// todo list.
     #[must_use]
     pub fn takes_commit(self) -> bool {
-        self != RebaseAction::Exec
+        !matches!(self, RebaseAction::Exec | RebaseAction::UpdateRef)
     }
 
     /// `true` for actions that fold into the previous commit rather than
@@ -153,7 +164,7 @@ impl RebaseAction {
     }
 
     /// Parse an action that takes a commit from its persisted keyword.
-    /// `exec` carries a command and is not a bare keyword.
+    /// `exec` and `update-ref` carry an argument and are not bare keywords.
     #[must_use]
     pub fn from_keyword(s: &str) -> Option<Self> {
         match s {
@@ -268,6 +279,61 @@ pub fn autosquash<S: AsRef<str>>(commits: &[(Hash, S)]) -> Vec<(Hash, RebaseActi
     out
 }
 
+/// Add a [`RebaseAction::UpdateRef`] step for each branch of `tips` whose tip
+/// is a commit of the plan, as `--update-refs` does. The step goes right
+/// after the step that replays the tip, or after the last squash or fixup
+/// that folds into it, so it records the commit that replaces the tip.
+/// Branches of one commit keep their order in `tips`, and a branch whose tip
+/// the plan does not replay gets no step.
+///
+/// `todo` holds the commit of each step of `actions` that takes one, and
+/// `update_refs` the branch of each `update-ref` step already there. The
+/// result is the new actions and the branch of each of their `update-ref`
+/// steps, in order. Removing the new steps gives back `actions`.
+#[must_use]
+pub fn with_update_refs(
+    todo: &[Hash],
+    actions: &[RebaseAction],
+    update_refs: &[String],
+    tips: &[(String, Hash)],
+) -> (Vec<RebaseAction>, Vec<String>) {
+    let mut out_actions = Vec::with_capacity(actions.len() + tips.len());
+    let mut out_refs = Vec::with_capacity(update_refs.len() + tips.len());
+    let mut existing = update_refs.iter();
+    let mut commits = todo.iter();
+    // The commits of the chain being built: a step that replays a commit,
+    // then the squash and fixup steps that fold into it.
+    let mut chain: Vec<Hash> = Vec::new();
+    for (i, &action) in actions.iter().enumerate() {
+        out_actions.push(action);
+        if action == RebaseAction::UpdateRef {
+            out_refs.extend(existing.next().cloned());
+            continue;
+        }
+        if !action.takes_commit() {
+            continue;
+        }
+        let Some(&commit) = commits.next() else {
+            continue;
+        };
+        if !action.folds_into_previous() {
+            chain.clear();
+        }
+        chain.push(commit);
+        let next = actions[i + 1..].iter().find(|a| a.takes_commit());
+        if next.is_some_and(|a| a.folds_into_previous()) {
+            continue;
+        }
+        for (branch, tip) in tips {
+            if chain.contains(tip) {
+                out_actions.push(RebaseAction::UpdateRef);
+                out_refs.push(branch.clone());
+            }
+        }
+    }
+    (out_actions, out_refs)
+}
+
 /// Persisted rebase state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebaseState {
@@ -290,6 +356,23 @@ pub struct RebaseState {
     pub done: Vec<Hash>,
     /// The side the conflicts of every replayed commit resolve to.
     pub favor: Favor,
+    /// The branch of each [`RebaseAction::UpdateRef`] in `actions`, in order.
+    pub update_refs: Vec<String>,
+    /// The branches that move at the finish, each once.
+    pub ref_updates: Vec<RefUpdate>,
+}
+
+/// A branch that `--update-refs` moves when the rebase finishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefUpdate {
+    /// The branch.
+    pub branch: String,
+    /// Its tip when the rebase started. It moves only if it still points
+    /// there.
+    pub old: Hash,
+    /// The commit it moves to, which its last `update-ref` step recorded, or
+    /// `None` while no step has run.
+    pub new: Option<Hash>,
 }
 
 impl RebaseState {
@@ -310,19 +393,35 @@ impl RebaseState {
         }
     }
 
-    /// Drop the next step with its commit or its command, so the lists stay
-    /// aligned as steps are consumed.
+    /// The branch of the next step when it is an `update-ref`.
+    #[must_use]
+    pub fn front_update_ref(&self) -> Option<&str> {
+        if self.actions.first() == Some(&RebaseAction::UpdateRef) {
+            self.update_refs.first().map(String::as_str)
+        } else {
+            None
+        }
+    }
+
+    /// Drop the next step with its commit, its command or its branch, so the
+    /// lists stay aligned as steps are consumed.
     pub fn consume_front(&mut self) {
-        let takes_commit = self.front_action().takes_commit();
+        let front = self.front_action();
         if !self.actions.is_empty() {
             self.actions.remove(0);
         }
-        if takes_commit {
-            if !self.todo.is_empty() {
-                self.todo.remove(0);
+        let list = match front {
+            RebaseAction::Exec => &mut self.exec,
+            RebaseAction::UpdateRef => &mut self.update_refs,
+            _ => {
+                if !self.todo.is_empty() {
+                    self.todo.remove(0);
+                }
+                return;
             }
-        } else if !self.exec.is_empty() {
-            self.exec.remove(0);
+        };
+        if !list.is_empty() {
+            list.remove(0);
         }
     }
 }
@@ -358,8 +457,9 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
     let done = read_hash_list(&dir.join(DONE_FILE))?;
     // The actions file is parallel to todo. A missing file or a length
     // mismatch is corrupt state.
-    let (actions, exec) = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
+    let (actions, exec, update_refs) = read_actions(&dir.join(ACTIONS_FILE), todo.len())?;
     let favor = read_favor(&dir.join(STRATEGY_OPTION_FILE))?;
+    let ref_updates = read_ref_updates(&dir.join(UPDATE_REFS_FILE))?;
 
     Ok(RebaseState {
         head_name,
@@ -370,6 +470,8 @@ pub fn read_state(layout: &RepoLayout) -> RebaseResult<RebaseState> {
         exec,
         done,
         favor,
+        update_refs,
+        ref_updates,
     })
 }
 
@@ -400,7 +502,10 @@ pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()>
             with_newline(hash::to_hex(&state.onto).as_bytes()),
         ),
         (TODO_FILE, hash_list_bytes(&state.todo)),
-        (ACTIONS_FILE, actions_bytes(&state.actions, &state.exec)),
+        (
+            ACTIONS_FILE,
+            actions_bytes(&state.actions, &state.exec, &state.update_refs),
+        ),
         (DONE_FILE, hash_list_bytes(&state.done)),
     ];
     let option = state
@@ -408,13 +513,14 @@ pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()>
         .option()
         .map(|o| (STRATEGY_OPTION_FILE, with_newline(o.as_bytes())));
     if option.is_none() {
-        match fs::remove_file(dir.join(STRATEGY_OPTION_FILE)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(RebaseError::Io(e)),
-        }
+        remove_if_present(&dir.join(STRATEGY_OPTION_FILE))?;
     }
-    let files: Vec<_> = files.into_iter().chain(option).collect();
+    let ref_updates = (!state.ref_updates.is_empty())
+        .then(|| (UPDATE_REFS_FILE, ref_updates_bytes(&state.ref_updates)));
+    if ref_updates.is_none() {
+        remove_if_present(&dir.join(UPDATE_REFS_FILE))?;
+    }
+    let files: Vec<_> = files.into_iter().chain(option).chain(ref_updates).collect();
     let mut staged = Vec::with_capacity(files.len());
     for (name, bytes) in &files {
         if holds(&dir.join(name), bytes) {
@@ -560,7 +666,11 @@ fn read_hash_list(path: &Path) -> RebaseResult<Vec<Hash>> {
 /// Read the `actions` file: the steps and the commands of the `exec` steps.
 /// A file without the version line holds only the four keywords of the
 /// first format. The steps that take a commit must number `todo_len`.
-fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<(Vec<RebaseAction>, Vec<String>)> {
+/// The steps of the `actions` file: the actions, the command of each `exec`
+/// and the branch of each `update-ref`.
+type Steps = (Vec<RebaseAction>, Vec<String>, Vec<String>);
+
+fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<Steps> {
     let raw = match read_text_capped(path, MAX_HASH_LIST_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -572,10 +682,11 @@ fn read_actions(path: &Path, todo_len: usize) -> RebaseResult<(Vec<RebaseAction>
 }
 
 /// The parser of [`read_actions`]. `None` for malformed text.
-fn parse_actions(raw: &str, todo_len: usize) -> Option<(Vec<RebaseAction>, Vec<String>)> {
+fn parse_actions(raw: &str, todo_len: usize) -> Option<Steps> {
     let text = trim_trailing(raw);
     let mut actions = Vec::with_capacity(todo_len);
     let mut exec = Vec::new();
+    let mut update_refs = Vec::new();
     if let Some(body) = text
         .strip_prefix(ACTIONS_V2_HEADER)
         .and_then(|rest| rest.strip_prefix('\n').or(rest.is_empty().then_some("")))
@@ -587,6 +698,12 @@ fn parse_actions(raw: &str, todo_len: usize) -> Option<(Vec<RebaseAction>, Vec<S
                 }
                 actions.push(RebaseAction::Exec);
                 exec.push(command.to_owned());
+            } else if let Some(branch) = line.strip_prefix("update-ref ") {
+                if !crate::refs::validate_ref_name(branch) {
+                    return None;
+                }
+                actions.push(RebaseAction::UpdateRef);
+                update_refs.push(branch.to_owned());
             } else {
                 actions.push(RebaseAction::from_keyword(line)?);
             }
@@ -598,21 +715,27 @@ fn parse_actions(raw: &str, todo_len: usize) -> Option<(Vec<RebaseAction>, Vec<S
                 continue;
             }
             match RebaseAction::from_keyword(line)? {
-                RebaseAction::Edit | RebaseAction::Exec => return None,
+                RebaseAction::Edit | RebaseAction::Exec | RebaseAction::UpdateRef => {
+                    return None;
+                }
                 action => actions.push(action),
             }
         }
     }
     let commits = actions.iter().filter(|a| a.takes_commit()).count();
-    (commits == todo_len).then_some((actions, exec))
+    (commits == todo_len).then_some((actions, exec, update_refs))
 }
 
-/// The `actions` file for `actions` and the commands of their `exec` steps.
-/// A plan of the four first keywords keeps the first format.
-fn actions_bytes(actions: &[RebaseAction], exec: &[String]) -> Vec<u8> {
-    let first_format = actions
-        .iter()
-        .all(|a| !matches!(a, RebaseAction::Edit | RebaseAction::Exec));
+/// The `actions` file for `actions`, the commands of their `exec` steps and
+/// the branches of their `update-ref` steps. A plan of the four first
+/// keywords keeps the first format.
+fn actions_bytes(actions: &[RebaseAction], exec: &[String], update_refs: &[String]) -> Vec<u8> {
+    let first_format = actions.iter().all(|a| {
+        !matches!(
+            a,
+            RebaseAction::Edit | RebaseAction::Exec | RebaseAction::UpdateRef
+        )
+    });
     if actions.is_empty() {
         return b"\n".to_vec();
     }
@@ -622,11 +745,17 @@ fn actions_bytes(actions: &[RebaseAction], exec: &[String]) -> Vec<u8> {
         buf.push('\n');
     }
     let mut commands = exec.iter();
+    let mut branches = update_refs.iter();
     for a in actions {
         buf.push_str(a.keyword());
-        if *a == RebaseAction::Exec {
+        let argument = match a {
+            RebaseAction::Exec => commands.next(),
+            RebaseAction::UpdateRef => branches.next(),
+            _ => None,
+        };
+        if let Some(argument) = argument {
             buf.push(' ');
-            buf.push_str(commands.next().map_or("", String::as_str));
+            buf.push_str(argument);
         }
         buf.push('\n');
     }
@@ -659,6 +788,70 @@ fn with_newline(content: &[u8]) -> Vec<u8> {
 fn holds(path: &Path, bytes: &[u8]) -> bool {
     let same_len = fs::metadata(path).is_ok_and(|m| m.len() == bytes.len() as u64);
     same_len && fs::read(path).is_ok_and(|on_disk| on_disk == bytes)
+}
+
+/// The `update-refs` file: one line per branch, `<old> <new> <branch>`,
+/// with `-` as `<new>` while no step has recorded one.
+fn ref_updates_bytes(updates: &[RefUpdate]) -> Vec<u8> {
+    let mut buf = String::with_capacity(updates.len() * (2 * HEX_LEN + 16));
+    for u in updates {
+        buf.push_str(&hash::to_hex(&u.old));
+        buf.push(' ');
+        match &u.new {
+            Some(h) => buf.push_str(&hash::to_hex(h)),
+            None => buf.push('-'),
+        }
+        buf.push(' ');
+        buf.push_str(&u.branch);
+        buf.push('\n');
+    }
+    buf.into_bytes()
+}
+
+/// Read the optional `update-refs` file. A missing file is no branch; a
+/// malformed line, a bad branch name or a branch listed twice is corrupt
+/// state.
+fn read_ref_updates(path: &Path) -> RebaseResult<Vec<RefUpdate>> {
+    match read_text_capped(path, MAX_HASH_LIST_BYTES) {
+        Ok(text) => parse_ref_updates(&text).ok_or(RebaseError::InvalidRebaseState),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(_) => Err(RebaseError::InvalidRebaseState),
+    }
+}
+
+/// The parser of [`read_ref_updates`]. `None` for malformed text.
+fn parse_ref_updates(text: &str) -> Option<Vec<RefUpdate>> {
+    let mut updates: Vec<RefUpdate> = Vec::new();
+    for line in trim_trailing(text).split('\n').filter(|l| !l.is_empty()) {
+        let mut parts = line.splitn(3, ' ');
+        let old = parse_lowercase_hex(parts.next()?)?;
+        let new = match parts.next()? {
+            "-" => None,
+            hex => Some(parse_lowercase_hex(hex)?),
+        };
+        let branch = parts.next()?;
+        if !crate::refs::validate_ref_name(branch) || updates.iter().any(|u| u.branch == branch) {
+            return None;
+        }
+        updates.push(RefUpdate {
+            branch: branch.to_owned(),
+            old,
+            new,
+        });
+    }
+    Some(updates)
+}
+
+fn parse_lowercase_hex(text: &str) -> Option<Hash> {
+    crate::refs::parse_lowercase_hash(text.as_bytes())
+}
+
+fn remove_if_present(path: &Path) -> RebaseResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(RebaseError::Io(e)),
+    }
 }
 
 /// Read the optional strategy-option file. A missing file is
@@ -848,6 +1041,8 @@ mod tests {
         let state = RebaseState {
             favor: Favor::None,
             exec: Vec::new(),
+            update_refs: Vec::new(),
+            ref_updates: Vec::new(),
             head_name: "feature-branch".to_string(),
             orig_head: hash::hash(b"orig-head"),
             onto: hash::hash(b"onto"),
@@ -879,6 +1074,8 @@ mod tests {
         let state = RebaseState {
             favor: Favor::None,
             exec: Vec::new(),
+            update_refs: Vec::new(),
+            ref_updates: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -904,6 +1101,8 @@ mod tests {
         RebaseState {
             favor: Favor::None,
             exec: Vec::new(),
+            update_refs: Vec::new(),
+            ref_updates: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -926,11 +1125,11 @@ mod tests {
             ),
             ("pick\n\n  reword \n", vec![Pick, Reword], "pick\nreword\n"),
         ] {
-            let (actions, exec) = parse_actions(text, want.len()).unwrap();
+            let (actions, exec, refs) = parse_actions(text, want.len()).unwrap();
             assert_eq!(actions, want, "{text:?}");
-            assert!(exec.is_empty());
+            assert!(exec.is_empty() && refs.is_empty());
             assert_eq!(
-                actions_bytes(&actions, &exec),
+                actions_bytes(&actions, &exec, &refs),
                 written.as_bytes(),
                 "{text:?}"
             );
@@ -939,14 +1138,20 @@ mod tests {
 
     #[test]
     fn the_versioned_actions_format_round_trips() {
+        use RebaseAction::UpdateRef;
         use RebaseAction::{Edit, Exec, Pick};
-        let text = "kit-rebase-actions 2\npick\nexec make test\nedit\nexec true\n";
-        let (actions, exec) = parse_actions(text, 2).unwrap();
-        assert_eq!(actions, [Pick, Exec, Edit, Exec]);
+        let text =
+            "kit-rebase-actions 2\npick\nexec make test\nupdate-ref feature/a\nedit\nexec true\n";
+        let (actions, exec, refs) = parse_actions(text, 2).unwrap();
+        assert_eq!(actions, [Pick, Exec, UpdateRef, Edit, Exec]);
         assert_eq!(exec, ["make test", "true"]);
-        assert_eq!(actions_bytes(&actions, &exec), text.as_bytes());
+        assert_eq!(refs, ["feature/a"]);
+        assert_eq!(actions_bytes(&actions, &exec, &refs), text.as_bytes());
         let header_only = "kit-rebase-actions 2\n";
-        assert_eq!(parse_actions(header_only, 0), Some((vec![], vec![])));
+        assert_eq!(
+            parse_actions(header_only, 0),
+            Some((vec![], vec![], vec![]))
+        );
     }
 
     #[test]
@@ -962,6 +1167,11 @@ mod tests {
             ("kit-rebase-actions 2\nedit\n", 0),
             ("kit-rebase-actions 2\ndrop\n", 1),
             ("kit-rebase-actions 2pick\n", 1),
+            ("update-ref a\n", 0),
+            ("kit-rebase-actions 2\nupdate-ref\n", 0),
+            ("kit-rebase-actions 2\nupdate-ref a b\n", 0),
+            ("kit-rebase-actions 2\nupdate-ref ..\n", 0),
+            ("kit-rebase-actions 2\nupdate-ref a\n", 1),
         ] {
             assert_eq!(parse_actions(text, todo_len), None, "{text:?}");
         }
@@ -1148,6 +1358,8 @@ mod tests {
         let mut state = RebaseState {
             favor: Favor::None,
             exec: Vec::new(),
+            update_refs: Vec::new(),
+            ref_updates: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -1171,6 +1383,8 @@ mod tests {
         let state = RebaseState {
             favor: Favor::None,
             exec: Vec::new(),
+            update_refs: Vec::new(),
+            ref_updates: Vec::new(),
             head_name: "main".to_string(),
             orig_head: hash::hash(b"head"),
             onto: hash::hash(b"onto"),
@@ -1423,6 +1637,159 @@ mod tests {
             let twice: Vec<Hash> = autosquash(&again).into_iter().map(|(h, _)| h).collect();
             let once: Vec<Hash> = out.iter().map(|(h, _)| *h).collect();
             proptest::prop_assert_eq!(twice, once);
+        }
+    }
+
+    #[test]
+    fn the_update_refs_file_round_trips_and_is_removed_when_empty() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let mut state = sample_state(&[b"a", b"b"]);
+        state.actions = vec![
+            RebaseAction::Pick,
+            RebaseAction::UpdateRef,
+            RebaseAction::Pick,
+        ];
+        state.update_refs = vec!["stack/a".to_owned()];
+        state.ref_updates = vec![
+            RefUpdate {
+                branch: "stack/a".to_owned(),
+                old: hash::hash(b"old a"),
+                new: None,
+            },
+            RefUpdate {
+                branch: "c".to_owned(),
+                old: hash::hash(b"old c"),
+                new: Some(hash::hash(b"new c")),
+            },
+        ];
+        write_state(&kit, &state).unwrap();
+        let file = kit.rebase_dir().join("update-refs");
+        let text = fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "{} - stack/a\n{} {} c\n",
+                hash::to_hex(&hash::hash(b"old a")),
+                hash::to_hex(&hash::hash(b"old c")),
+                hash::to_hex(&hash::hash(b"new c")),
+            )
+        );
+        assert_eq!(read_state(&kit).unwrap(), state);
+
+        state.consume_front();
+        assert_eq!(state.front_update_ref(), Some("stack/a"));
+        state.consume_front();
+        assert!(state.update_refs.is_empty());
+        assert_eq!(state.todo, [hash::hash(b"b")]);
+        state.ref_updates.clear();
+        write_state(&kit, &state).unwrap();
+        assert!(!file.exists());
+        assert_eq!(read_state(&kit).unwrap(), state);
+    }
+
+    #[test]
+    fn a_malformed_update_refs_file_is_invalid_state() {
+        let old = hash::to_hex(&hash::hash(b"old"));
+        for text in [
+            format!("{old} -\n"),
+            format!("{old} - a b\n"),
+            format!("{old} x a\n"),
+            format!("{} - a\n", &old[..10]),
+            format!("{old} - a\n{old} - a\n"),
+            format!("{} - a\n", old.to_uppercase()),
+        ] {
+            assert_eq!(parse_ref_updates(&text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn update_ref_steps_follow_the_commit_or_its_fold_chain() {
+        use RebaseAction::{Exec, Fixup, Pick, Squash, UpdateRef};
+        let todo = [h(1), h(2), h(3), h(4)];
+        let actions = [Pick, Exec, Pick, Fixup, Squash, Pick];
+        let tips = [
+            ("one".to_owned(), h(1)),
+            ("two".to_owned(), h(2)),
+            ("three".to_owned(), h(3)),
+            ("gone".to_owned(), h(9)),
+            ("also-one".to_owned(), h(1)),
+        ];
+        let (out, refs) = with_update_refs(&todo, &actions, &[], &tips);
+        assert_eq!(
+            out,
+            [
+                Pick, UpdateRef, UpdateRef, Exec, Pick, Fixup, Squash, UpdateRef, UpdateRef, Pick
+            ]
+        );
+        assert_eq!(refs, ["one", "also-one", "two", "three"]);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn update_ref_invariants(
+            steps in proptest::collection::vec(0u8..5, 0..12),
+            tips in proptest::collection::vec((0u8..6, 0u8..16), 0..6),
+        ) {
+            use RebaseAction::{Exec, Fixup, Pick, Squash};
+            let actions: Vec<RebaseAction> = steps
+                .iter()
+                .map(|s| match s {
+                    0 | 1 => Pick,
+                    2 => Fixup,
+                    3 => Squash,
+                    _ => Exec,
+                })
+                .collect();
+            let todo: Vec<Hash> = (0..actions.iter().filter(|a| a.takes_commit()).count())
+                .map(|i| h(u8::try_from(i).unwrap()))
+                .collect();
+            let tips: Vec<(String, Hash)> = tips
+                .iter()
+                .enumerate()
+                .map(|(i, (name, tip))| (format!("b{i}-{name}"), h(*tip)))
+                .collect();
+            let (out, refs) = with_update_refs(&todo, &actions, &[], &tips);
+
+            // Removing the new steps gives back the plan.
+            let kept: Vec<RebaseAction> = out
+                .iter()
+                .copied()
+                .filter(|a| *a != RebaseAction::UpdateRef)
+                .collect();
+            proptest::prop_assert_eq!(&kept, &actions);
+            let count = out.iter().filter(|a| **a == RebaseAction::UpdateRef).count();
+            proptest::prop_assert_eq!(count, refs.len());
+
+            // Each branch whose tip the plan replays gets one step, and no
+            // other branch gets one.
+            for (branch, tip) in &tips {
+                let count = refs.iter().filter(|r| *r == branch).count();
+                proptest::prop_assert_eq!(count, usize::from(todo.contains(tip)));
+            }
+
+            // A step records the commit that replaces its tip: the chain
+            // before it holds the tip, and the next commit does not fold
+            // into that chain.
+            let mut commits = todo.iter();
+            let mut chain: Vec<Hash> = Vec::new();
+            let mut branches = refs.iter();
+            for (k, a) in out.iter().enumerate() {
+                if a.takes_commit() {
+                    let c = *commits.next().unwrap();
+                    if !a.folds_into_previous() {
+                        chain.clear();
+                    }
+                    chain.push(c);
+                } else if *a == RebaseAction::UpdateRef {
+                    let branch = branches.next().unwrap();
+                    let tip = tips.iter().find(|(b, _)| b == branch).unwrap().1;
+                    proptest::prop_assert!(chain.contains(&tip));
+                    let next = out[k + 1..].iter().find(|a| a.takes_commit());
+                    proptest::prop_assert!(!next.is_some_and(|a| a.folds_into_previous()));
+                }
+            }
         }
     }
 }

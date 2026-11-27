@@ -208,6 +208,9 @@ pub struct Config {
     /// `rebase.autosquash`: `true` turns on `--autosquash` for an
     /// interactive rebase. Empty means off.
     pub rebase_autosquash: String,
+    /// `rebase.updaterefs`: `true` turns on `--update-refs`. Empty means
+    /// off.
+    pub rebase_update_refs: String,
     /// Fetch portable attestations unless explicitly disabled.
     pub fetch_attestations: String,
     /// Publish locally authored attestations only when true.
@@ -412,6 +415,12 @@ impl Config {
     #[must_use]
     pub fn rebase_autosquash_enabled(&self) -> bool {
         self.rebase_autosquash.eq_ignore_ascii_case("true")
+    }
+
+    /// Whether a rebase moves the stacked branches without `--update-refs`.
+    #[must_use]
+    pub fn rebase_update_refs_enabled(&self) -> bool {
+        self.rebase_update_refs.eq_ignore_ascii_case("true")
     }
 
     /// Return a Config with documented defaults filled in.
@@ -830,6 +839,10 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.rebase_autosquash = val.to_ascii_lowercase();
         }
+        "rebase.updaterefs" => {
+            expect_one_of(key, val, &["true", "false"])?;
+            cfg.rebase_update_refs = val.to_ascii_lowercase();
+        }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
             cfg.fetch_attestations = val.to_ascii_lowercase();
@@ -1018,6 +1031,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("gc.auto", cfg.gc_auto.as_str()),
         ("push.attestations", cfg.push_attestations.as_str()),
         ("rebase.autosquash", cfg.rebase_autosquash.as_str()),
+        ("rebase.updaterefs", cfg.rebase_update_refs.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),

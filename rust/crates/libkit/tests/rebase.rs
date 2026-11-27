@@ -121,6 +121,7 @@ fn start(
             favor: libkit::merge::Favor::None,
             exec: &[],
             autosquash: false,
+            update_refs: false,
         },
         &TestSigning,
         editor,
@@ -176,6 +177,7 @@ fn a_rebase_replays_signed_copies_that_keep_their_authorship() {
         old,
         new,
         replayed,
+        ..
     } = outcome
     else {
         panic!("expected a finished rebase: {outcome:?}");
@@ -252,6 +254,7 @@ fn an_upstream_limits_the_replay_to_the_commits_after_it() {
         favor: libkit::merge::Favor::None,
         exec: &[],
         autosquash: false,
+        update_refs: false,
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -284,6 +287,7 @@ fn a_named_branch_is_the_one_that_moves() {
         favor: libkit::merge::Favor::None,
         exec: &[],
         autosquash: false,
+        update_refs: false,
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -316,6 +320,7 @@ fn an_unknown_upstream_or_branch_is_an_error() {
             favor: libkit::merge::Favor::None,
             exec: &[],
             autosquash: false,
+            update_refs: false,
         };
         let err = rebase::start(
             &l.f.layout,
@@ -499,6 +504,7 @@ fn reword_asks_the_editor_for_a_message_and_an_empty_reply_keeps_the_old_one() {
             favor: libkit::merge::Favor::None,
             exec: &[],
             autosquash: false,
+            update_refs: false,
         },
         &TestSigning,
         &mut script,
