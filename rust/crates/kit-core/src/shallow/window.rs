@@ -7,9 +7,12 @@
 //! sends for a window: each window commit with its snapshot closure, less
 //! what the client already holds. [`window_packs`] writes that set as packs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::hash::{Hash, to_hex};
+use crate::object::Object;
+use crate::ops::graph::reachable_snapshot;
+use crate::pack::{self, PackWriter};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
 
 use super::Boundary;
@@ -58,6 +61,9 @@ pub enum WindowError {
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// A pack could not be written.
+    #[error(transparent)]
+    Pack(#[from] pack::PackError),
 }
 
 /// The window of `tips`, each with its depth, over the graph that `parents`
@@ -74,10 +80,56 @@ pub enum WindowError {
 /// [`WindowError::TooLarge`] past [`MAX_WINDOW_COMMITS`].
 pub fn window(
     tips: &[(Hash, u32)],
-    parents: impl FnMut(&Hash) -> Option<Vec<Hash>>,
+    mut parents: impl FnMut(&Hash) -> Option<Vec<Hash>>,
 ) -> Result<Window, WindowError> {
-    let _ = (tips, parents);
-    Ok(Window::default())
+    if tips.is_empty() || tips.len() > MAX_WINDOW_TIPS {
+        return Err(WindowError::Tips);
+    }
+    if tips.iter().any(|(_, d)| *d == 0) {
+        return Err(WindowError::ZeroDepth);
+    }
+    if tips.iter().any(|(_, d)| *d > MAX_DEPTH) {
+        return Err(WindowError::DepthTooLarge);
+    }
+    // A commit is in the union of the windows when the most depth any tip
+    // has left at it is at least 1. Walking the greatest remaining depth
+    // first settles each commit at that value, as a shortest-path search
+    // does, so no commit is expanded with less depth than it has.
+    let mut left: BTreeMap<Hash, u32> = BTreeMap::new();
+    let mut heap: BinaryHeap<(u32, Hash)> = BinaryHeap::new();
+    for (tip, depth) in tips {
+        if left.get(tip).is_none_or(|d| d < depth) {
+            left.insert(*tip, *depth);
+            heap.push((*depth, *tip));
+        }
+    }
+    let mut edges: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+    while let Some((depth, commit)) = heap.pop() {
+        if left.get(&commit) != Some(&depth) || edges.contains_key(&commit) {
+            continue;
+        }
+        let ps = parents(&commit).ok_or(WindowError::Missing(commit))?;
+        if depth > 1 {
+            for p in &ps {
+                if left.get(p).is_none_or(|d| *d < depth - 1) {
+                    if left.len() >= MAX_WINDOW_COMMITS && !left.contains_key(p) {
+                        return Err(WindowError::TooLarge);
+                    }
+                    left.insert(*p, depth - 1);
+                    heap.push((depth - 1, *p));
+                }
+            }
+        }
+        edges.insert(commit, ps);
+    }
+    let commits: BTreeSet<Hash> = edges.keys().copied().collect();
+    let boundary = Boundary::new(
+        edges
+            .iter()
+            .filter(|(_, ps)| ps.iter().any(|p| !commits.contains(p)))
+            .map(|(c, _)| *c),
+    );
+    Ok(Window { commits, boundary })
 }
 
 /// [`window`] over the commits of `store`. A remix counts as a commit with
@@ -91,8 +143,25 @@ pub fn window_in(
     store: &(impl ObjectSource + ?Sized),
     tips: &[(Hash, u32)],
 ) -> Result<Window, WindowError> {
-    let _ = store;
-    window(tips, |_| None)
+    // The callback cannot fail, so the first error it meets waits here.
+    let mut failure: Option<WindowError> = None;
+    let result = window(tips, |h| match store.read_object(h) {
+        Ok(Object::Commit(c)) => Some(c.parents),
+        Ok(Object::Remix(r)) => Some(r.parents),
+        Ok(_) => {
+            failure.get_or_insert(WindowError::NotACommit(*h));
+            None
+        }
+        Err(StoreError::ObjectNotFound(_)) => None,
+        Err(e) => {
+            failure.get_or_insert(WindowError::Store(e));
+            None
+        }
+    });
+    match (result, failure) {
+        (Err(WindowError::Missing(_)), Some(failure)) => Err(failure),
+        (result, _) => result,
+    }
 }
 
 /// The objects a server sends for `window`: each commit of the window and
@@ -106,32 +175,54 @@ pub fn window_objects(
     window: &Window,
     have: &[Hash],
 ) -> Result<BTreeSet<Hash>, StoreError> {
-    let _ = (store, window, have);
-    Ok(BTreeSet::new())
+    let mut out = BTreeSet::new();
+    for commit in &window.commits {
+        out.extend(reachable_snapshot(store, commit)?);
+    }
+    for held in have {
+        for id in reachable_snapshot(store, held)? {
+            out.remove(&id);
+        }
+    }
+    Ok(out)
 }
 
 /// [`window_objects`] written as raw packs, each within the pack limits of
 /// the transport.
 ///
 /// # Errors
-/// The errors of [`window_objects`], and a [`StoreError`] when a pack cannot
-/// be written.
+/// [`WindowError::Store`] for the errors of [`window_objects`] and
+/// [`WindowError::Pack`] when a pack cannot be written.
 pub fn window_packs(
     store: &ObjectStore,
     window: &Window,
     have: &[Hash],
-) -> Result<Vec<Vec<u8>>, StoreError> {
-    let _ = (store, window, have);
-    Ok(Vec::new())
+) -> Result<Vec<Vec<u8>>, WindowError> {
+    let mut packs = Vec::new();
+    let mut writer = PackWriter::new_raw_only();
+    for id in window_objects(store, window, have)? {
+        let bytes = store.read(&id)?;
+        if pack::PackFill::of(&writer).seals_before(
+            pack::Incoming::raw(bytes.len() as u64, 0),
+            pack::MAX_TOTAL_PAYLOAD,
+            crate::protocol::PACK_BODY_LIMIT,
+            pack::MAX_ENTRIES as usize,
+        ) {
+            packs.push(writer.finish()?);
+            writer = PackWriter::new_raw_only();
+        }
+        writer.push_raw(id, &bytes)?;
+    }
+    if writer.entry_count() > 0 {
+        packs.push(writer.finish()?);
+    }
+    Ok(packs)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::object::Object;
-    use crate::ops::graph::reachable_snapshot;
-    use crate::pack;
     use crate::shallow::exact_record;
     use proptest::prelude::*;
     use std::collections::{HashMap, VecDeque};
