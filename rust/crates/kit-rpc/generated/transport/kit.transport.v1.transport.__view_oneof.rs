@@ -57,6 +57,28 @@ pub mod download_pack_response {
         ),
     }
 }
+pub mod download_window_response {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, Debug)]
+    pub enum Body<'a> {
+        Pack(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadWindowPackView<'a>,
+            >,
+        ),
+        Chunk(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::PackChunkView<'a>,
+            >,
+        ),
+        Boundary(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadWindowBoundaryView<'a>,
+            >,
+        ),
+    }
+}
 pub mod begin_upload_response {
     #[allow(unused_imports)]
     use super::*;

@@ -141,6 +141,13 @@ service TransportService {
   // SPEC-TRANSPORT-CONNECT §6.
   rpc DownloadPack(DownloadPackRequest) returns (stream DownloadPackResponse);
 
+  // Server-streaming download of a shallow window (SPEC-SHALLOW §8.2). The
+  // stream holds one or more packs, each a `pack` header followed by its
+  // `chunk` messages ending with `chunk.last = true`, then one `boundary`
+  // message that ends the stream. Only a server that advertises
+  // `supports_download_window` serves it; others answer `unimplemented`.
+  rpc DownloadWindow(DownloadWindowRequest) returns (stream DownloadWindowResponse);
+
   // Discover deployment capabilities without authentication (SPEC-TRANSPORT-CONNECT §2.1).
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
 
@@ -351,6 +358,36 @@ message DownloadPackResponse {
   }
 }
 
+// The window of `tips` at `depth`, less what the client holds (SPEC-SHALLOW
+// §8.2). At most 1,000 tips and 1,000 `have` commits, each a raw 32-byte
+// commit id; `depth` from 1 to 2^31 - 1.
+message DownloadWindowRequest {
+  repeated bytes tips = 1;
+  uint32 depth = 2;
+  repeated bytes have = 3;
+}
+
+// The boundary the server computed, advisory: the client computes it again
+// from the objects it received and refuses a response whose list differs.
+message DownloadWindowBoundary {
+  repeated bytes commits = 1;
+}
+
+message DownloadWindowResponse {
+  oneof body {
+    // Starts the next pack: its id and exact length.
+    DownloadWindowPack pack = 1;
+    PackChunk chunk = 2;
+    DownloadWindowBoundary boundary = 3;
+  }
+}
+
+// Sent before the chunks of each pack of a window.
+message DownloadWindowPack {
+  bytes pack_id = 1;
+  uint64 total_bytes = 2;
+}
+
 // ----------------------------------------------------------------------------
 // Discovery.
 
@@ -409,6 +446,9 @@ message GetServerInfoResponse {
   uint32 max_tickets_per_advance = 22;
   // Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
   bool supports_attestations = 23;
+  // Whether DownloadWindow serves shallow fetches (SPEC-SHALLOW §8.2);
+  // absent means unsupported.
+  bool supports_download_window = 24;
 }
 
 // ----------------------------------------------------------------------------

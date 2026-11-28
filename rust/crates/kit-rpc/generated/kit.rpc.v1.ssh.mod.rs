@@ -107,3 +107,15 @@ pub use self::__buffa::view::DownloadPackHeaderOwnedView;
 pub use self::__buffa::view::PackChunkView;
 #[doc(inline)]
 pub use self::__buffa::view::PackChunkOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowPackView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowPackOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowBoundaryView;
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowBoundaryOwnedView;

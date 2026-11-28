@@ -196,6 +196,30 @@ impl ::buffa::Message for SshFrame {
                         += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
                             + inner as u64;
                 }
+                __buffa::oneof::ssh_frame::Body::DownloadWindow(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::ssh_frame::Body::DownloadWindowPack(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::ssh_frame::Body::DownloadWindowBoundary(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
             }
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -357,6 +381,30 @@ impl ::buffa::Message for SshFrame {
                 __buffa::oneof::ssh_frame::Body::PackChunk(x) => {
                     ::buffa::types::put_len_delimited_header(
                         26u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::ssh_frame::Body::DownloadWindow(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        27u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::ssh_frame::Body::DownloadWindowPack(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        28u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::ssh_frame::Body::DownloadWindowBoundary(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        29u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -759,6 +807,68 @@ impl ::buffa::Message for SshFrame {
                     );
                 }
             }
+            27u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::ssh_frame::Body::DownloadWindow(ref mut existing),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::ssh_frame::Body::DownloadWindow(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            28u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::ssh_frame::Body::DownloadWindowPack(ref mut existing),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::ssh_frame::Body::DownloadWindowPack(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            29u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                        ref mut existing,
+                    ),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -945,6 +1055,11 @@ pub struct HelloResponse {
     pub proto: ::core::option::Option<::buffa::EnumValue<super::ProtocolVersion>>,
     /// Field 2: `server_id`
     pub server_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Whether the server answers DownloadWindow (SPEC-SHALLOW §8.2). A client
+    /// never sends DownloadWindow to a server that does not set it.
+    ///
+    /// Field 3: `download_window`
+    pub download_window: ::core::option::Option<bool>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -953,6 +1068,7 @@ impl ::core::fmt::Debug for HelloResponse {
         f.debug_struct("HelloResponse")
             .field("proto", &self.proto)
             .field("server_id", &self.server_id)
+            .field("download_window", &self.download_window)
             .finish()
     }
 }
@@ -984,6 +1100,13 @@ impl HelloResponse {
         self.server_id = Some(value.into());
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::download_window`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_download_window(mut self, value: bool) -> Self {
+        self.download_window = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(HelloResponse);
 impl ::buffa::MessageName for HelloResponse {
@@ -1011,6 +1134,9 @@ impl ::buffa::Message for HelloResponse {
         if let Some(ref v) = self.server_id {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        if self.download_window.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1026,6 +1152,9 @@ impl ::buffa::Message for HelloResponse {
         }
         if let Some(ref v) = self.server_id {
             ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(v) = self.download_window {
+            ::buffa::types::put_bool_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1061,6 +1190,15 @@ impl ::buffa::Message for HelloResponse {
                     buf,
                 )?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.download_window = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1071,6 +1209,7 @@ impl ::buffa::Message for HelloResponse {
     fn clear(&mut self) {
         self.proto = ::core::option::Option::None;
         self.server_id = ::core::option::Option::None;
+        self.download_window = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3132,6 +3271,411 @@ impl ::buffa::Message for PackChunk {
 }
 impl ::buffa::ExtensionSet for PackChunk {
     const PROTO_FQN: &'static str = "kit.rpc.v1.ssh.PackChunk";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// ----------------------------------------------------------------------------
+/// Shallow windows (SPEC-SHALLOW §8.2).
+///
+/// The window of `tips` at `depth`, less what the client holds. At most
+/// 1,000 tips and 1,000 `have` commits, each a raw 32-byte commit id;
+/// `depth` from 1 to 2^31 - 1. The server answers with one or more packs,
+/// each a DownloadWindowPack followed by its PackChunk frames, then one
+/// DownloadWindowBoundary, or with Error.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
+pub struct DownloadWindow {
+    /// Field 1: `tips`
+    pub tips: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `depth`
+    pub depth: ::core::option::Option<u32>,
+    /// Field 3: `have`
+    pub have: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindow {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindow")
+            .field("tips", &self.tips)
+            .field("depth", &self.depth)
+            .field("have", &self.have)
+            .finish()
+    }
+}
+impl DownloadWindow {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindow";
+}
+impl DownloadWindow {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::depth`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_depth(mut self, value: u32) -> Self {
+        self.depth = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(DownloadWindow);
+impl ::buffa::MessageName for DownloadWindow {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindow";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindow";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindow";
+}
+impl ::buffa::Message for DownloadWindow {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.tips {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.depth {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        for v in &self.have {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.tips {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.depth {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        for v in &self.have {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.tips.push(__elem);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.depth = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.have.push(__elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.tips.clear();
+        self.depth = ::core::option::Option::None;
+        self.have.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindow {
+    const PROTO_FQN: &'static str = "kit.rpc.v1.ssh.DownloadWindow";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// Starts the next pack of a window: its id and exact length.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
+pub struct DownloadWindowPack {
+    /// Field 1: `pack_id`
+    pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `total_bytes`
+    pub total_bytes: ::core::option::Option<u64>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowPack {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowPack")
+            .field("pack_id", &self.pack_id)
+            .field("total_bytes", &self.total_bytes)
+            .finish()
+    }
+}
+impl DownloadWindowPack {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowPack";
+}
+impl DownloadWindowPack {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::pack_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_pack_id(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.pack_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::total_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_total_bytes(mut self, value: u64) -> Self {
+        self.total_bytes = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(DownloadWindowPack);
+impl ::buffa::MessageName for DownloadWindowPack {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindowPack";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindowPack";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowPack";
+}
+impl ::buffa::Message for DownloadWindowPack {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.pack_id {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.total_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.pack_id {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.total_bytes {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.pack_id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.total_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.pack_id = ::core::option::Option::None;
+        self.total_bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowPack {
+    const PROTO_FQN: &'static str = "kit.rpc.v1.ssh.DownloadWindowPack";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The boundary the server computed, advisory: the client computes it again
+/// from the objects it received and refuses a response whose list differs.
+/// It ends the window.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "arbitrary", derive(::arbitrary::Arbitrary))]
+pub struct DownloadWindowBoundary {
+    /// Field 1: `commits`
+    pub commits: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowBoundary {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowBoundary").field("commits", &self.commits).finish()
+    }
+}
+impl DownloadWindowBoundary {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowBoundary";
+}
+::buffa::impl_default_instance!(DownloadWindowBoundary);
+impl ::buffa::MessageName for DownloadWindowBoundary {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindowBoundary";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindowBoundary";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowBoundary";
+}
+impl ::buffa::Message for DownloadWindowBoundary {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.commits {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.commits {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.commits.push(__elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.commits.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowBoundary {
+    const PROTO_FQN: &'static str = "kit.rpc.v1.ssh.DownloadWindowBoundary";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }

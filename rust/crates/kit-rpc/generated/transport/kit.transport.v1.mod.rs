@@ -86,6 +86,14 @@ pub mod __buffa {
         #[cfg(feature = "json")]
         reg.register_json_any(super::__DOWNLOAD_PACK_RESPONSE_JSON_ANY);
         #[cfg(feature = "json")]
+        reg.register_json_any(super::__DOWNLOAD_WINDOW_REQUEST_JSON_ANY);
+        #[cfg(feature = "json")]
+        reg.register_json_any(super::__DOWNLOAD_WINDOW_BOUNDARY_JSON_ANY);
+        #[cfg(feature = "json")]
+        reg.register_json_any(super::__DOWNLOAD_WINDOW_RESPONSE_JSON_ANY);
+        #[cfg(feature = "json")]
+        reg.register_json_any(super::__DOWNLOAD_WINDOW_PACK_JSON_ANY);
+        #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_SERVER_INFO_REQUEST_JSON_ANY);
         #[cfg(feature = "json")]
         reg.register_json_any(super::__GET_SERVER_INFO_RESPONSE_JSON_ANY);
@@ -306,6 +314,30 @@ pub use self::__buffa::view::DownloadPackResponseView;
 #[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::DownloadPackResponseOwnedView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowRequestView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowRequestOwnedView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowBoundaryView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowBoundaryOwnedView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowResponseView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowResponseOwnedView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowPackView;
+#[cfg(feature = "transport-messages")]
+#[doc(inline)]
+pub use self::__buffa::view::DownloadWindowPackOwnedView;
 #[cfg(feature = "transport-messages")]
 #[doc(inline)]
 pub use self::__buffa::view::GetServerInfoRequestView;

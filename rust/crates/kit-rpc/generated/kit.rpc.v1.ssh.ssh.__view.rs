@@ -629,6 +629,99 @@ impl<'a> ::buffa::MessageView<'a> for SshFrameView<'a> {
                     );
                 }
             }
+            27u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindow(
+                        ref mut existing,
+                    ),
+                ) = view.body
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.body = Some(
+                        super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindow(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::DownloadWindowView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            28u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowPack(
+                        ref mut existing,
+                    ),
+                ) = view.body
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.body = Some(
+                        super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowPack(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::DownloadWindowPackView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
+            29u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __sub_ctx = ctx.descend()?;
+                let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                if let Some(
+                    super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                        ref mut existing,
+                    ),
+                ) = view.body
+                {
+                    ::buffa::MessageView::merge_into_view(
+                        &mut **existing,
+                        sub,
+                        __sub_ctx,
+                    )?;
+                } else {
+                    view.body = Some(
+                        super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                            ::buffa::alloc::boxed::Box::new(
+                                <super::super::__buffa::view::DownloadWindowBoundaryView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            ),
+                        ),
+                    );
+                }
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -826,6 +919,33 @@ impl<'a> ::buffa::MessageView<'a> for SshFrameView<'a> {
                                     ),
                                 )
                             }
+                            super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindow(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::ssh_frame::Body::DownloadWindow(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowPack(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::ssh_frame::Body::DownloadWindowPack(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
+                            super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                                v,
+                            ) => {
+                                super::super::__buffa::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        v.to_owned_from_source(__buffa_src)?,
+                                    ),
+                                )
+                            }
                         },
                     )
                 }
@@ -1014,6 +1134,36 @@ impl<'a> ::buffa::ViewEncode<'a> for SshFrameView<'a> {
                         += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
                             + inner as u64;
                 }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindow(
+                    x,
+                ) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowPack(
+                    x,
+                ) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                    x,
+                ) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
             }
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -1194,6 +1344,36 @@ impl<'a> ::buffa::ViewEncode<'a> for SshFrameView<'a> {
                 super::super::__buffa::view::oneof::ssh_frame::Body::PackChunk(x) => {
                     ::buffa::types::put_len_delimited_header(
                         26u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindow(
+                    x,
+                ) => {
+                    ::buffa::types::put_len_delimited_header(
+                        27u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowPack(
+                    x,
+                ) => {
+                    ::buffa::types::put_len_delimited_header(
+                        28u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                super::super::__buffa::view::oneof::ssh_frame::Body::DownloadWindowBoundary(
+                    x,
+                ) => {
+                    ::buffa::types::put_len_delimited_header(
+                        29u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -1573,6 +1753,11 @@ pub struct HelloResponseView<'a> {
     >,
     /// Field 2: `server_id`
     pub server_id: ::core::option::Option<&'a str>,
+    /// Whether the server answers DownloadWindow (SPEC-SHALLOW §8.2). A client
+    /// never sends DownloadWindow to a server that does not set it.
+    ///
+    /// Field 3: `download_window`
+    pub download_window: ::core::option::Option<bool>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for HelloResponseView<'a> {
@@ -1621,6 +1806,13 @@ impl<'a> ::buffa::MessageView<'a> for HelloResponseView<'a> {
                 )?;
                 view.server_id = Some(::buffa::types::borrow_str(&mut cur)?);
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.download_window = Some(::buffa::types::decode_bool(&mut cur)?);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -1645,6 +1837,7 @@ impl<'a> ::buffa::MessageView<'a> for HelloResponseView<'a> {
         ::core::result::Result::Ok(super::super::HelloResponse {
             proto: self.proto,
             server_id: self.server_id.map(|s| s.to_string()),
+            download_window: self.download_window,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -1662,6 +1855,9 @@ impl<'a> ::buffa::ViewEncode<'a> for HelloResponseView<'a> {
         if let Some(ref v) = self.server_id {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        if self.download_window.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1678,6 +1874,9 @@ impl<'a> ::buffa::ViewEncode<'a> for HelloResponseView<'a> {
         }
         if let Some(ref v) = self.server_id {
             ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if let Some(v) = self.download_window {
+            ::buffa::types::put_bool_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1783,6 +1982,14 @@ impl HelloResponseOwnedView {
     #[must_use]
     pub fn server_id(&self) -> ::core::option::Option<&'_ str> {
         self.0.reborrow().server_id
+    }
+    /// Whether the server answers DownloadWindow (SPEC-SHALLOW §8.2). A client
+    /// never sends DownloadWindow to a server that does not set it.
+    ///
+    /// Field 3: `download_window`
+    #[must_use]
+    pub fn download_window(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().download_window
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<HelloResponseView<'static>>>
@@ -5514,4 +5721,746 @@ for PackChunkOwnedView {
 impl ::buffa::HasMessageView for super::super::PackChunk {
     type View<'a> = PackChunkView<'a>;
     type ViewHandle = PackChunkOwnedView;
+}
+/// ----------------------------------------------------------------------------
+/// Shallow windows (SPEC-SHALLOW §8.2).
+///
+/// The window of `tips` at `depth`, less what the client holds. At most
+/// 1,000 tips and 1,000 `have` commits, each a raw 32-byte commit id;
+/// `depth` from 1 to 2^31 - 1. The server answers with one or more packs,
+/// each a DownloadWindowPack followed by its PackChunk frames, then one
+/// DownloadWindowBoundary, or with Error.
+#[derive(Clone, Debug, Default)]
+pub struct DownloadWindowView<'a> {
+    /// Field 1: `tips`
+    pub tips: ::buffa::RepeatedView<'a, &'a [u8]>,
+    /// Field 2: `depth`
+    pub depth: ::core::option::Option<u32>,
+    /// Field 3: `have`
+    pub have: ::buffa::RepeatedView<'a, &'a [u8]>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for DownloadWindowView<'a> {
+    type Owned = super::super::DownloadWindow;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        let __elem = ::core::cell::Cell::new(::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                .with_element_memory(&__elem),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.depth = Some(::buffa::types::decode_uint32(&mut cur)?);
+            }
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.tips.push(__elem);
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.have.push(__elem);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::DownloadWindow, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::DownloadWindow, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::DownloadWindow {
+            tips: self.tips.iter().map(|b| (b).to_vec()).collect(),
+            depth: self.depth,
+            have: self.have.iter().map(|b| (b).to_vec()).collect(),
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for DownloadWindowView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.tips {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.depth {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        for v in &self.have {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.tips {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.depth {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        for v in &self.have {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+impl<'a> ::buffa::MessageName for DownloadWindowView<'a> {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindow";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindow";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindow";
+}
+::buffa::impl_default_view_instance!(DownloadWindowView);
+::buffa::impl_view_reborrow!(DownloadWindowView);
+/** Self-contained, `'static` owned view of a `DownloadWindow` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`DownloadWindowView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`DownloadWindowView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct DownloadWindowOwnedView(::buffa::OwnedView<DownloadWindowView<'static>>);
+impl DownloadWindowOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::DownloadWindow,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`DownloadWindowView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &DownloadWindowView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::DownloadWindow {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `tips`
+    #[must_use]
+    pub fn tips(&self) -> &::buffa::RepeatedView<'_, &'_ [u8]> {
+        &self.0.reborrow().tips
+    }
+    /// Field 2: `depth`
+    #[must_use]
+    pub fn depth(&self) -> ::core::option::Option<u32> {
+        self.0.reborrow().depth
+    }
+    /// Field 3: `have`
+    #[must_use]
+    pub fn have(&self) -> &::buffa::RepeatedView<'_, &'_ [u8]> {
+        &self.0.reborrow().have
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<DownloadWindowView<'static>>>
+for DownloadWindowOwnedView {
+    fn from(inner: ::buffa::OwnedView<DownloadWindowView<'static>>) -> Self {
+        DownloadWindowOwnedView(inner)
+    }
+}
+impl ::core::convert::From<DownloadWindowOwnedView>
+for ::buffa::OwnedView<DownloadWindowView<'static>> {
+    fn from(wrapper: DownloadWindowOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<DownloadWindowView<'static>>>
+for DownloadWindowOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<DownloadWindowView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::DownloadWindow {
+    type View<'a> = DownloadWindowView<'a>;
+    type ViewHandle = DownloadWindowOwnedView;
+}
+/// Starts the next pack of a window: its id and exact length.
+#[derive(Clone, Debug, Default)]
+pub struct DownloadWindowPackView<'a> {
+    /// Field 1: `pack_id`
+    pub pack_id: ::core::option::Option<&'a [u8]>,
+    /// Field 2: `total_bytes`
+    pub total_bytes: ::core::option::Option<u64>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for DownloadWindowPackView<'a> {
+    type Owned = super::super::DownloadWindowPack;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        let __elem = ::core::cell::Cell::new(::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                .with_element_memory(&__elem),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                view.pack_id = Some(::buffa::types::borrow_bytes(&mut cur)?);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.total_bytes = Some(::buffa::types::decode_uint64(&mut cur)?);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<super::super::DownloadWindowPack, ::buffa::DecodeError> {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<super::super::DownloadWindowPack, ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::DownloadWindowPack {
+            pack_id: self.pack_id.map(|b| (b).to_vec()),
+            total_bytes: self.total_bytes,
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for DownloadWindowPackView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.pack_id {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.total_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.pack_id {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.total_bytes {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+impl<'a> ::buffa::MessageName for DownloadWindowPackView<'a> {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindowPack";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindowPack";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowPack";
+}
+::buffa::impl_default_view_instance!(DownloadWindowPackView);
+::buffa::impl_view_reborrow!(DownloadWindowPackView);
+/** Self-contained, `'static` owned view of a `DownloadWindowPack` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`DownloadWindowPackView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`DownloadWindowPackView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct DownloadWindowPackOwnedView(
+    ::buffa::OwnedView<DownloadWindowPackView<'static>>,
+);
+impl DownloadWindowPackOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowPackOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowPackOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::DownloadWindowPack,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowPackOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`DownloadWindowPackView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &DownloadWindowPackView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::DownloadWindowPack {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `pack_id`
+    #[must_use]
+    pub fn pack_id(&self) -> ::core::option::Option<&'_ [u8]> {
+        self.0.reborrow().pack_id
+    }
+    /// Field 2: `total_bytes`
+    #[must_use]
+    pub fn total_bytes(&self) -> ::core::option::Option<u64> {
+        self.0.reborrow().total_bytes
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<DownloadWindowPackView<'static>>>
+for DownloadWindowPackOwnedView {
+    fn from(inner: ::buffa::OwnedView<DownloadWindowPackView<'static>>) -> Self {
+        DownloadWindowPackOwnedView(inner)
+    }
+}
+impl ::core::convert::From<DownloadWindowPackOwnedView>
+for ::buffa::OwnedView<DownloadWindowPackView<'static>> {
+    fn from(wrapper: DownloadWindowPackOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<DownloadWindowPackView<'static>>>
+for DownloadWindowPackOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<DownloadWindowPackView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::DownloadWindowPack {
+    type View<'a> = DownloadWindowPackView<'a>;
+    type ViewHandle = DownloadWindowPackOwnedView;
+}
+/// The boundary the server computed, advisory: the client computes it again
+/// from the objects it received and refuses a response whose list differs.
+/// It ends the window.
+#[derive(Clone, Debug, Default)]
+pub struct DownloadWindowBoundaryView<'a> {
+    /// Field 1: `commits`
+    pub commits: ::buffa::RepeatedView<'a, &'a [u8]>,
+    pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+}
+impl<'a> ::buffa::MessageView<'a> for DownloadWindowBoundaryView<'a> {
+    type Owned = super::super::DownloadWindowBoundary;
+    fn decode_view(buf: &'a [u8]) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        let __limit = ::core::cell::Cell::new(::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
+        let __elem = ::core::cell::Cell::new(::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT);
+        <Self as ::buffa::MessageView>::decode_view_ctx(
+            buf,
+            ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                .with_element_memory(&__elem),
+        )
+    }
+    fn decode_view_with_ctx(
+        buf: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+    }
+    #[inline]
+    fn merge_view_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        cur: &'a [u8],
+        before_tag: &'a [u8],
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+        let _ = ctx;
+        #[allow(unused_variables)]
+        let view = self;
+        let mut cur = cur;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.commits.push(__elem);
+            }
+            _ => {
+                ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                let span_len = before_tag.len() - cur.len();
+                view.__buffa_unknown_fields.push_record(before_tag, span_len, ctx)?;
+            }
+        }
+        ::core::result::Result::Ok(cur)
+    }
+    fn to_owned_message(
+        &self,
+    ) -> ::core::result::Result<
+        super::super::DownloadWindowBoundary,
+        ::buffa::DecodeError,
+    > {
+        self.to_owned_from_source(None)
+    }
+    #[allow(clippy::useless_conversion, clippy::needless_update)]
+    fn to_owned_from_source(
+        &self,
+        __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+    ) -> ::core::result::Result<
+        super::super::DownloadWindowBoundary,
+        ::buffa::DecodeError,
+    > {
+        #[allow(unused_imports)]
+        use ::buffa::alloc::string::ToString as _;
+        let _ = __buffa_src;
+        ::core::result::Result::Ok(super::super::DownloadWindowBoundary {
+            commits: self.commits.iter().map(|b| (b).to_vec()).collect(),
+            __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
+            ..::core::default::Default::default()
+        })
+    }
+}
+impl<'a> ::buffa::ViewEncode<'a> for DownloadWindowBoundaryView<'a> {
+    #[allow(clippy::needless_borrow, clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.commits {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    #[allow(clippy::needless_borrow)]
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.commits {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+}
+impl<'a> ::buffa::MessageName for DownloadWindowBoundaryView<'a> {
+    const PACKAGE: &'static str = "kit.rpc.v1.ssh";
+    const NAME: &'static str = "DownloadWindowBoundary";
+    const FULL_NAME: &'static str = "kit.rpc.v1.ssh.DownloadWindowBoundary";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.DownloadWindowBoundary";
+}
+::buffa::impl_default_view_instance!(DownloadWindowBoundaryView);
+::buffa::impl_view_reborrow!(DownloadWindowBoundaryView);
+/** Self-contained, `'static` owned view of a `DownloadWindowBoundary` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`DownloadWindowBoundaryView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`DownloadWindowBoundaryView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+#[derive(Clone, Debug)]
+pub struct DownloadWindowBoundaryOwnedView(
+    ::buffa::OwnedView<DownloadWindowBoundaryView<'static>>,
+);
+impl DownloadWindowBoundaryOwnedView {
+    /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+    ///
+    /// The view borrows directly from the buffer's data; the buffer is
+    /// retained inside the returned handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+    /// protobuf data.
+    pub fn decode(
+        bytes: ::buffa::bytes::Bytes,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowBoundaryOwnedView(::buffa::OwnedView::decode(bytes)?),
+        )
+    }
+    /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+    /// max message size).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+    /// exceeds the configured limits.
+    pub fn decode_with_options(
+        bytes: ::buffa::bytes::Bytes,
+        opts: &::buffa::DecodeOptions,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowBoundaryOwnedView(
+                ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+            ),
+        )
+    }
+    /// Build from an owned message via an encode → decode round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+    /// message's encoded size exceeds the 2 GiB protobuf limit, or
+    /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+    /// somehow invalid (should not happen for well-formed messages).
+    pub fn from_owned(
+        msg: &super::super::DownloadWindowBoundary,
+    ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+        ::core::result::Result::Ok(
+            DownloadWindowBoundaryOwnedView(::buffa::OwnedView::from_owned(msg)?),
+        )
+    }
+    /// Borrow the full [`DownloadWindowBoundaryView`] with its lifetime tied to `&self`.
+    #[must_use]
+    pub fn view(&self) -> &DownloadWindowBoundaryView<'_> {
+        self.0.reborrow()
+    }
+    /// Convert to the owned message type.
+    ///
+    /// Infallible: this type's constructors wire-decode their
+    /// buffer, and a view produced by wire decoding always
+    /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+    /// whose contract also governs handles converted from a raw
+    /// [`::buffa::OwnedView`].
+    #[must_use]
+    pub fn to_owned_message(&self) -> super::super::DownloadWindowBoundary {
+        self.0.to_owned_message()
+    }
+    /// The underlying bytes buffer.
+    #[must_use]
+    pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+        self.0.bytes()
+    }
+    /// Consume the handle, returning the underlying bytes buffer.
+    #[must_use]
+    pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+        self.0.into_bytes()
+    }
+    /// Field 1: `commits`
+    #[must_use]
+    pub fn commits(&self) -> &::buffa::RepeatedView<'_, &'_ [u8]> {
+        &self.0.reborrow().commits
+    }
+}
+impl ::core::convert::From<::buffa::OwnedView<DownloadWindowBoundaryView<'static>>>
+for DownloadWindowBoundaryOwnedView {
+    fn from(inner: ::buffa::OwnedView<DownloadWindowBoundaryView<'static>>) -> Self {
+        DownloadWindowBoundaryOwnedView(inner)
+    }
+}
+impl ::core::convert::From<DownloadWindowBoundaryOwnedView>
+for ::buffa::OwnedView<DownloadWindowBoundaryView<'static>> {
+    fn from(wrapper: DownloadWindowBoundaryOwnedView) -> Self {
+        wrapper.0
+    }
+}
+impl ::core::convert::AsRef<::buffa::OwnedView<DownloadWindowBoundaryView<'static>>>
+for DownloadWindowBoundaryOwnedView {
+    fn as_ref(&self) -> &::buffa::OwnedView<DownloadWindowBoundaryView<'static>> {
+        &self.0
+    }
+}
+impl ::buffa::HasMessageView for super::super::DownloadWindowBoundary {
+    type View<'a> = DownloadWindowBoundaryView<'a>;
+    type ViewHandle = DownloadWindowBoundaryOwnedView;
 }
