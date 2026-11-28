@@ -30,6 +30,8 @@ exclude_re = [
   'kit-keystore/src/backend.rs:.*replace open_(macos_keychain|linux_secret_service)_backend .*with Ok\(Box::new\(Default::default\(\)\)\)',
   # This Linux-only lock guards the native credential adapter, which is not compiled on macOS.
   'kit-keystore/src/lib.rs:.*keyring_default_store_lock',
+  # The removed path leaves the map before the shift, so no position equals `pos` and > and >= agree.
+  'kit-core/src/index\.rs:.*replace > with >= in Index::remove_entry_at$',
   # Equality returns Retry first, so > and >= make the same epoch decision.
   'grant/epoch\.rs:.*replace > with >= in epoch_transition$',
   # :: and ::1 already map to local IPv4, so the first OR is redundant.

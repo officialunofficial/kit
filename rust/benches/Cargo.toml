@@ -81,6 +81,10 @@ harness = false
 name = "chunker_dedup"
 harness = false
 
+[[bench]]
+name = "index_remove"
+harness = false
+
 # Concurrent writers against one remote root. Not a criterion suite: each
 # row times many threads at once and checks the result.
 [[bin]]

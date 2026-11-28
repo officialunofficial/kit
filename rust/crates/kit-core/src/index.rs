@@ -245,16 +245,22 @@ impl Index {
     }
 
     /// Remove and return the entry at `pos`. `O(n)` — same asymptotic cost
-    /// as the underlying `Vec::remove` shift (every later entry's position
-    /// changes), so `by_path` is fully rebuilt. Intended for single-path
-    /// removals (`rm`/`restore`/conflict abort), not a per-file staging
-    /// loop.
+    /// as the underlying `Vec::remove` shift. `by_path` drops the removed
+    /// key and shifts each later position down in place, with no path
+    /// clones. Intended for single-path removals (`rm`/`restore`/conflict
+    /// abort), not a per-file staging loop.
     ///
     /// # Panics
     /// Panics if `pos >= self.entries.len()` (same as `Vec::remove`).
     pub fn remove_entry_at(&mut self, pos: usize) -> IndexEntry {
         let removed = self.entries.remove(pos);
-        self.rebuild_path_index();
+        self.by_path.remove(removed.path.as_str());
+        for p in self.by_path.values_mut() {
+            if *p > pos {
+                *p -= 1;
+            }
+        }
+        self.debug_assert_consistent();
         removed
     }
 
@@ -1702,6 +1708,24 @@ mod tests {
         assert_eq!(idx.entries[pos].status, EntryStatus::Executable);
         // The unrelated entry's position is untouched.
         assert_eq!(idx.find_entry("b.txt"), Some(1));
+    }
+
+    /// Removing the first, a middle and the last entry in turn keeps every
+    /// remaining path mapped to its own position.
+    #[test]
+    fn remove_entry_at_keeps_every_position_exact() {
+        let mut idx = Index::new();
+        for name in ["a", "b", "c", "d", "e"] {
+            idx.upsert_entry(blob_entry(name));
+        }
+        for victim in ["a", "c", "e"] {
+            assert!(idx.remove_path(victim).is_some());
+            for (i, e) in idx.entries.iter().enumerate() {
+                assert_eq!(idx.find_entry(&e.path), Some(i));
+            }
+            assert_eq!(idx.find_entry(victim), None);
+        }
+        assert_eq!(idx.entries.len(), 2);
     }
 
     /// `remove_path` drops the entry and shifts later positions in the map
