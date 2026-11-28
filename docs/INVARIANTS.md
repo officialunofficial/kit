@@ -1303,3 +1303,27 @@ merge runs against a base the repository never saw.
 **Enforced by:** `kit_core::shallow` unit and property tests (the parser
 against its encoder, the exact record of SH2 on random graphs), the
 `shallow_record` fuzz target, and `kit-bin/tests/shallow.rs` for each command.
+
+## A shallow window is a function of the commit graph
+
+**Always:** the window of a set of `(tip, depth)` pairs holds exactly the
+commits at a shortest parent distance of less than the depth from some tip,
+and its boundary is the window's commits with a parent in no window, which is
+the record SH2 demands for a repository that holds exactly the window. A
+depth at or above the longest parent path from the tip gives the whole
+history and an empty boundary. The objects sent for a window are each window
+commit and its snapshot closure, less the snapshot closure of each commit the
+client holds (SPEC-SHALLOW SH3 and SH4).
+
+**Because:** the client computes the boundary again from the objects it
+receives and refuses a response whose list differs. That check needs the
+server and the client to compute one answer from one graph.
+
+**If violated:** two servers with the same objects send different windows, a
+client refuses an honest response, or a full-depth clone lacks part of the
+history.
+
+**Enforced by:** `kit_core::shallow::window` property tests against a
+breadth-first reference on random graphs, the SH2 cross-check with
+`exact_record`, and unit tests of `window_objects` and `window_packs` over a
+store.

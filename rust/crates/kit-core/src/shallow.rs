@@ -14,6 +14,13 @@
 //! in the record has no parents. [`check`] tests the exactness rule SH2 over
 //! a parents callback, and [`exact_record`] computes the record SH2 demands.
 
+mod window;
+
+pub use window::{
+    MAX_DEPTH, MAX_WINDOW_COMMITS, MAX_WINDOW_TIPS, Window, WindowError, window, window_in,
+    window_objects, window_packs,
+};
+
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io;
