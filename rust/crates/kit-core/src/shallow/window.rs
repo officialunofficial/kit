@@ -248,8 +248,33 @@ pub fn check_received(
     depth: u32,
     listed: &[Hash],
 ) -> Result<Window, ReceivedError> {
-    let _ = (store, tips, depth, listed);
-    Err(ReceivedError::BoundaryMismatch)
+    let tips: Vec<(Hash, u32)> = tips.iter().map(|t| (*t, depth)).collect();
+    let window = match window_in(store, &tips) {
+        Ok(window) => window,
+        Err(WindowError::Missing(id)) => return Err(ReceivedError::Incomplete(id)),
+        Err(e) => return Err(e.into()),
+    };
+    if Boundary::new(listed.iter().copied()) != window.boundary
+        || listed.len() != window.boundary.len()
+    {
+        return Err(ReceivedError::BoundaryMismatch);
+    }
+    for commit in &window.commits {
+        if let Err(missing) = snapshot_present(store, commit) {
+            return Err(ReceivedError::Incomplete(missing));
+        }
+    }
+    Ok(window)
+}
+
+/// Whether the snapshot closure of `commit` is in `store`: `Err` names the
+/// first absent object.
+fn snapshot_present(store: &ObjectStore, commit: &Hash) -> Result<(), Hash> {
+    match reachable_snapshot(store, commit) {
+        Ok(_) => Ok(()),
+        Err(StoreError::ObjectNotFound(hex)) => Err(crate::hash::from_hex(&hex).unwrap_or(*commit)),
+        Err(_) => Err(*commit),
+    }
 }
 
 #[cfg(test)]
