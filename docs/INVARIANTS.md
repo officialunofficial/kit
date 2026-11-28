@@ -1284,11 +1284,13 @@ refuses any other file with a typed error, and a writer replaces it under
 `shallow.lock` by an atomic rename, removing it when the boundary is empty.
 Every history walk (`log`, `rev-list`, `shortlog`, `gc`, the history check of
 `closure verify`) treats a commit in the record as having no parents. A
-merge base search that reaches the record fails with "the merge base is
-beyond the shallow boundary" and never returns a base it could not prove.
+merge base search fails with "the merge base is beyond the shallow
+boundary" when a common ancestor past the record could be nearer than the
+base it found, so it never returns a base it could not prove.
 `closure verify --history` refuses a record that names a reachable commit
 whose parents are all present, or that leaves out a reachable commit with a
-missing parent (SPEC-SHALLOW SH2).
+missing parent (SPEC-SHALLOW SH1 and SH2: every object the window reaches
+is present, and the record is exact).
 
 **Because:** a shallow repository lacks the parents of its boundary commits.
 A walk that followed them would fail on a missing object, and a merge that
