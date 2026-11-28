@@ -33,6 +33,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::durable::Parents;
@@ -735,7 +736,7 @@ fn restore_tree_to_worktree_impl<F>(
     batch_size: usize,
     base_tree: Option<Hash>,
     read_chunks: &F,
-    observed: Option<&mut Vec<worktree::StatObservation>>,
+    mut observed: Option<&mut Vec<worktree::StatObservation>>,
     mut progress: Option<&mut dyn FnMut(usize, usize)>,
     check_skipped: bool,
 ) -> RestoreResult<RestoreReport>
@@ -780,6 +781,7 @@ where
     }
     let mut report = RestoreReport::default();
     let mut last_progress = std::time::Instant::now();
+    let mut pending = PendingWrites::default();
     restore_tree_to_worktree_inner(
         store,
         *tree,
@@ -793,12 +795,14 @@ where
         batch_size,
         base_tree,
         read_chunks,
-        observed,
+        observed.as_deref_mut(),
         &mut progress,
         total,
         &mut last_progress,
         &case_rename_sources,
+        &mut pending,
     )?;
+    pending.flush(store, batch_size, read_chunks, &mut report, observed)?;
     if let Some(callback) = progress.as_mut() {
         callback(
             (report.files_written + report.symlinks_written) as usize,
@@ -827,6 +831,7 @@ fn restore_tree_to_worktree_inner<F>(
     total: usize,
     last_progress: &mut std::time::Instant,
     case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
+    pending: &mut PendingWrites,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -862,20 +867,8 @@ where
         remove_stale_temps(target_dir, &tree.entries, case_rename_sources);
     }
 
-    let mut written = write_files_in_parallel(
-        store,
-        &tree.entries,
-        &base_entries,
-        target_dir,
-        sparse,
-        path_prefix,
-        batch_size,
-        read_chunks,
-        observed.is_some(),
-        case_rename_sources,
-    );
-
-    for (index, entry) in tree.entries.iter().enumerate() {
+    let mut shared_dir: Option<Arc<Path>> = None;
+    for entry in &tree.entries {
         if !crate::object::TreeEntry::validate_name(&entry.name) {
             continue;
         }
@@ -907,20 +900,37 @@ where
                 if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
-                let result = match written.get_mut(index).and_then(Option::take) {
-                    Some(result) => result,
-                    None => restore_blob_with(
-                        store,
-                        target_dir,
-                        name,
-                        entry.object_hash,
-                        entry.mode == EntryMode::Executable,
-                        batch_size,
-                        read_chunks,
-                        observed.is_some(),
-                        case_source,
-                    ),
-                };
+                if case_source.is_none() {
+                    let dir = shared_dir.get_or_insert_with(|| Arc::from(target_dir));
+                    pending.jobs.push(PendingWrite {
+                        dir: Arc::clone(dir),
+                        name: name.to_string(),
+                        full_path,
+                        object_hash: entry.object_hash,
+                        executable: entry.mode == EntryMode::Executable,
+                    });
+                    if pending.jobs.len() >= PENDING_WRITES {
+                        pending.flush(
+                            store,
+                            batch_size,
+                            read_chunks,
+                            report,
+                            observed.as_deref_mut(),
+                        )?;
+                    }
+                    continue;
+                }
+                let result = restore_blob_with(
+                    store,
+                    target_dir,
+                    name,
+                    entry.object_hash,
+                    entry.mode == EntryMode::Executable,
+                    batch_size,
+                    read_chunks,
+                    observed.is_some(),
+                    case_source,
+                );
                 let stat = at_path(result, &full_path)?;
                 report.files_written += 1;
                 if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
@@ -957,6 +967,7 @@ where
                     total,
                     last_progress,
                     case_rename_sources,
+                    pending,
                 )?;
             }
             EntryMode::Symlink => {
@@ -983,104 +994,79 @@ where
     Ok(())
 }
 
-/// The fewest files of one directory that [`write_files_in_parallel`] writes
-/// on several threads. Fewer are written in the walk, one at a time.
-#[cfg(not(target_arch = "wasm32"))]
-const PARALLEL_FILES: usize = 16;
+/// The regular-file writes the walk collects before it writes them
+/// together. Enough to keep every thread busy on files of several
+/// directories, since files of one directory contend for its lock.
+const PENDING_WRITES: usize = 4096;
 
-/// Write the regular files of one directory of the walk on several threads,
-/// before the walk visits them: the outcome of each, by its index in
-/// `entries`, or no outcome for an entry the walk writes itself. A file the
-/// walk skips is not written here: an invalid name, one the base tree already
-/// holds, one outside the sparse cone, and the target of a case-only rename.
+/// A regular file the walk found to write: [`restore_blob_with`] with no
+/// case-only rename source.
+struct PendingWrite {
+    dir: Arc<Path>,
+    name: String,
+    full_path: String,
+    object_hash: Hash,
+    executable: bool,
+}
+
+/// Regular files the walk hands off and writes together, on several
+/// threads, in batches of up to [`PENDING_WRITES`] that span directories.
 /// Each write is the one the walk would make, so every byte is verified and
-/// each file is published whole, as in the walk. An error is reported by the
-/// walk at its entry.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn write_files_in_parallel<F>(
-    store: &ObjectStore,
-    entries: &[TreeEntry],
-    base_entries: &std::collections::HashMap<&[u8], &TreeEntry>,
-    target_dir: &Path,
-    sparse: Option<&SparseMatcher<'_>>,
-    path_prefix: &str,
-    batch_size: usize,
-    read_chunks: &F,
-    observe: bool,
-    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
-) -> Vec<Option<RestoreResult<Option<StatFields>>>>
-where
-    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
-{
-    use rayon::prelude::*;
+/// each file is published whole. Outcomes are taken in walk order: the
+/// first failed file in that order is the error, and the files written and
+/// their observations count as the walk counts them.
+///
+/// The walk never reads a file it hands off: names in a tree are unique,
+/// and directories are swept and their ignore files loaded before their
+/// files are written.
+#[derive(Default)]
+struct PendingWrites {
+    jobs: Vec<PendingWrite>,
+}
 
-    let files: Vec<(usize, &str)> = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| matches!(entry.mode, EntryMode::Blob | EntryMode::Executable))
-        .filter(|(_, entry)| TreeEntry::validate_name(&entry.name))
-        .filter(|(_, entry)| {
-            !base_entries
-                .get(entry.name.as_slice())
-                .is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash)
-        })
-        .filter_map(|(index, entry)| Some((index, std::str::from_utf8(&entry.name).ok()?)))
-        .filter(|(_, name)| {
-            let full_path = name_path(path_prefix, name);
-            !case_rename_sources.contains_key(&full_path)
-                && sparse.is_none_or(|m| m.matches(&full_path, false))
-        })
-        .collect();
-    let mut written: Vec<Option<RestoreResult<Option<StatFields>>>> = Vec::new();
-    if files.len() < PARALLEL_FILES {
-        return written;
-    }
-    written.resize_with(entries.len(), || None);
-    let outcomes: Vec<_> = files
-        .par_iter()
-        .map(|&(index, name)| {
-            let entry = &entries[index];
-            let outcome = restore_blob_with(
+impl PendingWrites {
+    fn flush<F>(
+        &mut self,
+        store: &ObjectStore,
+        batch_size: usize,
+        read_chunks: &F,
+        report: &mut RestoreReport,
+        mut observed: Option<&mut Vec<worktree::StatObservation>>,
+    ) -> RestoreResult<()>
+    where
+        F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+    {
+        let jobs = std::mem::take(&mut self.jobs);
+        let observe = observed.is_some();
+        let write = |job: &PendingWrite| {
+            restore_blob_with(
                 store,
-                target_dir,
-                name,
-                entry.object_hash,
-                entry.mode == EntryMode::Executable,
+                &job.dir,
+                &job.name,
+                job.object_hash,
+                job.executable,
                 batch_size,
                 read_chunks,
                 observe,
                 None,
-            );
-            (index, outcome)
-        })
-        .collect();
-    for (index, outcome) in outcomes {
-        written[index] = Some(outcome);
+            )
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let outcomes: Vec<_> = {
+            use rayon::prelude::*;
+            jobs.par_iter().map(write).collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let outcomes: Vec<_> = jobs.iter().map(write).collect();
+        for (job, outcome) in jobs.into_iter().zip(outcomes) {
+            let stat = at_path(outcome, &job.full_path)?;
+            report.files_written += 1;
+            if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
+                out.push(observation(job.full_path, job.object_hash, stat));
+            }
+        }
+        Ok(())
     }
-    written
-}
-
-/// [`write_files_in_parallel`] on a target without threads: the walk writes
-/// every file itself.
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn write_files_in_parallel<F>(
-    _: &ObjectStore,
-    _: &[TreeEntry],
-    _: &std::collections::HashMap<&[u8], &TreeEntry>,
-    _: &Path,
-    _: Option<&SparseMatcher<'_>>,
-    _: &str,
-    _: usize,
-    _: &F,
-    _: bool,
-    _: &std::collections::HashMap<String, CaseRenameSource>,
-) -> Vec<Option<RestoreResult<Option<StatFields>>>>
-where
-    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
-{
-    Vec::new()
 }
 
 /// Materialise `tree_hash` into `target_dir`. See module docs for the
@@ -4630,15 +4616,14 @@ mod tests {
         check(&observed, &[("a", a2)]);
     }
 
-    /// A directory with many files is written on several threads, with the
-    /// same bytes, modes and observations as the walk, in tree order. A file
-    /// the base already holds is left alone, and a failed file is reported
-    /// at its path.
+    /// Files handed off by the walk are written with the same bytes, modes
+    /// and observations as the walk, in tree order. A file the base already
+    /// holds is left alone, and a missing blob fails the restore.
     #[test]
-    fn a_wide_directory_is_written_in_parallel_as_the_walk_writes_it() {
+    fn handed_off_files_are_written_as_the_walk_writes_them() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
-        let count = PARALLEL_FILES * 2 + 3;
+        let count = 35;
         let names: Vec<String> = (0..count).map(|n| format!("f{n:02}")).collect();
         let entries = |skip: Option<usize>, changed: bool| {
             let entries = names
@@ -4736,6 +4721,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains(&"ab".repeat(32)), "{err}");
+    }
+
+    /// Files of several directories are written in one batch, and each
+    /// lands in its own directory, past a batch boundary too.
+    #[test]
+    fn files_of_many_directories_land_in_their_own_directories() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let file = |name: String, data: &[u8]| TreeEntry {
+            name: name.into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: put_blob(&store, data),
+        };
+        let per_dir = PENDING_WRITES / 8 + 1;
+        let dirs: Vec<TreeEntry> = (0..9)
+            .map(|d| {
+                let files = (0..per_dir)
+                    .map(|f| file(format!("f{f:04}"), format!("{d}/{f}").as_bytes()))
+                    .collect();
+                TreeEntry {
+                    name: format!("d{d}").into_bytes(),
+                    mode: EntryMode::Tree,
+                    object_hash: put_tree_with(&store, files),
+                }
+            })
+            .collect();
+        let tree = put_tree_with(&store, dirs);
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let mut observed = Vec::new();
+        let report = restore_tree_to_worktree_observed(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &rd,
+            Some(&mut observed),
+        )
+        .unwrap();
+        assert_eq!(report.files_written as usize, 9 * per_dir);
+        assert_eq!(observed.len(), 9 * per_dir);
+        for d in 0..9 {
+            for f in [0, per_dir / 2, per_dir - 1] {
+                let path = target.path().join(format!("d{d}/f{f:04}"));
+                assert_eq!(fs::read(path).unwrap(), format!("{d}/{f}").as_bytes());
+            }
+        }
+        assert!(observed.windows(2).all(|w| w[0].path < w[1].path));
     }
 
     /// An observation is refused when the final path no longer holds the
