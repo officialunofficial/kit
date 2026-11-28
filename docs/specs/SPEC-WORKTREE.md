@@ -66,10 +66,13 @@ and may be swept. Both numeric fields are nonempty ASCII digits. The name does
 not contain the name of the file being restored, so it fits any directory
 that holds the restored file. On Linux a restore writes a new file through an
 unnamed `O_TMPFILE` file and links it into place once its bytes are written,
-so an interrupted write of a new name leaves no file at all. A name that
-already exists still takes a temporary name and a rename. A directory with
-many new files may have them written on several threads at once; each file
-is still published whole, and an interrupted restore leaves the same kinds of
+so an interrupted write of a new name leaves no file at all. On other Unix
+systems a restore creates a new name in place, as git does, so an
+interrupted write of a new name can leave a partly written file there;
+recovery then refuses for that path, as for any path that matches neither
+tree. A name that already exists still takes a temporary name and a rename. Regular files,
+from one directory or several, may be written on several threads at once;
+each file is still published whole, and an interrupted restore leaves the same kinds of
 names. Directories,
 symlinks and other names do not qualify. A tracked path is never exempted as a temporary file. Recovery accepts a mixture of old and already
 restored target entries and aligns the index after the restore succeeds.
