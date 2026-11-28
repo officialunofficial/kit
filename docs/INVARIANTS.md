@@ -1275,3 +1275,29 @@ resend an acknowledged part or advance refs without its upload commitment.
 
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
+
+## A shallow repository's walks stop at its record
+
+**Always:** `.kit/shallow` is canonical: sorted 64-hex lines with no
+duplicates, each ending in a newline, never empty, at most 1 MiB. A reader
+refuses any other file with a typed error, and a writer replaces it under
+`shallow.lock` by an atomic rename, removing it when the boundary is empty.
+Every history walk (`log`, `rev-list`, `shortlog`, `gc`, the history check of
+`closure verify`) treats a commit in the record as having no parents. A
+merge base search that reaches the record fails with "the merge base is
+beyond the shallow boundary" and never returns a base it could not prove.
+`closure verify --history` refuses a record that names a reachable commit
+whose parents are all present, or that leaves out a reachable commit with a
+missing parent (SPEC-SHALLOW SH2).
+
+**Because:** a shallow repository lacks the parents of its boundary commits.
+A walk that followed them would fail on a missing object, and a merge that
+guessed a base would merge against the wrong history.
+
+**If violated:** `log` fails or lies about where history starts, `gc`
+refuses a shallow repository or keeps history it was told to drop, and a
+merge runs against a base the repository never saw.
+
+**Enforced by:** `kit_core::shallow` unit and property tests (the parser
+against its encoder, the exact record of SH2 on random graphs), the
+`shallow_record` fuzz target, and `kit-bin/tests/shallow.rs` for each command.
