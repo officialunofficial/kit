@@ -68,13 +68,13 @@ jobs:
             sleep 3
             if [ $tool = kit ]; then "$K" clone -q kit+file://$W/remotes/kit work; else git clone -q file://$W/remotes/git.git work; fi
             sleep 2
-            sudo kill -INT $FS; sleep 2
+            sudo pkill -INT fs_usage || true; sleep 3
             python3 - "fs-$tool.txt" $tool <<'PY'
           import collections, re, sys
           count = collections.Counter(); spent = collections.Counter()
           for line in open(sys.argv[1], errors="replace"):
               parts = line.split()
-              if len(parts) < 4 or not parts[-1].startswith(sys.argv[2]):
+              if len(parts) < 4 or sys.argv[2] not in parts[-1]:
                   continue
               m = re.search(r"\s(\d+\.\d+)( W)?\s+\S+$", line)
               if not m:
@@ -86,4 +86,5 @@ jobs:
           print("FS", sys.argv[2], "TOTAL", sum(count.values()), round(sum(spent.values()) * 1000, 1), "ms")
           PY
           done
-          head -50 fs-kit.txt | sed 's/^/SAMPLE /'
+          grep -E ' kit(\.[0-9]+)?$' fs-kit.txt | sed -n '30000,30080p' | sed 's/^/SAMPLE /'
+          grep -E ' git' fs-git.txt | grep -E 'WrData|rename|open' | sed -n '2000,2040p' | sed 's/^/GSAMPLE /'
