@@ -977,6 +977,50 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Ok((outcome, identity))
     }
 
+    /// `DownloadWindow` (SPEC-SHALLOW §8.2) into `sink`; returns the boundary
+    /// the server listed and the identity that signed the call. The
+    /// response is capped at the window cap plus framing.
+    pub(crate) async fn download_window_with(
+        &self,
+        request: &kit_core::protocol::WindowRequest,
+        opts: Opts<'_>,
+        sink: &mut dyn kit_core::protocol::WindowSink,
+    ) -> Result<(Vec<Hash>, Option<Identity>), Error> {
+        request
+            .validate()
+            .map_err(|_| Error::Invalid("window request"))?;
+        let message = crate::proto::DownloadWindowRequest {
+            tips: request.tips.iter().map(|h| h.to_vec()).collect(),
+            depth: Some(request.depth),
+            have: request.have.iter().map(|h| h.to_vec()).collect(),
+            ..Default::default()
+        };
+        let body = framed(&message.encode_to_vec())?;
+        let commitment = format!("body:{}", to_hex(&hash(&body)));
+        let cap = crate::stream::WINDOW_REPLY_MAX;
+        let limit = usize::try_from(cap + cap / 512 + 8192).unwrap_or(usize::MAX);
+        let mut chunks = crate::stream::Chunks(std::iter::once(Ok(body)));
+        let decoder = crate::stream::Decoder::new(
+            crate::stream::Window::new(sink),
+            limit.min(crate::stream::DOWNLOAD_FRAME_MAX),
+        );
+        let (decoder, identity, _, _) = self
+            .stream_call(
+                "DownloadWindow",
+                Vec::new(),
+                &mut chunks,
+                &commitment,
+                Opts { limit, ..opts },
+                decoder,
+            )
+            .await?;
+        let boundary = decoder
+            .sink
+            .boundary
+            .ok_or(Error::Invalid("window without boundary"))?;
+        Ok((boundary, identity))
+    }
+
     fn apply_ref_hint<B>(request: &mut Request<B>, hint: Option<&str>) -> Result<(), Error> {
         if let Some(hint) = hint {
             if !kit_core::refs::validate_ref_name(hint) {

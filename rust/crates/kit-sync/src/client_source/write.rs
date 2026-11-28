@@ -24,6 +24,15 @@ use super::{ClientSource, Clock, Executor, HttpTransport, Observer, Signer, sour
 use crate::SourceError;
 use kit_client::RequestPolicy;
 
+/// Signed reads: a retry signs a fresh identity.
+const SIGNED_READS: [&str; 5] = [
+    "ReadRef",
+    "ListRefs",
+    "DownloadPack",
+    "DownloadWindow",
+    "PackExists",
+];
+
 /// Host-owned scheduling and admission recovery. Returning `true` retries the
 /// same operation; the host must bound retries and finish any wait first.
 pub trait WriteRecovery {
@@ -378,11 +387,7 @@ impl<
             }
             if let (Some(now), Some(current)) = (now, identity)
                 && (now >= current.expires_at_ms
-                    || (attempt > 1
-                        && matches!(
-                            procedure,
-                            "ReadRef" | "ListRefs" | "DownloadPack" | "PackExists"
-                        ))
+                    || (attempt > 1 && SIGNED_READS.contains(&procedure))
                     || ((definitive
                         || matches!(procedure, "UploadPack" | "UploadPart" | "CompleteUpload"))
                         && current.expires_at_ms.saturating_sub(now) <= margin_ms))

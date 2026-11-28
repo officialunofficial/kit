@@ -851,12 +851,18 @@ impl WindowRequest {
 
 /// Where [`Transport::download_window`] writes the packs of a window.
 pub trait WindowSink {
-    /// Start the next pack: its key and exact length. The returned sink
-    /// takes its bytes.
+    /// Start the next pack: its key and exact length.
     ///
     /// # Errors
     /// The sink's refusal, such as [`TransportError::PayloadTooLarge`].
-    fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<&mut dyn PackSink>;
+    fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<()>;
+
+    /// The next bytes of the pack `begin_pack` started, in order.
+    ///
+    /// # Errors
+    /// Bytes past the declared length, a write with no pack started, or a
+    /// local failure.
+    fn write(&mut self, data: &[u8]) -> TransportResult<()>;
 
     /// The bytes of the pack `begin_pack` started are complete. The sink
     /// checks them against the key.

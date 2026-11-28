@@ -633,6 +633,37 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         )
     }
 
+    /// Whether the server advertises `DownloadWindow` in `GetServerInfo`.
+    ///
+    /// # Errors
+    /// The errors of [`Client::server_info`].
+    pub async fn supports_download_window(&self) -> Result<bool, Error> {
+        Ok(self.server_info().await?.supports_download_window == Some(true))
+    }
+
+    /// `DownloadWindow` (SPEC-SHALLOW §8.2): the packs of the window go to
+    /// `sink` as they arrive, and the reply holds the boundary the server
+    /// listed. The client checks the frames' order, each chunk's pack and
+    /// offset and each pack's declared length; **the sink checks each pack
+    /// against its key, and the caller checks the window** before naming
+    /// anything.
+    ///
+    /// # Errors
+    /// An invalid request, transport, remote, limit or order failures, or
+    /// the sink's failure.
+    pub async fn download_window(
+        &self,
+        request: &kit_core::protocol::WindowRequest,
+        sink: &mut dyn kit_core::protocol::WindowSink,
+        identity: Option<&Identity>,
+    ) -> Result<Reply<Vec<Hash>>, Error> {
+        let opts = Opts {
+            identity,
+            ..Opts::default()
+        };
+        reply(self.rpc().download_window_with(request, opts, sink).await)
+    }
+
     /// Walk a branch's packmap chain from `packmap_root` and return its pack
     /// ids oldest first, each once. Bounded by depth and pack count; every node
     /// is checked against its content id. `ref_hint` is the packmap's ref.

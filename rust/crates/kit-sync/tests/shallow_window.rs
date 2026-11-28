@@ -115,10 +115,9 @@ impl Transport for WindowServer {
         }
         let (pack, id) = writer.finish_with_key().unwrap();
         let key = PackKey::from_hash(id);
-        let out = sink.begin_pack(&key, pack.len() as u64)?;
-        out.begin(Some(pack.len() as u64))?;
+        sink.begin_pack(&key, pack.len() as u64)?;
         for chunk in pack.chunks(1000) {
-            out.write(chunk)?;
+            sink.write(chunk)?;
         }
         sink.end_pack()?;
         let mut boundary: Vec<Hash> = window.boundary.iter().copied().collect();

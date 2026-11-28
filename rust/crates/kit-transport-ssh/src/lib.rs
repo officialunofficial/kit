@@ -841,8 +841,7 @@ where
         if received > MAX_WINDOW_REPLY_BYTES {
             return Err(bad("window too large"));
         }
-        let out = sink.begin_pack(&key, total).map_err(ReplyError::Cut)?;
-        out.begin(Some(total)).map_err(ReplyError::Cut)?;
+        sink.begin_pack(&key, total).map_err(ReplyError::Cut)?;
         let mut offset = 0u64;
         loop {
             let frame = next_frame().map_err(ReplyError::Cut)?;
@@ -863,7 +862,7 @@ where
             if offset > total {
                 return Err(bad("chunk past the pack length"));
             }
-            out.write(&data).map_err(ReplyError::Cut)?;
+            sink.write(&data).map_err(ReplyError::Cut)?;
             let last = chunk.last.unwrap_or(false);
             if last != (offset == total) {
                 return Err(bad("last chunk"));
@@ -1199,9 +1198,17 @@ mod tests {
     }
 
     impl WindowSink for Packs {
-        fn begin_pack(&mut self, key: &PackKey, _: u64) -> TransportResult<&mut dyn PackSink> {
-            let (_, sink) = self.open.insert((*key, MemorySink::new(PACK_BODY_LIMIT)));
-            Ok(sink)
+        fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<()> {
+            let mut sink = MemorySink::new(PACK_BODY_LIMIT);
+            sink.begin(Some(len))?;
+            self.open = Some((*key, sink));
+            Ok(())
+        }
+        fn write(&mut self, data: &[u8]) -> TransportResult<()> {
+            match &mut self.open {
+                Some((_, sink)) => sink.write(data),
+                None => Err(TransportError::InvalidResponse),
+            }
         }
         fn end_pack(&mut self) -> TransportResult<()> {
             let (key, sink) = self.open.take().ok_or(TransportError::InvalidResponse)?;

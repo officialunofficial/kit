@@ -83,19 +83,27 @@ impl StoreSink<'_> {
 }
 
 impl WindowSink for StoreSink<'_> {
-    fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<&mut dyn PackSink> {
-        if self.open.is_some() {
-            return Err(TransportError::InvalidResponse);
-        }
+    /// A pack left open by a failed attempt is dropped: a retried request
+    /// sends it again from its start.
+    fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<()> {
+        self.open = None;
         if len > PACK_BODY_LIMIT {
             return Err(TransportError::PayloadTooLarge(usize::MAX));
         }
-        let spool = match PackSpool::create(&self.store.spool_dir(), len) {
+        let mut spool = match PackSpool::create(&self.store.spool_dir(), len) {
             Ok(spool) => spool,
             Err(e) => return Err(self.fail(e)),
         };
-        let (_, spool) = self.open.insert((*key, spool));
-        Ok(spool)
+        PackSink::begin(&mut spool, Some(len))?;
+        self.open = Some((*key, spool));
+        Ok(())
+    }
+
+    fn write(&mut self, data: &[u8]) -> TransportResult<()> {
+        match &mut self.open {
+            Some((_, spool)) => PackSink::write(spool, data),
+            None => Err(TransportError::InvalidResponse),
+        }
     }
 
     fn end_pack(&mut self) -> TransportResult<()> {

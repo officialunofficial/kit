@@ -520,6 +520,106 @@ impl FrameSink for Pack<'_> {
     }
 }
 
+/// The most bytes of packs a client takes in one window reply. The reference
+/// server refuses a window over 1 GiB of objects; the packs add their framing.
+pub(crate) const WINDOW_REPLY_MAX: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Forwards a `DownloadWindow` stream (SPEC-SHALLOW §8.2) to the caller's
+/// window sink: each pack as a `DownloadWindowPack` and its chunks, checked
+/// for order, identity and declared length, then the boundary. It holds no
+/// pack bytes; the sink checks each pack against its key.
+pub(crate) struct Window<'s> {
+    sink: &'s mut dyn kit_core::protocol::WindowSink,
+    /// The open pack: its id, declared length and bytes so far.
+    open: Option<(Vec<u8>, u64, u64)>,
+    received: u64,
+    pub(crate) boundary: Option<Vec<Hash>>,
+}
+impl<'s> Window<'s> {
+    pub(crate) fn new(sink: &'s mut dyn kit_core::protocol::WindowSink) -> Self {
+        Self {
+            sink,
+            open: None,
+            received: 0,
+            boundary: None,
+        }
+    }
+}
+impl FrameSink for Window<'_> {
+    fn frame(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        use crate::proto::{DownloadWindowResponse, download_window_response::Body as W};
+        let response = DownloadWindowResponse::decode_from_slice(bytes)
+            .map_err(|_| Error::Invalid("window protobuf"))?;
+        if self.boundary.is_some() {
+            return Err(Error::Invalid("message after window boundary"));
+        }
+        match response.body {
+            Some(W::Pack(header)) if self.open.is_none() => {
+                let id = header.pack_id.unwrap_or_default();
+                let key = <Hash>::try_from(id.as_slice())
+                    .map(kit_core::protocol::PackKey::from_hash)
+                    .map_err(|_| Error::Invalid("window pack id"))?;
+                let size = header
+                    .total_bytes
+                    .ok_or(Error::Invalid("window pack size"))?;
+                if size == 0 || size > kit_core::protocol::PACK_BODY_LIMIT {
+                    return Err(Error::Invalid("window pack size"));
+                }
+                self.received = self.received.saturating_add(size);
+                if self.received > WINDOW_REPLY_MAX {
+                    return Err(Error::Limit("window download"));
+                }
+                self.sink.begin_pack(&key, size).map_err(sink_error)?;
+                self.open = Some((id, size, 0));
+            }
+            Some(W::Chunk(chunk)) if self.open.is_some() => {
+                let (id, size, at) = self.open.as_mut().ok_or(Error::Invalid("window order"))?;
+                if chunk.pack_id.as_deref() != Some(id.as_slice()) || chunk.offset != Some(*at) {
+                    return Err(Error::Invalid("window chunk identity"));
+                }
+                let data = chunk
+                    .data
+                    .as_deref()
+                    .ok_or(Error::Invalid("window chunk"))?;
+                let end = at.saturating_add(data.len() as u64);
+                if end > *size {
+                    return Err(Error::Invalid("window chunk exceeds declared size"));
+                }
+                let last = chunk.last.ok_or(Error::Invalid("window last marker"))?;
+                if last != (end == *size) {
+                    return Err(Error::Invalid("window last marker"));
+                }
+                *at = end;
+                self.sink.write(data).map_err(sink_error)?;
+                if last {
+                    self.open = None;
+                    self.sink.end_pack().map_err(sink_error)?;
+                }
+            }
+            Some(W::Boundary(b)) if self.open.is_none() => {
+                if b.commits.len() > kit_core::shallow::MAX_WINDOW_COMMITS {
+                    return Err(Error::Invalid("window boundary"));
+                }
+                let ids = b
+                    .commits
+                    .iter()
+                    .map(|id| <Hash>::try_from(id.as_slice()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| Error::Invalid("window boundary"))?;
+                self.boundary = Some(ids);
+            }
+            _ => return Err(Error::Invalid("window order")),
+        }
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), Error> {
+        if self.boundary.is_none() {
+            return Err(Error::Invalid("window without boundary"));
+        }
+        Ok(())
+    }
+}
+
 /// Reads `len` bytes of a pack body from `offset`, one chunk at a time, so a
 /// request stream holds one chunk however long the body is. Each value is a
 /// fresh reader: a retried request reads the body again.
@@ -577,6 +677,129 @@ pub(crate) fn body_error(error: std::io::Error) -> Error {
 mod tests {
     use super::*;
     use crate::connect::{frame, framed};
+
+    /// A window sink that keeps each pack in memory.
+    #[derive(Default)]
+    struct Packs {
+        done: Vec<([u8; 32], Vec<u8>)>,
+        open: Option<([u8; 32], Vec<u8>)>,
+    }
+    impl kit_core::protocol::WindowSink for Packs {
+        fn begin_pack(
+            &mut self,
+            key: &kit_core::protocol::PackKey,
+            _: u64,
+        ) -> Result<(), TransportError> {
+            self.open = Some((*key.as_bytes(), Vec::new()));
+            Ok(())
+        }
+        fn write(&mut self, data: &[u8]) -> Result<(), TransportError> {
+            self.open
+                .as_mut()
+                .ok_or(TransportError::InvalidResponse)?
+                .1
+                .extend_from_slice(data);
+            Ok(())
+        }
+        fn end_pack(&mut self) -> Result<(), TransportError> {
+            let open = self.open.take().ok_or(TransportError::InvalidResponse)?;
+            self.done.push(open);
+            Ok(())
+        }
+    }
+
+    fn w_pack(id: u8, total: u64) -> Vec<u8> {
+        crate::proto::DownloadWindowResponse {
+            body: Some(
+                crate::proto::DownloadWindowPack {
+                    pack_id: Some(vec![id; 32]),
+                    total_bytes: Some(total),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn w_chunk(id: u8, offset: u64, data: &[u8], last: bool) -> Vec<u8> {
+        crate::proto::DownloadWindowResponse {
+            body: Some(
+                crate::proto::PackChunk {
+                    pack_id: Some(vec![id; 32]),
+                    offset: Some(offset),
+                    data: Some(data.to_vec()),
+                    last: Some(last),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn w_boundary(ids: &[u8]) -> Vec<u8> {
+        crate::proto::DownloadWindowResponse {
+            body: Some(
+                crate::proto::DownloadWindowBoundary {
+                    commits: ids.iter().map(|id| vec![*id; 32]).collect(),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    fn run_window(frames: &[Vec<u8>]) -> (Result<Vec<Hash>, Error>, Packs) {
+        let mut packs = Packs::default();
+        let mut window = Window::new(&mut packs);
+        let got = frames
+            .iter()
+            .try_for_each(|f| window.frame(f))
+            .and_then(|()| window.finish())
+            .map(|()| window.boundary.take().unwrap());
+        (got, packs)
+    }
+
+    #[test]
+    fn a_window_stream_gives_each_pack_and_the_boundary() {
+        let (got, packs) = run_window(&[
+            w_pack(1, 3),
+            w_chunk(1, 0, b"ab", false),
+            w_chunk(1, 2, b"c", true),
+            w_pack(2, 1),
+            w_chunk(2, 0, b"z", true),
+            w_boundary(&[7]),
+        ]);
+        assert_eq!(got.unwrap(), vec![[7; 32]]);
+        assert_eq!(
+            packs.done,
+            vec![([1; 32], b"abc".to_vec()), ([2; 32], b"z".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_window_stream_out_of_order_is_refused() {
+        let cases: [&[Vec<u8>]; 9] = [
+            &[w_chunk(1, 0, b"a", true)],
+            &[w_pack(1, 2), w_chunk(2, 0, b"ab", true)],
+            &[w_pack(1, 2), w_chunk(1, 1, b"b", true)],
+            &[w_pack(1, 2), w_chunk(1, 0, b"abc", true)],
+            &[w_pack(1, 2), w_chunk(1, 0, b"a", true)],
+            &[w_pack(1, 1), w_chunk(1, 0, b"a", false)],
+            &[w_pack(1, 0)],
+            &[w_pack(1, 1), w_boundary(&[])],
+            &[w_pack(1, 1), w_chunk(1, 0, b"a", true)],
+        ];
+        for frames in cases {
+            assert!(run_window(frames).0.is_err());
+        }
+        assert!(run_window(&[w_boundary(&[]), w_boundary(&[])]).0.is_err());
+    }
 
     #[test]
     fn oversized_frame_error_names_size_and_limit() {

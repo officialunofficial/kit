@@ -86,12 +86,13 @@ impl tower_service::Service<Uri> for CountingConnector {
 /// entry is recorded, SPEC-TRANSPORT-CONNECT "Signed reads") and the unsigned
 /// server-info and grant-epoch reads. Resending one has no effect beyond the
 /// answer.
-const READ_PROCEDURES: [&str; 9] = [
+const READ_PROCEDURES: [&str; 10] = [
     "ListRepos",
     "ListRefs",
     "ReadRef",
     "PackExists",
     "DownloadPack",
+    "DownloadWindow",
     "IssueObjectUrl",
     "GetReceipt",
     "GetServerInfo",
@@ -357,7 +358,7 @@ impl NativeHttp {
         self
     }
 
-    /// Fail `UploadPack`, `UploadPart`, `DownloadPack` and pack-location
+    /// Fail `UploadPack`, `UploadPart`, `DownloadPack`, `DownloadWindow` and pack-location
     /// fetches that send and receive nothing for this long (default: 60
     /// seconds). These transfers have no total bound of their own; a
     /// [`RequestTimeout`] still bounds one in total. Other procedures use the
@@ -378,7 +379,8 @@ impl NativeHttp {
         match request.uri().path() {
             kit_client::procedures::UPLOAD_PACK
             | kit_client::procedures::UPLOAD_PART
-            | "/kit.transport.v1.TransportService/DownloadPack" => Budget {
+            | "/kit.transport.v1.TransportService/DownloadPack"
+            | "/kit.transport.v1.TransportService/DownloadWindow" => Budget {
                 total: bound,
                 stall: Some(self.transfer_timeout),
             },
@@ -1813,7 +1815,7 @@ mod tests {
                     .expect("uri");
             assert_eq!(budget(&http, &uri, None), total(DEFAULT_METADATA_TIMEOUT));
         }
-        for procedure in ["DownloadPack", "UploadPack", "UploadPart"] {
+        for procedure in ["DownloadPack", "DownloadWindow", "UploadPack", "UploadPart"] {
             let uri =
                 format!("https://example.invalid/kit.transport.v1.TransportService/{procedure}")
                     .parse::<Uri>()
