@@ -1,6 +1,7 @@
 name: "Bench: macOS clone profile"
 
-# Temporary: compares ways to write 10,000 small files on macOS.
+# Temporary: times the clone and checkout of 10,000 small files for kit on
+# main, kit on this branch and git.
 
 on:
   push:
@@ -12,69 +13,67 @@ permissions:
 
 jobs:
   profile:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
-      - name: Write patterns
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: bench-vs-git-${{ matrix.os }}
+          protoc: "false"
+      - name: Install hyperfine
         run: |
-          cat > w.py <<'PY'
-          import os, sys, time, shutil, threading, itertools
-          from concurrent.futures import ThreadPoolExecutor
-          data = os.urandom(1024)
-          base = os.path.realpath(sys.argv[1])
-          counter = itertools.count()
-          def tmp_rename(d, n):
-              t = f"{d}/.tmp.{next(counter)}"
-              fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-              os.write(fd, data); os.fstat(fd)
-              os.rename(t, f"{d}/{n}")
-              os.close(fd)
-          def direct(d, n):
-              fd = os.open(f"{d}/{n}", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-              os.write(fd, data); os.close(fd); os.lstat(f"{d}/{n}")
-          def tmp_dir_rename(d, n):
-              t = f"{base}/.stage/{next(counter)}"
-              fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-              os.write(fd, data); os.fstat(fd)
-              os.rename(t, f"{d}/{n}")
-              os.close(fd)
-          def run(name, write, threads, order):
-              root = f"{base}/w"
-              shutil.rmtree(root, ignore_errors=True); shutil.rmtree(f"{base}/.stage", ignore_errors=True)
-              os.makedirs(f"{base}/.stage")
-              dirs = [f"{root}/d{i:02}" for i in range(100)]
-              for d in dirs: os.makedirs(d)
-              if order == "bydir":
-                  jobs = [(d, f"f{j:02}") for d in dirs for j in range(100)]
-              else:
-                  jobs = [(d, f"f{j:02}") for j in range(100) for d in dirs]
-              t0 = time.perf_counter()
-              if threads == 1:
-                  for d, n in jobs: write(d, n)
-              elif order == "dirs":
-                  def worker(k):
-                      for d in dirs[k::threads]:
-                          for j in range(100): write(d, f"f{j:02}")
-                  with ThreadPoolExecutor(threads) as ex: list(ex.map(worker, range(threads)))
-              else:
-                  with ThreadPoolExecutor(threads) as ex: list(ex.map(lambda a: write(*a), jobs, chunksize=16))
-              return (time.perf_counter() - t0) * 1000
-          cases = [
-              ("direct-1", direct, 1, "bydir"),
-              ("tmp-1", tmp_rename, 1, "bydir"),
-              ("tmp-3-samedir", tmp_rename, 3, "bydir"),
-              ("tmp-3-dirs", tmp_rename, 3, "dirs"),
-              ("tmp-6-dirs", tmp_rename, 6, "dirs"),
-              ("direct-3-dirs", direct, 3, "dirs"),
-              ("stage-3-dirs", tmp_dir_rename, 3, "dirs"),
-          ]
-          results = {c[0]: [] for c in cases}
-          for rnd in range(5):
-              for c in cases:
-                  results[c[0]].append(run(*c))
-          for name, ts in results.items():
-              ts.sort()
-              print("WRITE", name, "median", round(ts[len(ts)//2]), "min", round(ts[0]), "all", [round(t) for t in ts])
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -y -q hyperfine; else brew install hyperfine; fi
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked -p kit-bin --bin kit
+      - name: Build main
+        run: |
+          git worktree add -q ../base f1d837b5
+          (cd ../base/rust && cargo build --release --locked -p kit-bin --bin kit)
+      - name: Profile
+        run: |
+          K="$PWD/rust/target/release/kit"
+          M="$(cd ../base && pwd)/rust/target/release/kit"
+          W="$(mktemp -d)"; W="$(cd "$W" && pwd -P)"
+          python3 - "$W/small10k" <<'PY'
+          import os, sys
+          root = sys.argv[1]
+          rng = __import__("random").Random(10000)
+          for d in range(100):
+              os.makedirs(f"{root}/d{d:02}", exist_ok=True)
+              for f in range(100):
+                  with open(f"{root}/d{d:02}/f{f:02}.bin", "wb") as out:
+                      out.write(rng.randbytes(1024))
           PY
-          sysctl -n hw.ncpu
-          python3 w.py "$(mktemp -d)"
+          mkdir -p "$W/src/kit" "$W/src/git" "$W/remotes/kit"
+          (cd "$W/src/kit" && "$K" init >/dev/null 2>&1 && "$K" keygen >/dev/null 2>&1 && cp -R "$W/small10k/" . \
+            && "$K" add . >/dev/null && "$K" commit -m bench >/dev/null 2>&1 \
+            && "$K" remote add origin "kit+file://$W/remotes/kit" >/dev/null && "$K" push origin >/dev/null 2>&1)
+          (cd "$W/src/git" && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$W/small10k/" . \
+            && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$W/remotes/git.git")
+          cd "$W"
+          "$K" clone -q "kit+file://$W/remotes/kit" check && test -f check/d42/f17.bin && (cd check && "$K" status) && rm -rf check
+          KP="rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work"
+          GP="rm -rf work && git clone -q -n file://$W/remotes/git.git work"
+          for i in 1 2 3; do
+            hyperfine -N --warmup 2 --runs 15 --export-json "p$i.json" \
+              --prepare "$KP" -n checkout-main "$M -C work checkout main" \
+              --prepare "$KP" -n checkout-branch "$K -C work checkout main" \
+              --prepare "$GP" -n checkout-git "git -C work reset -q --hard" \
+              --prepare 'rm -rf work' -n clone-main "$M clone -q kit+file://$W/remotes/kit work" \
+              --prepare 'rm -rf work' -n clone-branch "$K clone -q kit+file://$W/remotes/kit work" \
+              --prepare 'rm -rf work' -n clone-git "git clone -q file://$W/remotes/git.git work"
+            python3 - "p$i.json" <<'PY'
+          import json, sys
+          for r in json.load(open(sys.argv[1]))["results"]:
+              t = r.get("summary", {}).get("time_wall_clock", r)
+              print("PHASE", r.get("name", r["command"]), round(t["mean"] * 1000), "+-", round(t["stddev"] * 1000), "median", round(t["median"] * 1000))
+          PY
+          done
