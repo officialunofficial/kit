@@ -27,13 +27,35 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `config.lock`, `recovery-log.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `PREVIOUS_HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
+| **worktree state dir** (private to one tree) | `HEAD`, `PREVIOUS_HEAD`, `HEAD_HISTORY`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
 
 `PREVIOUS_HEAD` holds only the previous HEAD selected by checkout or switch.
 It uses HEAD encoding: `ref: refs/heads/<branch>\n` or a lowercase commit id
 followed by a newline. It is replaced atomically under the worktree lock
-only when checkout or switch changes HEAD. It has no version or history.
+only when checkout or switch changes HEAD. It has no version.
 Switch reports no previous branch for a missing, unreadable or malformed file.
+
+`HEAD_HISTORY` holds the last 16 previous HEADs of the tree, one per line in
+the HEAD encoding above, oldest first. When checkout or switch changes HEAD,
+it reads the record, appends the old HEAD, drops the oldest lines past 16,
+and replaces the file atomically under the worktree lock, then writes
+`PREVIOUS_HEAD` as before. `@{-N}`, for N from 1 to 16, names line N counted
+from the end; N past the record is an error.
+
+A reader:
+
+- ignores a last line with no newline, as a torn write;
+- refuses a file with more than 16 complete lines, or with a complete line
+  that is not in the HEAD encoding, with an error and no guess;
+- reads a missing `HEAD_HISTORY` as the one entry in `PREVIOUS_HEAD`, or as
+  empty when that file is missing too, so a tree that an older kit used keeps
+  `@{-1}`;
+- trusts the record only when its last line equals `PREVIOUS_HEAD`. An older
+  kit writes only `PREVIOUS_HEAD`, so a record whose last line differs is
+  stale and reads as the one entry in `PREVIOUS_HEAD`.
+
+The file is capped at 64 KiB. A detached HEAD is recorded by commit id, and
+gc keeps each recorded commit (SPEC-GC).
 Gc refuses unreadable or malformed state rather than dropping a possible root. It belongs
 to one worktree, is not cloned or transferred, and is removed with that
 worktree's state. A valid detached id is a gc root.

@@ -53,6 +53,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Staging index | `.kit/index` | each entry's `object_hash` (staged-but-uncommitted content) |
 | Stash | `.kit/stash` | each entry's `commit_hash` + `parent_hash` |
 | Previous detached HEAD | `.kit/PREVIOUS_HEAD` | the saved detached commit |
+| Previous HEADs | `.kit/HEAD_HISTORY` | each recorded detached commit; a malformed record stops gc |
 | Reset/op backup | `.kit/ORIG_HEAD` | the saved pre-op HEAD |
 | Pull restore in progress | `.kit/PULL_HEAD` | target commit and pre-pull tree |
 | Merge in progress | `.kit/MERGE_HEAD` (+`ORIG_HEAD`) | `merge_head`, `orig_head` |

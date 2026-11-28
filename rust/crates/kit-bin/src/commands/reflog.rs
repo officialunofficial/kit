@@ -6,6 +6,10 @@
 //! Detached replay intermediates are included when the final branch tip is
 //! published; reset/amend start a new generation containing the new ancestry.
 //! This command does not recover or rewrite snapshots.
+//!
+//! `--recovery` lists the recovery log instead: the commits that amend,
+//! reset, rebase and stash pop replaced, newest record first, each named by
+//! the `recovery@{N}` revision that resolves to it.
 
 use std::io::Write;
 
@@ -46,6 +50,11 @@ struct ReflogOpts {
     /// Cap the number of entries printed.
     #[arg(short = 'n')]
     limit: Option<usize>,
+
+    /// List the recovery log: the commits that amend, reset, rebase and
+    /// stash pop replaced. A `REF` keeps only that branch's records.
+    #[arg(long)]
+    recovery: bool,
 }
 
 #[must_use]
@@ -68,6 +77,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
+    if opts.recovery {
+        return list_recovery(&store, &layout, &opts, fmt);
+    }
 
     // Resolve the target branch: explicit arg, else HEAD's branch.
     let branch = match resolve_branch(&layout, opts.reference.as_deref()) {
@@ -157,6 +169,79 @@ pub fn run(args: &[String]) -> u8 {
             }
             Format::Json => {
                 emit_json_entry(&mut stdout, &branch, selector, &commit, &title, verified);
+            }
+        }
+    }
+    exit::OK
+}
+
+/// Print the recovery log, newest record first. Each record keeps its number
+/// in the full log, so `recovery@{N}` resolves to it even under a branch
+/// filter.
+fn list_recovery(
+    store: &ObjectStore,
+    layout: &kit_core::layout::RepoLayout,
+    opts: &ReflogOpts,
+    fmt: Format,
+) -> u8 {
+    let records = match kit_core::ops::recovery::read_all(layout) {
+        Ok(records) => records,
+        Err(e) => return emit_err(&format!("recovery log: {e}"), exit::DATAERR),
+    };
+    let wanted = opts.reference.as_deref();
+    let mut stdout = std::io::stdout().lock();
+    let shown = records
+        .iter()
+        .rev()
+        .enumerate()
+        .filter(|(_, record)| wanted.is_none_or(|b| record.branch == b))
+        .take(opts.limit.unwrap_or(usize::MAX));
+    for (index, record) in shown {
+        if signal::is_shutdown() {
+            return exit::TEMPFAIL;
+        }
+        let title = match store.read_object(&record.superseded) {
+            Ok(Object::Commit(c)) => Some(first_line(&c.message)),
+            Ok(Object::Remix(r)) => Some(first_line(&r.message)),
+            Ok(_) | Err(_) if store.contains(&record.superseded) => {
+                return emit_err(
+                    &format!(
+                        "read {}: not a readable commit",
+                        format::hex_hash(&record.superseded)
+                    ),
+                    exit::DATAERR,
+                );
+            }
+            Ok(_) | Err(_) => None,
+        };
+        match fmt {
+            Format::Default => {
+                let branch = if record.branch.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", format::safe_text(&record.branch))
+                };
+                let _ = writeln!(
+                    stdout,
+                    "{} recovery@{{{index}}}: {}{branch}: {}",
+                    format::short_hash(&record.superseded, 8),
+                    format::safe_text(&record.op),
+                    title
+                        .as_deref()
+                        .map_or_else(|| "(pruned)".to_owned(), format::safe_text),
+                );
+            }
+            Format::Json => {
+                let _ = writeln!(
+                    stdout,
+                    "{{\"index\":{index},\"selector\":\"recovery@{{{index}}}\",\"hash\":\"{}\",\"op\":\"{}\",\"branch\":\"{}\",\"time\":{},\"title\":\"{}\",\"pruned\":{}}}",
+                    format::hex_hash(&record.superseded),
+                    format::json_escape(&record.op),
+                    format::json_escape(&record.branch),
+                    record.timestamp,
+                    format::json_escape(title.as_deref().unwrap_or("")),
+                    title.is_none(),
+                );
             }
         }
     }

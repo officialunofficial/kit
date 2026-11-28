@@ -101,10 +101,9 @@ enum ProcedureAuth {
 fn procedure_auth(procedure: &str) -> Option<ProcedureAuth> {
     let method = procedure.strip_prefix("/kit.transport.v1.TransportService/")?;
     Some(match method {
-        "ListRefs" | "ListRepos" | "ReadRef" | "PackExists" | "DownloadPack" | "IssueObjectUrl"
-        | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => {
-            ProcedureAuth::Body
-        }
+        "ListRefs" | "ListRepos" | "ReadRef" | "PackExists" | "DownloadPack" | "DownloadWindow"
+        | "IssueObjectUrl" | "GetReceipt" | "UpdateRef" | "AdvanceRefs" | "BeginUpload"
+        | "CompleteUpload" => ProcedureAuth::Body,
         "SetRepoVisibility" => ProcedureAuth::BodyUnlessStatement,
         "UploadPack" => ProcedureAuth::Commitment("pack:"),
         "UploadPart" => ProcedureAuth::Commitment("part:"),
@@ -702,13 +701,13 @@ mod tests {
                 .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
                 .filter(|path| path.starts_with("/kit.transport.v1.TransportService/"))
                 .collect();
-            assert_eq!(procedures.len(), 19);
+            assert_eq!(procedures.len(), 20);
             for procedure in procedures {
                 let method = procedure.rsplit('/').next().unwrap();
                 let expected = match method {
                     "ListRefs" | "ListRepos" | "ReadRef" | "PackExists" | "DownloadPack"
-                    | "GetReceipt" | "IssueObjectUrl" | "UpdateRef" | "AdvanceRefs"
-                    | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
+                    | "DownloadWindow" | "GetReceipt" | "IssueObjectUrl" | "UpdateRef"
+                    | "AdvanceRefs" | "BeginUpload" | "CompleteUpload" => ProcedureAuth::Body,
                     "SetRepoVisibility" => ProcedureAuth::BodyUnlessStatement,
                     "UploadPack" => ProcedureAuth::Commitment("pack:"),
                     "UploadPart" => ProcedureAuth::Commitment("part:"),
@@ -926,6 +925,7 @@ mod tests {
                 "ReadRef",
                 "PackExists",
                 "DownloadPack",
+                "DownloadWindow",
                 "GetServerInfo",
             ] {
                 let procedure = format!("/kit.transport.v1.TransportService/{method}");

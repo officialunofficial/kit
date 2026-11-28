@@ -87,6 +87,7 @@ same trait `kit-transport-s3` and `-ssh` implement.
 | `pack_exists(key, ref_hint)` | `PackExists` | unary |
 | `upload_pack(body, key, head_ref)` | `UploadPack` | client-streaming |
 | `download_pack(key, ref_hint, sink)` | `DownloadPack` | server-streaming |
+| `download_window(request, sink)` | `DownloadWindow` (§6.3) | server-streaming |
 | `upload_blob(bytes, key, head_ref)` (default impl: `upload_pack` of a `SliceBody`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
 | `download_blob(key, ref_hint, max)` (default impl: `download_pack` into a `MemorySink` of `max`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
 | *(none &mdash; deployment discovery)* | `GetServerInfo` (§2.1) | unary |
@@ -158,6 +159,7 @@ headers or a bearer token. The response MAY be cached with
 | `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
 | `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
 | `supports_attestations` | Field 23; true enables §4.2. Absent or false means unsupported. |
+| `supports_download_window` | Field 24; true means the server answers `DownloadWindow` (§6.3). Absent or false means the client does not send it and fails a shallow fetch with "this remote cannot serve a shallow fetch". |
 | `max_tickets_per_advance` | The most upload tickets one `AdvanceRefs` request may name in `ticket_ids` (§4). Absent means seven. A server that advertises it advertises at least two, because one ticket is the packmap node's. A client treats a value below two as absent and a value above 1,024 as 1,024, and reads the value once per session. A server SHOULD NOT lower the limit while pushes are in flight. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -967,6 +969,27 @@ Tier 2 server-control cases. They send fixture requests through the control
 client at `control_url`, which may differ from the wire origin. A host without
 the required controls receives a declared control skip for those cases; absence
 of controls is not feature-based `NotApplicable`.
+
+### 6.3 `DownloadWindow` (server-streaming)
+
+**Protocol requirement.**
+
+`DownloadWindowRequest{ tips, depth, have }` asks for the window of
+SPEC-SHALLOW §2: at most 1,000 tips and 1,000 `have` commits, each a raw
+32-byte id, and `depth` from 1 to 2^31 - 1. `DownloadWindowResponse.body` is a
+`oneof` of `pack` (`DownloadWindowPack{ pack_id, total_bytes }`), `chunk`
+(`PackChunk`) and `boundary` (`DownloadWindowBoundary{ commits }`). The server
+sends one or more packs, each a `pack` followed by its chunks, then exactly one
+`boundary`. A refused request fails before any message.
+
+The client checks that each chunk names the open pack and continues it at its
+offset, that `last` marks exactly the byte at `total_bytes`, that no pack is
+empty or longer than the pack body limit, that the packs of one reply total at
+most 2 GiB, and that the reply ends with the boundary. The sink checks each
+pack against `pack_id`, and the caller checks the window (SPEC-SHALLOW SH1,
+SH3) before it writes the record or a ref. The call is a signed read like
+`DownloadPack`, with the transfer stall bound. A retried call restarts the
+open pack.
 
 ---
 

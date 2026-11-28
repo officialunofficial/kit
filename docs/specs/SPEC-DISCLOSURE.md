@@ -1,6 +1,6 @@
 ---
 spec: SPEC-DISCLOSURE
-version: 5
+version: 6
 status: draft-normative
 audience: implementers of a kit disclosure-bundle or closure-profile verifier (any language)
 ---
@@ -440,7 +440,9 @@ NOT decompress in order to decide this &mdash; scan entry types first.
 ### 7.3 Manifest bytes
 
 Encoded with commonware-codec conventions (fixed integers big-endian,
-lengths LEB128 varint, arrays raw), matching §3:
+lengths LEB128 varint, arrays raw), matching §3. There are two versions.
+
+Version 1:
 
 ```
 magic "KCLM"            (4 raw bytes)
@@ -450,13 +452,51 @@ mode: u8                0 = snapshot, 1 = history
 packs: Vec<[u8; 32]>    pack_key of each pack, in order; length <= 65_536
 ```
 
+Version 2 adds the branch the root came from, the commits an incremental
+export leaves out, and a checksum:
+
+```
+magic "KCLM"            (4 raw bytes)
+version: u8 = 2
+root: [u8; 32]
+mode: u8                0 = snapshot, 1 = history
+packs: Vec<[u8; 32]>    as in version 1
+branch: Vec<u8>         empty = no branch; else a branch name, <= 255 bytes
+bases: Vec<[u8; 32]>    commits left out with their history; length <= 256
+check: [u8; 32]         BLAKE3 of every byte before it
+```
+
 Decoders MUST reject trailing bytes, an unknown version, and an unknown
-mode. `pack_key` is BLAKE3 of the entire pack including its trailer
-(SPEC-PACKFILE §7).
+mode. A version 2 decoder MUST also reject:
+
+- a `check` that is not the BLAKE3 of the bytes before it;
+- a `branch` that is not valid UTF-8 or not a valid branch name
+  (`refs/heads/<branch>` MUST be a valid ref name, SPEC-REFS §3);
+- `bases` that are not sorted ascending without repeats, or that are not
+  empty in snapshot mode;
+- an empty `branch` together with empty `bases`, which a writer encodes as
+  version 1. So every manifest has one encoding.
+
+A writer MUST write version 1 when there is no branch and no base, so an
+export without them keeps the bytes of version 1. A version 1 decoder
+refuses a version 2 manifest as an unknown version. `pack_key` is BLAKE3
+of the entire pack including its trailer (SPEC-PACKFILE §7).
+
+The checksum detects damage in transit, such as a copy to removable
+media. It is not a signature: anyone who can change the manifest can
+recompute it. The packs are still checked against their keys, and the
+objects against the trusted root.
 
 The manifest is a convenience index. The root id remains the only trust
 anchor: a verifier that already has the packs MAY call the pack-set
 entry point directly and ignore the manifest.
+
+An **incremental** export (non-empty `bases`, history mode only) holds the
+objects reachable from `root` that no base reaches. Walked alone, its
+closure is incomplete by design: the objects the bases reach are
+`missing`. A verifier that holds those objects, such as a repository that
+already has the bases, completes the walk with them. Its report counts
+them under neither `missing` nor `verified`.
 
 ### 7.4 Verifier MUSTs
 
@@ -550,8 +590,11 @@ unreferenced extra (still
 complete); `unreferenced_undecodable_extra`, bytes that decode to no object
 (unreferenced, still complete); a delta entry; a compressed entry; a manifest
 pack-hash mismatch; the wrong root id; a manifest whose `root` differs
-from the caller's trusted root; manifest version 2; a trailing byte on
-the manifest.
+from the caller's trusted root; manifest version 3; a trailing byte on
+the manifest. Version 2 vectors: `v2_branch` (history with a branch,
+accepted), `neg_v2_bad_check` (one byte of the checksum flipped),
+`neg_v2_bad_branch` (a branch with a space, with a correct checksum) and
+`neg_v2_snapshot_bases` (bases in snapshot mode).
 
 `rust/crates/kit-core/tests/golden_closure.rs` reads only the committed
 files.
@@ -671,6 +714,10 @@ it. Each reject sidecar names the exact reason in §8.2.
 
 Document version 5 changes KDPB to wire version 3 and KDSP to wire version 2.
 A KDPB v2 bundle is a typed `UnsupportedBundleVersion(2)` error.
+
+Document version 6 adds closure manifest version 2 (§7.3): a branch, the
+bases of an incremental export, and a checksum. Version 1 manifests stay
+valid and are still written when neither field is set.
 
 ## 9. Later (out of scope for this document)
 

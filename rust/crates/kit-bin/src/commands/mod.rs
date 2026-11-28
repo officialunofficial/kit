@@ -5,6 +5,9 @@
 //! crates; this module is the thin presentation layer.
 
 pub mod add;
+pub mod am;
+pub mod apply;
+pub mod archive;
 pub mod attest;
 pub mod attest_factory;
 pub mod bisect;
@@ -20,6 +23,7 @@ pub mod closure;
 pub mod commit;
 pub mod config_cmd;
 pub mod conflict;
+pub mod describe;
 pub mod diff;
 pub mod epoch;
 pub mod fetch;
@@ -34,6 +38,7 @@ pub mod git_import;
 #[cfg(feature = "git-bridge")]
 pub mod git_tools;
 pub mod grant;
+pub mod grep;
 pub mod hash_cmd;
 pub mod init;
 pub mod key;
@@ -51,10 +56,12 @@ pub mod mv;
 pub mod prove;
 pub mod pull;
 pub mod push;
+pub mod range_diff;
 pub mod rebase;
 pub mod ref_cmd;
 pub mod reflog;
 pub mod remote;
+pub mod rerere;
 pub mod reset;
 pub mod restore;
 pub mod rev_list;
@@ -63,6 +70,7 @@ pub mod revert;
 pub mod rm;
 pub mod self_update;
 pub mod serve;
+pub mod shortlog;
 pub mod show;
 pub mod show_ref;
 pub mod signing;
@@ -236,6 +244,24 @@ pub fn not_yet_ported(cmd: &str) -> u8 {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "error: `kit {cmd}` is not yet wired");
     exit::TEMPFAIL
+}
+
+/// The side that `-X`/`--strategy-option` names: `ours` or `theirs`, and
+/// [`libkit::merge::Favor::None`] without the flag.
+///
+/// # Errors
+///
+/// Any other value prints a usage error and returns its exit code.
+pub(crate) fn strategy_option(value: Option<&str>) -> Result<libkit::merge::Favor, u8> {
+    match value {
+        None => Ok(libkit::merge::Favor::None),
+        Some(v) => libkit::merge::Favor::from_option(v).ok_or_else(|| {
+            usage_error(&format!(
+                "unsupported strategy option '{}': use ours or theirs",
+                kit_core::protocol::escape_terminal_text(v, false)
+            ))
+        }),
+    }
 }
 
 /// Shared helper: print a usage error and return the USAGE exit code.
@@ -423,6 +449,37 @@ pub(crate) fn c_quote_path(path: &str) -> Option<String> {
 /// holds a control or non-ASCII byte, else unchanged.
 pub(crate) fn display_path(path: &str) -> String {
     c_quote_path(path).unwrap_or_else(|| path.to_string())
+}
+
+/// The git-shaped `CONFLICT` line for a conflict record, or `None` for the
+/// second record of a rename/rename pair, which the first line covers.
+pub(crate) fn conflict_line(rec: &kit_core::ops::conflict_state::ConflictRecord) -> Option<String> {
+    let Some(rename) = &rec.rename else {
+        return Some(format!(
+            "CONFLICT (content): Merge conflict in {}",
+            display_path(&rec.path)
+        ));
+    };
+    let ours = rec.ours_hash.is_some();
+    let (renamer, deleter) = if ours {
+        ("ours", "theirs")
+    } else {
+        ("theirs", "ours")
+    };
+    match &rename.other {
+        None => Some(format!(
+            "CONFLICT (rename/delete): {} renamed to {} in {renamer}, but deleted in {deleter}",
+            display_path(&rename.from),
+            display_path(&rec.path)
+        )),
+        Some(other) if ours => Some(format!(
+            "CONFLICT (rename/rename): {} renamed to {} in ours and to {} in theirs",
+            display_path(&rename.from),
+            display_path(&rec.path),
+            display_path(other)
+        )),
+        Some(_) => None,
+    }
 }
 
 /// Resolve a CLI path argument to a repo-relative, `/`-separated index

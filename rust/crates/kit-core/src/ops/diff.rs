@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
+use crate::ops::merge::Favor;
 use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError, WalkBudget};
 use crate::worktree::{self, WorktreeError};
 
@@ -52,6 +53,10 @@ pub struct DiffEntry {
     /// Source path for a [`DiffKind::Renamed`] entry; `None` for every
     /// other kind. `path` always holds the destination (new) path.
     pub old_path: Option<String>,
+    /// Similarity of a [`DiffKind::Renamed`] entry in percent, as git
+    /// prints it (`100` for identical content); `None` for every other
+    /// kind.
+    pub similarity: Option<u8>,
 }
 
 /// Sorted (by path) sequence of [`DiffEntry`].
@@ -159,6 +164,7 @@ fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl
                 old_mode: entries[ri].old_mode,
                 new_mode: entries[ai].new_mode,
                 old_path: Some(entries[ri].path.clone()),
+                similarity: Some(100),
             });
             consumed[ri] = true;
             consumed[ai] = true;
@@ -361,6 +367,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             old_mode: Some(o.mode),
                             new_mode: Some(n.mode),
                             old_path: None,
+                            similarity: None,
                         });
                     }
                 } else if o.object_hash != n.object_hash || o.mode != n.mode {
@@ -372,6 +379,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                         old_mode: Some(o.mode),
                         new_mode: Some(n.mode),
                         old_path: None,
+                        similarity: None,
                     });
                 }
                 i += 1;
@@ -442,6 +450,7 @@ fn walk_removed_entries<S: ObjectSource + ?Sized>(
             old_mode: Some(entry.mode),
             new_mode: None,
             old_path: None,
+            similarity: None,
         });
     }
     Ok(())
@@ -491,6 +500,7 @@ fn walk_added_entries<S: ObjectSource + ?Sized>(
             old_mode: None,
             new_mode: Some(entry.mode),
             old_path: None,
+            similarity: None,
         });
     }
     Ok(())
@@ -776,6 +786,52 @@ pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHu
     )
 }
 
+/// The changed regions between two texts, with no context: for each, the
+/// 0-based half-open line range it covers on the old side and on the new
+/// side, in order. An insertion has an empty old range at the line it goes
+/// before, and a deletion an empty new range. The diff is the one of
+/// [`unified_hunks`], binary content included, compared line by line.
+#[must_use]
+pub fn changed_line_spans(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let old_lines = split_lines(old_bytes);
+    let new_lines = split_lines(new_bytes);
+    let script = edit_script(
+        &old_lines,
+        &new_lines,
+        WhitespaceMode::Exact,
+        MAX_EDIT_DISTANCE,
+    );
+    let mut out = Vec::new();
+    let (mut old_at, mut new_at) = (0, 0);
+    let mut open: Option<(usize, usize)> = None;
+    for op in &script.ops {
+        match *op {
+            DiffOp::Equal(o, n) => {
+                if let Some((os, ns)) = open.take() {
+                    out.push((os..old_at, ns..new_at));
+                }
+                old_at = o + 1;
+                new_at = n + 1;
+            }
+            DiffOp::Delete(o) => {
+                open.get_or_insert((old_at, new_at));
+                old_at = o + 1;
+            }
+            DiffOp::Insert(n) => {
+                open.get_or_insert((old_at, new_at));
+                new_at = n + 1;
+            }
+        }
+    }
+    if let Some((os, ns)) = open {
+        out.push((os..old_at, ns..new_at));
+    }
+    out
+}
+
 fn to_patch_hunk(hunk: &Hunk<'_>, old: &[DiffLine<'_>], new: &[DiffLine<'_>]) -> PatchHunk {
     let lines = hunk
         .ops
@@ -896,6 +952,40 @@ pub fn merge_blob_3way(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8
     merge_within_edits(base, ours, theirs, MAX_EDIT_DISTANCE)
 }
 
+/// [`merge_blob_3way`] that resolves conflicts to one side, as git's
+/// `-X ours` and `-X theirs` do. With [`Favor::None`] it is
+/// [`merge_blob_3way`]. With a side it always returns the merge: changes
+/// that do not overlap merge from both sides, and each group of
+/// overlapping changes takes the favored side's lines over the base lines
+/// the group covers. Content that cannot be line-merged (binary, above the
+/// size limit, or past the edit limit) is the favored side whole.
+#[must_use]
+pub fn merge_blob_3way_favoring(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    favor: Favor,
+) -> Option<Vec<u8>> {
+    let side = match favor {
+        Favor::None => return merge_blob_3way(base, ours, theirs),
+        Favor::Ours => ours,
+        Favor::Theirs => theirs,
+    };
+    if ours == theirs {
+        return Some(ours.to_vec());
+    }
+    let above_threshold = |blob: &[u8]| {
+        u64::try_from(blob.len()).unwrap_or(u64::MAX) > crate::worktree::CHUNK_THRESHOLD
+    };
+    if above_threshold(base) || above_threshold(ours) || above_threshold(theirs) {
+        return Some(side.to_vec());
+    }
+    Some(
+        merge_favoring_within_edits(base, ours, theirs, favor, MAX_EDIT_DISTANCE)
+            .unwrap_or_else(|| side.to_vec()),
+    )
+}
+
 /// The text merge behind [`merge_blob_3way`], with the edit limit as an
 /// argument so tests can reach it on small inputs.
 fn merge_within_edits(
@@ -904,20 +994,87 @@ fn merge_within_edits(
     theirs: &[u8],
     max_edits: usize,
 ) -> Option<Vec<u8>> {
+    merge_favoring_within_edits(base, ours, theirs, Favor::None, max_edits)
+}
+
+/// The line merge of [`merge_blob_3way_favoring`]. `None` when an input is
+/// binary or a side's diff hits `max_edits`, and with [`Favor::None`] also
+/// when the changes overlap.
+fn merge_favoring_within_edits(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    favor: Favor,
+    max_edits: usize,
+) -> Option<Vec<u8>> {
     if shown_as_binary(base) || shown_as_binary(ours) || shown_as_binary(theirs) {
         return None;
     }
     let base_lines = split_lines(base);
-    let ours_regions = changed_regions(&base_lines, &split_lines(ours), max_edits)?;
-    let theirs_regions = changed_regions(&base_lines, &split_lines(theirs), max_edits)?;
-    if regions_overlap(&ours_regions, &theirs_regions) {
-        return None;
+    let mut ours_regions = changed_regions(&base_lines, &split_lines(ours), max_edits)?;
+    let mut theirs_regions = changed_regions(&base_lines, &split_lines(theirs), max_edits)?;
+    let conflicted = conflicted_regions(&ours_regions, &theirs_regions);
+    let (ours_conflicted, theirs_conflicted) = conflicted.split_at(ours_regions.len());
+    match favor {
+        Favor::None if conflicted.iter().any(|&c| c) => return None,
+        Favor::None => {}
+        // Drop the other side's regions in every conflicting group; the
+        // favored side's regions then cover the group alone.
+        Favor::Ours => retain_unconflicted(&mut theirs_regions, theirs_conflicted),
+        Favor::Theirs => retain_unconflicted(&mut ours_regions, ours_conflicted),
     }
     Some(apply_merge_regions(
         &base_lines,
         &ours_regions,
         &theirs_regions,
     ))
+}
+
+/// Mark each region that belongs to a group of overlapping changes from
+/// both sides. The groups are the connected parts of the overlap relation
+/// of [`region_pair_overlaps`], so a change that overlaps a change that overlaps
+/// a third joins the same group. The result lists ours' regions, then
+/// theirs'.
+fn conflicted_regions(ours: &[MergeRegion], theirs: &[MergeRegion]) -> Vec<bool> {
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let n = ours.len();
+    let mut parent: Vec<usize> = (0..n + theirs.len()).collect();
+    let mut overlapped = vec![false; n + theirs.len()];
+    for (i, a) in ours.iter().enumerate() {
+        for (j, b) in theirs.iter().enumerate() {
+            if region_pair_overlaps(a, b) {
+                overlapped[i] = true;
+                overlapped[n + j] = true;
+                let (ra, rb) = (find(&mut parent, i), find(&mut parent, n + j));
+                parent[ra] = rb;
+            }
+        }
+    }
+    // A group with an overlap holds regions of both sides, and every one of
+    // its regions is conflicted.
+    let mut root_conflicted = vec![false; parent.len()];
+    for (i, _) in overlapped.iter().enumerate().filter(|(_, o)| **o) {
+        let r = find(&mut parent, i);
+        root_conflicted[r] = true;
+    }
+    (0..parent.len())
+        .map(|i| {
+            let r = find(&mut parent, i);
+            root_conflicted[r]
+        })
+        .collect()
+}
+
+/// Keep the regions whose flag in `conflicted` is false.
+fn retain_unconflicted(regions: &mut Vec<MergeRegion>, conflicted: &[bool]) {
+    let mut flags = conflicted.iter();
+    regions.retain(|_| !flags.next().copied().unwrap_or(false));
 }
 
 /// Group the edit script `base → side` into base-anchored changed regions
@@ -971,24 +1128,20 @@ fn changed_regions(
     Some(regions)
 }
 
-/// `true` if any ours-region overlaps any theirs-region on base lines.
+/// `true` if an ours-region and a theirs-region overlap on base lines.
 /// Modify spans use half-open `[start, start+len)` intersection; a pure
 /// insertion conflicts only when it lands strictly inside a modify span,
 /// or coincides with another insertion (ambiguous order) — insertions at a
 /// modify boundary are adjacent and merge cleanly.
-fn regions_overlap(ours: &[MergeRegion], theirs: &[MergeRegion]) -> bool {
-    ours.iter().any(|a| {
-        theirs.iter().any(|b| {
-            let (a_s, a_e) = (a.base_start, a.base_start + a.base_len);
-            let (b_s, b_e) = (b.base_start, b.base_start + b.base_len);
-            match (a.base_len == 0, b.base_len == 0) {
-                (true, true) => a_s == b_s,
-                (true, false) => b_s < a_s && a_s < b_e,
-                (false, true) => a_s < b_s && b_s < a_e,
-                (false, false) => a_s < b_e && b_s < a_e,
-            }
-        })
-    })
+fn region_pair_overlaps(a: &MergeRegion, b: &MergeRegion) -> bool {
+    let (a_s, a_e) = (a.base_start, a.base_start + a.base_len);
+    let (b_s, b_e) = (b.base_start, b.base_start + b.base_len);
+    match (a.base_len == 0, b.base_len == 0) {
+        (true, true) => a_s == b_s,
+        (true, false) => b_s < a_s && a_s < b_e,
+        (false, true) => a_s < b_s && b_s < a_e,
+        (false, false) => a_s < b_e && b_s < a_e,
+    }
 }
 
 /// Splice non-overlapping ours/theirs regions back onto `base`. Regions are
@@ -1160,8 +1313,7 @@ fn edit_script(
     max_edits: usize,
 ) -> EditScript {
     let mut changes = myers_changed(old, new, mode, max_edits);
-    compact_changes(old, &mut changes.old, mode);
-    compact_changes(new, &mut changes.new, mode);
+    compact_changes(old, new, &mut changes.old, &mut changes.new, mode);
     EditScript {
         ops: script_from_flags(old, new, &changes.old, &changes.new),
         minimal: changes.minimal,
@@ -1429,35 +1581,179 @@ fn stopped_search_end(
     (step, x, y, tail(x, y))
 }
 
-/// Slide each maximal run of changed lines downward while the line leaving the
-/// top of the run equals the line entering at the bottom — git's
-/// `xdl_change_compact` canonical placement, so a change among identical
-/// neighbours lands where git puts it.
-fn compact_changes(lines: &[DiffLine<'_>], changed: &mut [bool], mode: WhitespaceMode) {
-    let n = lines.len();
-    let mut i = 0;
-    while i < n {
-        if !changed[i] {
-            i += 1;
-            continue;
-        }
-        // [start, end) is a run of changed lines.
-        let start = i;
-        let mut end = i;
-        while end < n && changed[end] {
+/// A run of changed lines of one side, `[start, end)`. An empty run marks
+/// the place between two unchanged lines where the other side has a run.
+#[derive(Debug, Clone, Copy)]
+struct Group {
+    start: usize,
+    end: usize,
+}
+
+/// One side of the diff as git's `xdl_change_compact` sees it: its lines and
+/// which of them changed.
+struct Side<'s, 'l> {
+    lines: &'s [DiffLine<'l>],
+    changed: &'s mut [bool],
+    mode: WhitespaceMode,
+}
+
+impl Side<'_, '_> {
+    fn is_changed(&self, i: usize) -> bool {
+        self.changed.get(i).copied().unwrap_or(false)
+    }
+
+    /// The first group, which may be empty at line 0.
+    fn first_group(&self) -> Group {
+        let mut end = 0;
+        while self.is_changed(end) {
             end += 1;
         }
-        // Slide down: the line at `start` leaves the run and the line at
-        // `end` joins it, valid only when they are identical.
-        let (mut s, mut e) = (start, end);
-        while e < n && lines_equal(&lines[s], &lines[e], mode) {
-            changed[s] = false;
-            changed[e] = true;
-            s += 1;
-            e += 1;
-        }
-        i = e;
+        Group { start: 0, end }
     }
+
+    /// Move to the next group; `false` at the last one.
+    fn next_group(&self, g: &mut Group) -> bool {
+        if g.end == self.lines.len() {
+            return false;
+        }
+        g.start = g.end + 1;
+        g.end = g.start;
+        while self.is_changed(g.end) {
+            g.end += 1;
+        }
+        true
+    }
+
+    /// Move to the previous group; `false` at the first one.
+    fn previous_group(&self, g: &mut Group) -> bool {
+        if g.start == 0 {
+            return false;
+        }
+        g.end = g.start - 1;
+        g.start = g.end;
+        while g.start > 0 && self.is_changed(g.start - 1) {
+            g.start -= 1;
+        }
+        true
+    }
+
+    /// Slide the group down one line, joining the group below when they
+    /// meet; `false` when the lines do not allow it.
+    fn slide_down(&mut self, g: &mut Group) -> bool {
+        if g.end < self.lines.len()
+            && lines_equal(&self.lines[g.start], &self.lines[g.end], self.mode)
+        {
+            self.changed[g.start] = false;
+            self.changed[g.end] = true;
+            g.start += 1;
+            g.end += 1;
+            while self.is_changed(g.end) {
+                g.end += 1;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Slide the group up one line, joining the group above when they meet;
+    /// `false` when the lines do not allow it.
+    fn slide_up(&mut self, g: &mut Group) -> bool {
+        if g.start > 0 && lines_equal(&self.lines[g.start - 1], &self.lines[g.end - 1], self.mode) {
+            g.start -= 1;
+            g.end -= 1;
+            self.changed[g.start] = true;
+            self.changed[g.end] = false;
+            while g.start > 0 && self.is_changed(g.start - 1) {
+                g.start -= 1;
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Place the changed lines of `side` the way git's `xdl_change_compact`
+/// does, without the indent heuristic: each group slides up and down over
+/// identical lines, joining the groups it meets, then rests at the lowest
+/// place where it lines up with a change of `other`, or at the bottom when
+/// there is none. Two groups that can join therefore print as one hunk, as
+/// in git.
+fn compact_side(side: &mut Side<'_, '_>, other: &Side<'_, '_>) {
+    let mut g = side.first_group();
+    let mut go = other.first_group();
+    loop {
+        if g.end != g.start {
+            let mut earliest_end;
+            let mut end_matching_other;
+            loop {
+                let group_len = g.end - g.start;
+                end_matching_other = None;
+                while side.slide_up(&mut g) {
+                    other.previous_group(&mut go);
+                }
+                earliest_end = g.end;
+                if go.end > go.start {
+                    end_matching_other = Some(g.end);
+                }
+                while side.slide_down(&mut g) {
+                    other.next_group(&mut go);
+                    if go.end > go.start {
+                        end_matching_other = Some(g.end);
+                    }
+                }
+                if group_len == g.end - g.start {
+                    break;
+                }
+            }
+            if g.end != earliest_end && end_matching_other.is_some() {
+                while go.end == go.start {
+                    if !side.slide_up(&mut g) || !other.previous_group(&mut go) {
+                        break;
+                    }
+                }
+            }
+        }
+        if !side.next_group(&mut g) {
+            break;
+        }
+        other.next_group(&mut go);
+    }
+}
+
+/// Run [`compact_side`] on the old side, then on the new one, as git does.
+fn compact_changes(
+    old: &[DiffLine<'_>],
+    new: &[DiffLine<'_>],
+    old_changed: &mut [bool],
+    new_changed: &mut [bool],
+    mode: WhitespaceMode,
+) {
+    {
+        let mut a = Side {
+            lines: old,
+            changed: old_changed,
+            mode,
+        };
+        let b = Side {
+            lines: new,
+            changed: new_changed,
+            mode,
+        };
+        compact_side(&mut a, &b);
+    }
+    let mut b = Side {
+        lines: new,
+        changed: new_changed,
+        mode,
+    };
+    let a = Side {
+        lines: old,
+        changed: old_changed,
+        mode,
+    };
+    compact_side(&mut b, &a);
 }
 
 /// Build the `DiffOp` sequence from the per-side changed flags, in git's
@@ -1814,6 +2110,18 @@ mod tests {
     use super::*;
     use crate::object::{Blob, Tree};
     use crate::serialize;
+
+    /// Two runs that can slide together join into one, as in git:
+    /// `l4 l0 l5 l5` to `l5` removes the first three lines, not lines 1, 2
+    /// and 4.
+    #[test]
+    fn runs_that_can_meet_join_into_one_hunk() {
+        assert_eq!(
+            changed_line_spans(b"l4\nl0\nl5\nl5\n", b"l5\n"),
+            [(0..3, 0..0)]
+        );
+        assert!(changed_line_spans(b"a\nx\nb\n", b"a\nx\nb\n").is_empty());
+    }
     use tempfile::TempDir;
 
     #[test]
@@ -1844,6 +2152,7 @@ mod tests {
             old_mode: Some(EntryMode::Blob),
             new_mode: None,
             old_path: None,
+            similarity: None,
         }
     }
     fn added(path: &str, content: &[u8]) -> DiffEntry {
@@ -1855,6 +2164,7 @@ mod tests {
             old_mode: None,
             new_mode: Some(EntryMode::Blob),
             old_path: None,
+            similarity: None,
         }
     }
 
@@ -1888,6 +2198,7 @@ mod tests {
             old_mode: Some(EntryMode::Blob),
             new_mode: Some(EntryMode::Blob),
             old_path: None,
+            similarity: None,
         }];
         let before = es.clone();
         pair_renames(&mut es, |h| h);
@@ -3318,6 +3629,107 @@ mod tests {
     #[test]
     fn merge3_binary_side_conflicts() {
         assert_eq!(merge_blob_3way(b"a\nb\n", b"a\0\nb\n", b"a\nb\nc\n"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // merge_blob_3way_favoring — `-X ours` / `-X theirs`
+    // -----------------------------------------------------------------
+
+    fn favoring(base: &[u8], ours: &[u8], theirs: &[u8], favor: Favor) -> Vec<u8> {
+        merge_blob_3way_favoring(base, ours, theirs, favor).unwrap()
+    }
+
+    #[test]
+    fn favoring_takes_the_side_on_the_conflict_and_keeps_clean_changes() {
+        let base = b"1\n2\n3\n4\n5\n6\n7\n";
+        let ours = b"1\n2\nours\n4\n5\n6\nours 7\n";
+        let theirs = b"theirs 1\n2\ntheirs\n4\n5\n6\n7\n";
+        assert_eq!(
+            favoring(base, ours, theirs, Favor::Ours),
+            b"theirs 1\n2\nours\n4\n5\n6\nours 7\n"
+        );
+        assert_eq!(
+            favoring(base, ours, theirs, Favor::Theirs),
+            b"theirs 1\n2\ntheirs\n4\n5\n6\nours 7\n"
+        );
+    }
+
+    #[test]
+    fn favoring_covers_a_chain_of_overlaps_with_one_side() {
+        // ours changes lines 2-3 and 5-6; theirs changes 3-5, which overlaps
+        // both: one group, so the favored side's text spans lines 2-6.
+        let base = b"1\n2\n3\n4\n5\n6\n7\n";
+        let ours = b"1\nA\nB\n4\nC\nD\n7\n";
+        let theirs = b"1\n2\nX\nY\nZ\n6\n7\n";
+        assert_eq!(favoring(base, ours, theirs, Favor::Ours), ours);
+        assert_eq!(favoring(base, ours, theirs, Favor::Theirs), theirs);
+    }
+
+    #[test]
+    fn favoring_a_binary_conflict_takes_the_whole_side() {
+        let (base, ours, theirs) = (&b"a\0b"[..], &b"a\0o"[..], &b"a\0t"[..]);
+        assert_eq!(favoring(base, ours, theirs, Favor::Ours), ours);
+        assert_eq!(favoring(base, ours, theirs, Favor::Theirs), theirs);
+        assert_eq!(
+            merge_blob_3way_favoring(base, ours, theirs, Favor::None),
+            None
+        );
+    }
+
+    #[test]
+    fn favoring_past_the_edit_limit_takes_the_whole_side() {
+        let base = b"a\nb\n";
+        let ours = b"x\ny\n";
+        let theirs = b"p\nq\n";
+        assert_eq!(
+            merge_favoring_within_edits(base, ours, theirs, Favor::Ours, 1),
+            None
+        );
+        assert_eq!(favoring(base, ours, theirs, Favor::Ours), ours);
+    }
+
+    fn lines_of(symbols: &[u8]) -> Vec<u8> {
+        symbols.iter().flat_map(|s| [b'a' + s, b'\n']).collect()
+    }
+
+    proptest::proptest! {
+        /// A clean merge is the same with and without a side.
+        #[test]
+        fn favoring_agrees_with_a_clean_merge(
+            base in proptest::collection::vec(0u8..4, 0..10),
+            ours in proptest::collection::vec(0u8..4, 0..10),
+            theirs in proptest::collection::vec(0u8..4, 0..10),
+        ) {
+            let (base, ours, theirs) = (lines_of(&base), lines_of(&ours), lines_of(&theirs));
+            if let Some(clean) = merge_blob_3way(&base, &ours, &theirs) {
+                proptest::prop_assert_eq!(&favoring(&base, &ours, &theirs, Favor::Ours), &clean);
+                proptest::prop_assert_eq!(&favoring(&base, &ours, &theirs, Favor::Theirs), &clean);
+            }
+        }
+
+        /// Swapping the sides and the favor gives the same merge; a side
+        /// that did not change yields the other side; every result line
+        /// comes from an input, so no conflict marker is ever written.
+        #[test]
+        fn favoring_is_symmetric_and_writes_only_input_lines(
+            base in proptest::collection::vec(0u8..4, 0..10),
+            ours in proptest::collection::vec(0u8..4, 0..10),
+            theirs in proptest::collection::vec(0u8..4, 0..10),
+        ) {
+            let (base, ours, theirs) = (lines_of(&base), lines_of(&ours), lines_of(&theirs));
+            let merged = favoring(&base, &ours, &theirs, Favor::Ours);
+            proptest::prop_assert_eq!(&merged, &favoring(&base, &theirs, &ours, Favor::Theirs));
+            proptest::prop_assert_eq!(&favoring(&base, &ours, &base, Favor::Theirs), &ours);
+            proptest::prop_assert_eq!(&favoring(&base, &base, &theirs, Favor::Ours), &theirs);
+            proptest::prop_assert_eq!(&favoring(&base, &ours, &ours, Favor::Theirs), &ours);
+            let known: std::collections::HashSet<&[u8]> = [&base, &ours, &theirs]
+                .iter()
+                .flat_map(|b| b.split(|&c| c == b'\n'))
+                .collect();
+            for line in merged.split(|&c| c == b'\n') {
+                proptest::prop_assert!(known.contains(line));
+            }
+        }
     }
 
     // -----------------------------------------------------------------

@@ -38,6 +38,7 @@ const ACCEPTED_SCHEMES: &[(&str, &str)] = &[
     ("kit+s3://", "s3"),
     ("kit+ssh://", "ssh"),
     ("kit+memory://", "memory"),
+    ("kit+closure://", "closure"),
     ("git+https://", "git"),
     ("git+ssh://", "git"),
     ("git+file://", "git"),

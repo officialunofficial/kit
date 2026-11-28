@@ -40,6 +40,12 @@ pub enum AncestorError {
     /// The walk reached its cap.
     #[error(transparent)]
     Limit(StoreError),
+    /// The walk needs a parent of a commit in the shallow record, which the
+    /// repository does not hold (SPEC-SHALLOW §6).
+    #[error(
+        "the merge base is beyond the shallow boundary; run kit fetch --deepen to fetch more history"
+    )]
+    BeyondShallowBoundary,
 }
 
 /// Whether `err` names `culprit` as a commit that cannot be read or is not

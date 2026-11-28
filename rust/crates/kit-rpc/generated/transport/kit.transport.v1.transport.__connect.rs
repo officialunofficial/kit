@@ -62,6 +62,14 @@ pub type OwnedDownloadPackRequestView = ::buffa::view::OwnedView<
 pub type OwnedDownloadPackResponseView = ::buffa::view::OwnedView<
     __buffa::view::DownloadPackResponseView<'static>,
 >;
+///Shorthand for `OwnedView<DownloadWindowRequestView<'static>>`.
+pub type OwnedDownloadWindowRequestView = ::buffa::view::OwnedView<
+    __buffa::view::DownloadWindowRequestView<'static>,
+>;
+///Shorthand for `OwnedView<DownloadWindowResponseView<'static>>`.
+pub type OwnedDownloadWindowResponseView = ::buffa::view::OwnedView<
+    __buffa::view::DownloadWindowResponseView<'static>,
+>;
 ///Shorthand for `OwnedView<GetServerInfoRequestView<'static>>`.
 pub type OwnedGetServerInfoRequestView = ::buffa::view::OwnedView<
     __buffa::view::GetServerInfoRequestView<'static>,
@@ -385,6 +393,38 @@ for __buffa::view::DownloadPackResponseView<'_> {
 }
 impl ::connectrpc::Encodable<DownloadPackResponse>
 for ::buffa::view::OwnedView<__buffa::view::DownloadPackResponseView<'static>> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self.reborrow(), codec)
+    }
+    /// An `OwnedView` still holds the buffer it was decoded from, so
+    /// its large fields can be handed to the response body by
+    /// reference count instead of copied. The bare view impl above
+    /// cannot do this: it has borrows but no buffer to name.
+    fn encode_segments(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::connectrpc::EncodedBody, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body_segments(
+            self.reborrow(),
+            self.bytes(),
+            codec,
+        )
+    }
+}
+impl ::connectrpc::Encodable<DownloadWindowResponse>
+for __buffa::view::DownloadWindowResponseView<'_> {
+    fn encode(
+        &self,
+        codec: ::connectrpc::CodecFormat,
+    ) -> ::std::result::Result<::buffa::bytes::Bytes, ::connectrpc::ConnectError> {
+        ::connectrpc::__codegen::encode_view_body(self, codec)
+    }
+}
+impl ::connectrpc::Encodable<DownloadWindowResponse>
+for ::buffa::view::OwnedView<__buffa::view::DownloadWindowResponseView<'static>> {
     fn encode(
         &self,
         codec: ::connectrpc::CodecFormat,
@@ -812,6 +852,12 @@ pub const TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC: ::connectrpc::Spec = ::connectrp
         ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
+/// Static [`Spec`](::connectrpc::Spec) for the `DownloadWindow` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
+pub const TRANSPORT_SERVICE_DOWNLOAD_WINDOW_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
+        "/kit.transport.v1.TransportService/DownloadWindow",
+        ::connectrpc::StreamType::ServerStream,
+    )
+    .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Static [`Spec`](::connectrpc::Spec) for the `GetServerInfo` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const TRANSPORT_SERVICE_GET_SERVER_INFO_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/kit.transport.v1.TransportService/GetServerInfo",
@@ -1086,6 +1132,28 @@ pub trait TransportService: Send + Sync + 'static {
         Output = ::connectrpc::ServiceResult<
             ::connectrpc::ServiceStream<
                 impl ::connectrpc::Encodable<DownloadPackResponse> + Send + use<Self>,
+            >,
+        >,
+    > + Send;
+    /// Server-streaming download of a shallow window (SPEC-SHALLOW §8.2). The
+    /// stream holds one or more packs, each a `pack` header followed by its
+    /// `chunk` messages ending with `chunk.last = true`, then one `boundary`
+    /// message that ends the stream. Only a server that advertises
+    /// `supports_download_window` serves it; others answer `unimplemented`.
+    ///
+    /// `request` is borrowed from the request body and is valid for the
+    /// duration of the call (until the response stream is returned);
+    /// message fields are read directly on it (zero-copy). Data the
+    /// returned stream needs must be copied out or converted via
+    /// `.to_owned_message()`.
+    fn download_window(
+        &self,
+        ctx: ::connectrpc::RequestContext,
+        request: ::connectrpc::ServiceRequest<'_, DownloadWindowRequest>,
+    ) -> impl ::std::future::Future<
+        Output = ::connectrpc::ServiceResult<
+            ::connectrpc::ServiceStream<
+                impl ::connectrpc::Encodable<DownloadWindowResponse> + Send + use<Self>,
             >,
         >,
     > + Send;
@@ -1519,6 +1587,32 @@ impl<S: TransportService> TransportServiceExt for S {
                 }),
             )
             .with_spec(TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC)
+            .route_view_server_stream::<
+                _,
+                _,
+                DownloadWindowResponse,
+            >(
+                TRANSPORT_SERVICE_SERVICE_NAME,
+                "DownloadWindow",
+                ::connectrpc::view_streaming_handler_fn({
+                    let svc = ::std::sync::Arc::clone(&self);
+                    move |
+                        ctx,
+                        req: ::buffa::view::OwnedView<
+                            __buffa::view::DownloadWindowRequestView<'static>,
+                        >|
+                    {
+                        let svc = ::std::sync::Arc::clone(&svc);
+                        async move {
+                            let sreq = ::connectrpc::ServiceRequest::<
+                                DownloadWindowRequest,
+                            >::from_parts(req.reborrow(), req.bytes());
+                            svc.download_window(ctx, sreq).await
+                        }
+                    }
+                }),
+            )
+            .with_spec(TRANSPORT_SERVICE_DOWNLOAD_WINDOW_SPEC)
             .route_view(
                 TRANSPORT_SERVICE_SERVICE_NAME,
                 "GetServerInfo",
@@ -1888,6 +1982,12 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                 Some(
                     ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC),
+                )
+            }
+            "DownloadWindow" => {
+                Some(
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
+                        .with_spec(TRANSPORT_SERVICE_DOWNLOAD_WINDOW_SPEC),
                 )
             }
             "GetServerInfo" => {
@@ -2280,6 +2380,30 @@ impl<T: TransportService> ::connectrpc::Dispatcher for TransportServiceServer<T>
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
                                 DownloadPackResponse,
+                                _,
+                                _,
+                            >(s, format)),
+                    )
+                })
+            }
+            "DownloadWindow" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        DownloadWindowRequest,
+                    >(request, format)?;
+                    let req: __buffa::view::DownloadWindowRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        DownloadWindowRequest,
+                    >::from_parts(&req, &body);
+                    let resp = svc.download_window(ctx, req).await?;
+                    Ok(
+                        resp
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                DownloadWindowResponse,
                                 _,
                                 _,
                             >(s, format)),
@@ -2736,6 +2860,45 @@ where
                 &self.transport,
                 &self.config,
                 TRANSPORT_SERVICE_DOWNLOAD_PACK_SPEC
+                    .with_origin(::connectrpc::SpecOrigin::Client),
+                request,
+                options,
+            )
+            .await
+    }
+    /// Call the DownloadWindow RPC. Sends a request to /kit.transport.v1.TransportService/DownloadWindow.
+    pub async fn download_window(
+        &self,
+        request: DownloadWindowRequest,
+    ) -> Result<
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::DownloadWindowResponseView<'static>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        self.download_window_with_options(
+                request,
+                ::connectrpc::client::CallOptions::default(),
+            )
+            .await
+    }
+    /// Call the DownloadWindow RPC with explicit per-call options. Options override [`ClientConfig`](::connectrpc::client::ClientConfig) defaults.
+    pub async fn download_window_with_options(
+        &self,
+        request: DownloadWindowRequest,
+        options: ::connectrpc::client::CallOptions,
+    ) -> Result<
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::DownloadWindowResponseView<'static>,
+        >,
+        ::connectrpc::ConnectError,
+    > {
+        ::connectrpc::client::call_server_stream(
+                &self.transport,
+                &self.config,
+                TRANSPORT_SERVICE_DOWNLOAD_WINDOW_SPEC
                     .with_origin(::connectrpc::SpecOrigin::Client),
                 request,
                 options,

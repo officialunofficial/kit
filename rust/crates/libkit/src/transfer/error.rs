@@ -27,6 +27,10 @@ pub enum Error {
     /// The URL has no valid form.
     #[error("malformed URL: {0}")]
     MalformedUrl(String),
+    /// A `kit+closure://` export cannot be opened: its manifest is missing,
+    /// damaged or records no branch.
+    #[error("closure export: {0}")]
+    Closure(String),
     /// The remote holds no repository of this name.
     #[error(
         "repository `{identity}` not found at {origin}; check the remote URL path against the server's configured name (an empty path selects `default` on a single-repository deployment)"

@@ -101,5 +101,20 @@ pub mod ssh_frame {
                 super::super::super::super::__buffa::view::PackChunkView<'a>,
             >,
         ),
+        DownloadWindow(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadWindowView<'a>,
+            >,
+        ),
+        DownloadWindowPack(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadWindowPackView<'a>,
+            >,
+        ),
+        DownloadWindowBoundary(
+            ::buffa::alloc::boxed::Box<
+                super::super::super::super::__buffa::view::DownloadWindowBoundaryView<'a>,
+            >,
+        ),
     }
 }

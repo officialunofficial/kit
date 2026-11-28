@@ -1,4 +1,5 @@
-//! `kit log [<rev>] [<A>..<B> | <A>...<B>]` — walk commit history.
+//! `kit log [<rev>] [<A>..<B> | <A>...<B>] [[--] <path>...]` — walk commit
+//! history.
 //!
 //! With no argument the walk starts at `HEAD`. A single `<rev>` starts there
 //! instead; a range `A..B` shows commits reachable from `B` but not `A`
@@ -44,7 +45,13 @@
 //! that the output shows, so a filter or a limit leaves no open line. It
 //! excludes `-p`, `--stat` and `--format=json`.
 //!
-//! History filters — `--author`/`--grep` (substring matches),
+//! Paths after the revision keep the commits that change them, with git's
+//! default history simplification; see `libkit::log`. A path is relative to
+//! the current directory. Without `--`, each path must exist in the worktree
+//! and must not also resolve as a revision. `--follow` continues under the
+//! old name of a renamed file and needs exactly one path.
+//!
+//! History filters — `--author`/`--grep` (regular expressions),
 //! `--since`/`--until` (a small explicit date grammar, see
 //! `libkit::log::date`), and `--no-merges`/`--first-parent` — are
 //! applied to the walk before `-n`'s limit, so the limit caps the
@@ -65,7 +72,7 @@ use clap::{Parser, ValueEnum};
 use kit_core::Hash;
 use kit_core::object::Commit;
 use kit_core::refs::{self, Head};
-use libkit::log::{self, Filter, Query, RefKind};
+use libkit::log::{self, Filter, Query, RefKind, lines};
 
 use crate::clap_args;
 use crate::exit;
@@ -118,21 +125,39 @@ struct LogOpts {
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "7")]
     abbrev: Option<usize>,
 
-    /// Only show commits whose author identity contains `<pattern>`
-    /// (substring match against both the short display form — `kit
-    /// log`'s `Author:` line — and the full `kind:hex`/`mid:N` form used
-    /// by `--format=json`'s `author` field). Unlike git, kit identities
-    /// are opaque (Ed25519 keys, `mid:N` numbers, DID keys) rather than
-    /// free-text `Name <email>`, so this is a plain substring match, not
-    /// a regex.
+    /// Only show commits whose author identity matches the regular
+    /// expression `<pattern>`, in the short display form (the `Author:`
+    /// line) or the full `kind:hex`/`mid:N` form (`--format=json`'s
+    /// `author` field). It may repeat; any pattern may match.
     #[arg(long, value_name = "PATTERN")]
-    author: Option<String>,
+    author: Vec<String>,
 
-    /// Only show commits whose message (title + body) contains
-    /// `<pattern>` (substring match, case-sensitive — like git's default
-    /// `--grep`).
+    /// Only show commits whose message (title and body) matches the regular
+    /// expression `<pattern>`, with `^` and `$` at each line. It may
+    /// repeat; any pattern may match, or every one with `--all-match`.
     #[arg(long, value_name = "PATTERN")]
-    grep: Option<String>,
+    grep: Vec<String>,
+
+    /// Take the `--author` and `--grep` patterns literally.
+    #[arg(short = 'F', long = "fixed-strings")]
+    fixed_strings: bool,
+
+    /// Ignore case in the `--author` and `--grep` patterns.
+    #[arg(short = 'i', long = "regexp-ignore-case")]
+    ignore_case: bool,
+
+    /// Read the patterns as extended regular expressions (the default).
+    #[arg(short = 'E', long = "extended-regexp")]
+    extended_regexp: bool,
+
+    /// Keep only the commits whose message matches every `--grep`.
+    #[arg(long = "all-match")]
+    all_match: bool,
+
+    /// Keep only the commits whose message does not pass the `--grep`
+    /// patterns.
+    #[arg(long = "invert-grep")]
+    invert_grep: bool,
 
     /// Only show commits at or after this time. Accepts `@<unix-seconds>`,
     /// `now`/`today`/`yesterday`, `<N> <unit> ago`
@@ -171,8 +196,13 @@ struct LogOpts {
     /// Start the walk at `HEAD`, every local branch, every remote-tracking
     /// ref and every tag, not at `HEAD` alone. Each commit appears once. It
     /// cannot combine with a revision or a range.
-    #[arg(long, conflicts_with = "start")]
+    #[arg(long)]
     all: bool,
+
+    /// Continue the history of the one path under its old name when a
+    /// commit renames it.
+    #[arg(long)]
+    follow: bool,
 
     /// Print the refs that name each commit after its id: `HEAD`, the local
     /// branches, the tags (as `tag: <name>`) and the remote-tracking refs.
@@ -185,10 +215,46 @@ struct LogOpts {
     #[arg(long, conflicts_with_all = ["patch", "stat"])]
     graph: bool,
 
-    /// Optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`), or
-    /// symmetric range (`A...B`). Defaults to `HEAD`; an empty range side
-    /// means `HEAD`.
-    start: Option<String>,
+    /// Follow the history of the lines `<start>,<end>` of `<file>`, as
+    /// `git log -L`. The range takes the forms of `kit blame -L`. It may
+    /// repeat.
+    #[arg(
+        short = 'L',
+        value_name = "start,end:file",
+        conflicts_with_all = [
+            "stat", "graph", "follow", "all", "author", "grep", "since", "until", "no_merges",
+            "fixed_strings", "ignore_case", "all_match", "invert_grep",
+        ]
+    )]
+    line_ranges: Vec<String>,
+
+    /// An optional starting revision (`<rev>`), range (`A..B`, `A..`, `..B`)
+    /// or symmetric range (`A...B`), then paths. The walk starts at `HEAD`
+    /// without a revision; an empty range side means `HEAD`.
+    args: Vec<String>,
+}
+
+/// The compiled `--author` and `--grep` patterns.
+fn patterns_of(opts: &LogOpts) -> Result<(Option<log::Patterns>, Option<log::Patterns>), String> {
+    if opts.grep.is_empty() && (opts.all_match || opts.invert_grep) {
+        return Err("--all-match and --invert-grep need a --grep pattern".to_owned());
+    }
+    let options = log::PatternOptions {
+        fixed: opts.fixed_strings,
+        ignore_case: opts.ignore_case,
+    };
+    let compile = |sources: &[String], flag: &str| {
+        if sources.is_empty() {
+            return Ok(None);
+        }
+        log::Patterns::new(sources.to_vec(), options)
+            .map(Some)
+            .map_err(|e| format!("invalid --{flag} pattern: {e}"))
+    };
+    Ok((
+        compile(&opts.author, "author")?,
+        compile(&opts.grep, "grep")?,
+    ))
 }
 
 impl LogOpts {
@@ -220,6 +286,12 @@ impl LogOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
+    // Arguments after `--` are paths. clap would drop the separator, so it
+    // never sees them.
+    let (args, explicit) = match args.iter().position(|a| a == "--") {
+        Some(at) => (&args[..at], Some(&args[at + 1..])),
+        None => (args, None),
+    };
     let opts = match clap_args::parse::<LogOpts>("kit log", args) {
         Ok(o) => o,
         Err(code) => return code,
@@ -263,27 +335,46 @@ pub fn run(args: &[String]) -> u8 {
         Ok(repo) => repo,
         Err(code) => return code,
     };
+    let (start, paths) = match split_args(&repo, &cwd, &opts.args, opts.all, explicit) {
+        Ok(split) => split,
+        Err(code) => return code,
+    };
+    if !opts.line_ranges.is_empty() {
+        let has_paths = !paths.is_empty() || explicit.is_some();
+        return run_lines(&opts, &repo, &cwd, start.as_deref(), has_paths);
+    }
+    if opts.follow && paths.len() != 1 {
+        return emit_err("--follow requires exactly one path", exit::USAGE);
+    }
     // `-n <limit>` caps the *filtered* set, not the raw walk, so it
     // composes with `--author`/`--grep`/`--since`/`--until`/`--no-merges`
     // the way git's does.
+    let (author, grep) = match patterns_of(&opts) {
+        Ok(p) => p,
+        Err(e) => return emit_err(&e, exit::USAGE),
+    };
     let query = Query {
-        start: opts.start.clone(),
+        start: start.clone(),
         all: opts.all,
         first_parent: opts.first_parent,
         filter: Filter {
-            author: opts.author.clone(),
-            grep: opts.grep.clone(),
+            author,
+            grep,
+            all_match: opts.all_match,
+            invert_grep: opts.invert_grep,
             since,
             until,
             no_merges: opts.no_merges,
         },
         limit: opts.limit,
+        paths,
+        follow: opts.follow,
     };
     let entries = match log::history(&repo, &query) {
         Ok(Some(entries)) => entries,
         Ok(None) => {
             // No HEAD yet and no explicit revision → nothing to show.
-            if opts.start.is_none() && matches!(fmt, Format::Default | Format::Oneline) {
+            if start.is_none() && matches!(fmt, Format::Default | Format::Oneline) {
                 let mut stderr = std::io::stderr().lock();
                 let _ = writeln!(stderr, "no commits yet");
             }
@@ -357,6 +448,7 @@ fn print_entries(
                 c.parents.first().copied(),
                 c.tree_hash,
                 opts.stat,
+                &entry.paths,
             ) {
                 // The default format ends each commit with a blank line.
                 Ok(true) if fmt == Format::Default => {
@@ -368,6 +460,212 @@ fn print_entries(
         }
     }
     exit::OK
+}
+
+/// `kit log -L`: follow ranges of lines back through the history.
+fn run_lines(
+    opts: &LogOpts,
+    repo: &libkit::Repo,
+    cwd: &std::path::Path,
+    start: Option<&str>,
+    has_paths: bool,
+) -> u8 {
+    if has_paths {
+        return emit_err("-L does not combine with paths", exit::USAGE);
+    }
+    if start.is_some_and(|s| s.contains("..")) {
+        return emit_err("-L takes one revision, not a range", exit::USAGE);
+    }
+    let root = repo.layout().worktree_root();
+    let mut ranges = Vec::with_capacity(opts.line_ranges.len());
+    for arg in &opts.line_ranges {
+        let Some((spec, file)) = arg
+            .split_once(':')
+            .filter(|(spec, file)| !spec.is_empty() && !file.is_empty())
+        else {
+            let msg = format!("-L argument not '<start>,<end>:<file>': {arg}");
+            return emit_err(&msg, exit::USAGE);
+        };
+        match super::index_path_for_arg(root, &cwd.join(file)) {
+            Ok(path) => ranges.push((spec.to_owned(), path)),
+            Err(e) => return emit_err(&format!("-L {arg}: {e}"), exit::USAGE),
+        }
+    }
+    let request = lines::Request {
+        start,
+        ranges: &ranges,
+        first_parent: opts.first_parent,
+        limit: opts.limit,
+    };
+    let entries = match lines::history(repo, &request) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => {
+            let _ = writeln!(std::io::stderr().lock(), "no commits yet");
+            return exit::OK;
+        }
+        Err(lines::Error::Log(e)) => {
+            let e = libkit::Error::from(e);
+            return emit_err(&exit_map::message(&e), exit_map::exit_code(&e));
+        }
+        Err(e @ (lines::Error::Range(_) | lines::Error::NoSuchPath { .. })) => {
+            return emit_err(&format!("-L: {e}"), exit::USAGE);
+        }
+        Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+    };
+    let decorations = if opts.decorate {
+        match decorations(repo) {
+            Ok(map) => map,
+            Err(code) => return code,
+        }
+    } else {
+        HashMap::new()
+    };
+    let (fmt, abbrev) = (opts.render_format(), opts.abbrev_len());
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for entry in &entries {
+        if signal::is_shutdown() {
+            return exit::TEMPFAIL;
+        }
+        if fmt == Format::Json {
+            let message = String::from_utf8_lossy(&entry.commit.message).into_owned();
+            let title = message.lines().next().unwrap_or("");
+            let hunks = hunks_json(&entry.files);
+            emit_json_entry(
+                &mut out,
+                &entry.hash,
+                &entry.commit,
+                title,
+                &message,
+                Some(("hunks", &hunks)),
+            );
+            continue;
+        }
+        let decoration = decorations
+            .get(&entry.hash)
+            .map(|names| format!("({})", names.join(", ")));
+        render_commit(
+            &mut out,
+            fmt,
+            abbrev,
+            (&entry.hash, &entry.commit),
+            decoration.as_deref(),
+        );
+        // A blank line, then the hunks, as git prints them. The default
+        // format already ends the message with a blank line.
+        if fmt == Format::Oneline {
+            let _ = writeln!(out);
+        }
+        for file in &entry.files {
+            write_line_hunks(&mut out, file);
+        }
+        if fmt == Format::Default {
+            let _ = writeln!(out);
+        }
+    }
+    let _ = out.flush();
+    exit::OK
+}
+
+/// The diff of what a commit did to the ranges of one file.
+fn write_line_hunks(out: &mut impl Write, file: &lines::FileHunks) {
+    let path = format::safe_text(&file.path);
+    let _ = writeln!(out, "diff --git a/{path} b/{path}");
+    // The file header lines of git's diff output, as `log -L` prints them
+    // since git 2.55.
+    let (new_hash, new_mode) = file.new;
+    match file.old {
+        None => {
+            let _ = writeln!(
+                out,
+                "new file mode {}",
+                super::diff::git_octal(Some(new_mode))
+            );
+            let _ = writeln!(
+                out,
+                "index {}..{}",
+                super::diff::abbrev(None),
+                super::diff::abbrev(Some(new_hash))
+            );
+        }
+        Some((old_hash, old_mode)) if old_mode == new_mode => {
+            let _ = writeln!(
+                out,
+                "index {}..{} {}",
+                super::diff::abbrev(Some(old_hash)),
+                super::diff::abbrev(Some(new_hash)),
+                super::diff::git_octal(Some(new_mode))
+            );
+        }
+        Some((old_hash, old_mode)) => {
+            let _ = writeln!(out, "old mode {}", super::diff::git_octal(Some(old_mode)));
+            let _ = writeln!(out, "new mode {}", super::diff::git_octal(Some(new_mode)));
+            let _ = writeln!(
+                out,
+                "index {}..{}",
+                super::diff::abbrev(Some(old_hash)),
+                super::diff::abbrev(Some(new_hash))
+            );
+        }
+    }
+    if file.created {
+        let _ = writeln!(out, "--- /dev/null");
+    } else {
+        let _ = writeln!(out, "--- a/{path}");
+    }
+    let _ = writeln!(out, "+++ b/{path}");
+    for h in &file.hunks {
+        let _ = write!(
+            out,
+            "@@ -{},{} +{},{} @@",
+            h.old_start, h.old_lines, h.new_start, h.new_lines
+        );
+        if h.func.is_empty() {
+            let _ = writeln!(out);
+        } else {
+            let func = format::safe_text(&String::from_utf8_lossy(&h.func));
+            let _ = writeln!(out, " {func}");
+        }
+        for line in &h.lines {
+            let text = format::safe_text(&String::from_utf8_lossy(&line.text));
+            let _ = writeln!(out, "{}{text}", char::from(line.origin));
+            if !line.newline {
+                let _ = writeln!(out, "\\ No newline at end of file");
+            }
+        }
+    }
+}
+
+/// The `hunks` field of a JSON record: every hunk of every file, in order.
+fn hunks_json(files: &[lines::FileHunks]) -> String {
+    let mut items = Vec::new();
+    for file in files {
+        for h in &file.hunks {
+            let lines: Vec<String> = h
+                .lines
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{}{}",
+                        char::from(l.origin),
+                        String::from_utf8_lossy(&l.text)
+                    )
+                })
+                .collect();
+            let mut obj = format::JsonObject::new();
+            obj.field_str("path", &file.path)
+                .field_u64("old_start", to_u64(h.old_start))
+                .field_u64("old_lines", to_u64(h.old_lines))
+                .field_u64("new_start", to_u64(h.new_start))
+                .field_u64("new_lines", to_u64(h.new_lines))
+                .field_raw("lines", &format::json_string_array(&lines));
+            items.push(obj.finish());
+        }
+    }
+    format!("[{}]", items.join(","))
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 /// Print one commit with the graph in the left margin. The error is the exit
@@ -422,6 +720,98 @@ fn print_graph_commit(
     Ok(())
 }
 
+/// Split the positional arguments into the revision selection and the paths,
+/// in the form of the index. `explicit` holds the arguments after `--`. The
+/// error is the exit code, after the message.
+pub(super) fn split_args(
+    repo: &libkit::Repo,
+    cwd: &std::path::Path,
+    args: &[String],
+    all: bool,
+    explicit: Option<&[String]>,
+) -> Result<(Option<String>, Vec<String>), u8> {
+    let mut positional = args.iter();
+    let mut start = None;
+    let mut raw: Vec<&String> = Vec::new();
+    if explicit.is_some() {
+        start = positional.next().cloned();
+        if let Some(extra) = positional.next() {
+            let msg = format!("unexpected argument '{extra}' before '--'");
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+    } else if !all && let Some(first) = positional.next() {
+        let in_worktree = cwd.join(first).symlink_metadata().is_ok();
+        if is_revision(repo, first) {
+            if in_worktree {
+                let msg = format!(
+                    "ambiguous argument '{first}': both revision and filename; \
+                     use '--' to separate paths from revisions"
+                );
+                return Err(emit_err(&msg, exit::USAGE));
+            }
+            start = Some(first.clone());
+        } else if in_worktree {
+            raw.push(first);
+        } else {
+            // Neither a path nor a revision: report the revision error.
+            start = Some(first.clone());
+        }
+    }
+    for arg in positional {
+        if cwd.join(arg).symlink_metadata().is_err() {
+            let msg = format!(
+                "ambiguous argument '{arg}': unknown revision or path not in the worktree; \
+                 use '--' to separate paths from revisions"
+            );
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+        raw.push(arg);
+    }
+    raw.extend(explicit.unwrap_or_default());
+    if all && start.is_some() {
+        return Err(emit_err(
+            "--all does not combine with a revision or a range",
+            exit::USAGE,
+        ));
+    }
+    let root = repo.layout().worktree_root();
+    let mut paths = Vec::with_capacity(raw.len());
+    for arg in raw {
+        if arg.starts_with(':') || arg.contains(['*', '?', '[']) {
+            let msg = format!("'{arg}': globs and pathspec magic are not supported");
+            return Err(emit_err(&msg, exit::USAGE));
+        }
+        let abs = cwd.join(arg);
+        let at_root = matches!(
+            (abs.canonicalize(), root.canonicalize()),
+            (Ok(a), Ok(b)) if a == b
+        );
+        if at_root {
+            paths.push(String::new());
+            continue;
+        }
+        match super::index_path_for_arg(root, &abs) {
+            Ok(path) => paths.push(path),
+            Err(e) => return Err(emit_err(&e, exit::USAGE)),
+        }
+    }
+    Ok((start, paths))
+}
+
+/// Does `arg` name a revision or a range? Each side of a range resolves, and
+/// an empty side means `HEAD`. A file named `a..b` is not a range unless
+/// both `a` and `b` resolve.
+fn is_revision(repo: &libkit::Repo, arg: &str) -> bool {
+    let resolves = |rev: &str| {
+        rev.is_empty()
+            || libkit::revspec::resolve_revision(repo.store(), repo.layout(), rev).is_ok()
+    };
+    match arg.split_once("...").or_else(|| arg.split_once("..")) {
+        Some((a, b)) => resolves(a) && resolves(b),
+        None => !arg.is_empty() && resolves(arg),
+    }
+}
+
 /// Parse the value of `--since` or `--until`. A bad date is a usage error,
 /// and the error is the exit code, after the message.
 fn parse_date(flag: &str, text: Option<&str>, now: u64) -> Result<Option<u64>, u8> {
@@ -465,6 +855,13 @@ fn decorations(repo: &libkit::Repo) -> Result<HashMap<Hash, Vec<String>>, u8> {
             }
             _ => list.insert(0, "HEAD".to_owned()),
         }
+    }
+    // A commit in the shallow record ends its history here, and git marks
+    // it `grafted`.
+    let boundary =
+        kit_core::shallow::read(layout).map_err(|e| emit_err(&e.to_string(), exit::DATAERR))?;
+    for commit in boundary.iter() {
+        names.entry(*commit).or_default().push("grafted".to_owned());
     }
     Ok(names)
 }
@@ -511,7 +908,7 @@ fn render_commit(
             let _ = writeln!(out);
         }
         Format::Json => {
-            emit_json_entry(out, hash, c, title, &full_message);
+            emit_json_entry(out, hash, c, title, &full_message, None);
         }
     }
 }
@@ -538,6 +935,7 @@ fn emit_json_entry(
     c: &kit_core::object::Commit,
     title: &str,
     full_message: &str,
+    extra: Option<(&str, &str)>,
 ) {
     let _ = out.write_all(b"{");
     let _ = write!(out, "\"hash\":\"{}\"", format::hex_hash(hash));
@@ -562,6 +960,10 @@ fn emit_json_entry(
         ",\"message\":\"{}\"",
         format::json_escape(full_message)
     );
+    // One more field, already JSON.
+    if let Some((key, raw)) = extra {
+        let _ = write!(out, ",\"{key}\":{raw}");
+    }
     let _ = out.write_all(b"}\n");
 }
 
@@ -579,8 +981,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -590,7 +997,9 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -603,8 +1012,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -614,7 +1028,9 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Oneline);
     }
@@ -627,8 +1043,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -638,7 +1059,9 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Default);
     }
@@ -651,8 +1074,13 @@ mod tests {
             limit: None,
             abbrev_commit: false,
             abbrev: None,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -662,7 +1090,9 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
+            line_ranges: Vec::new(),
         };
         assert_eq!(opts.render_format(), Format::Json);
     }
@@ -674,8 +1104,13 @@ mod tests {
             limit: None,
             abbrev_commit,
             abbrev,
-            author: None,
-            grep: None,
+            author: Vec::new(),
+            grep: Vec::new(),
+            fixed_strings: false,
+            ignore_case: false,
+            extended_regexp: false,
+            all_match: false,
+            invert_grep: false,
             since: None,
             until: None,
             no_merges: false,
@@ -685,7 +1120,9 @@ mod tests {
             all: false,
             decorate: false,
             graph: false,
-            start: None,
+            args: Vec::new(),
+            follow: false,
+            line_ranges: Vec::new(),
         }
     }
 

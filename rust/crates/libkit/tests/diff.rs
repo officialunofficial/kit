@@ -6,7 +6,7 @@ use std::fs;
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-use kit_core::ops::{DiffKind, WhitespaceMode};
+use kit_core::ops::{DiffKind, RenameOptions, WhitespaceMode};
 use kit_core::refs;
 use kit_core::serialize;
 use kit_core::store::ObjectStore;
@@ -109,7 +109,7 @@ fn try_run(
     let request = Request {
         staged,
         merge_base,
-        renames,
+        renames: renames.then(RenameOptions::default),
         args: &args,
     };
     let diff = diff::compute(&f.repo, &request)?;
@@ -243,7 +243,7 @@ fn a_patch_body_and_the_stats_come_from_the_same_entries() {
     let request = Request {
         staged: false,
         merge_base: false,
-        renames: true,
+        renames: Some(RenameOptions::default()),
         args: &args,
     };
     let diff = diff::compute(&f.repo, &request).unwrap();
@@ -284,7 +284,7 @@ fn a_diff_of_the_worktree_never_writes_to_the_store() {
 fn a_missing_side_is_the_empty_tree() {
     let f = fixture();
     let tree = libkit::revspec::tree_of(f.repo.store(), &f.second).unwrap();
-    let diff = diff::between_trees(&f.repo, None, Some(tree)).unwrap();
+    let diff = diff::between_trees(&f.repo, None, Some(tree), None).unwrap();
     let kinds: Vec<_> = diff.entries().iter().map(|e| e.kind).collect();
     assert_eq!(kinds, [DiffKind::Added, DiffKind::Added]);
 }

@@ -41,7 +41,10 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::Hash;
 use kit_core::object::EntryMode;
-use kit_core::ops::{DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, WhitespaceMode};
+use kit_core::ops::{
+    DEFAULT_CONTEXT_LINES, DiffEntry, DiffKind, RenameOptions, RenameReport, WhitespaceMode,
+    parse_rename_score,
+};
 use libkit::diff::{self, PatchBody};
 
 use crate::clap_args;
@@ -49,7 +52,7 @@ use crate::exit;
 use crate::exit_map;
 use crate::format;
 
-mod stat;
+pub(super) mod stat;
 pub(super) use stat::render_stat;
 
 #[derive(Debug, Parser)]
@@ -109,11 +112,22 @@ struct DiffOpts {
     #[arg(long = "no-renames")]
     no_renames: bool,
 
-    /// Detect renames, optionally with a similarity threshold (`-M`,
-    /// `--find-renames[=N]`). kit pairs by identical content (exact,
-    /// 100%), so any threshold ≤ 100 selects the same matches.
-    #[arg(short = 'M', long = "find-renames", value_name = "N", num_args = 0..=1, default_missing_value = "100")]
+    /// Detect renames, optionally with a similarity threshold (`-M[<n>]`,
+    /// `--find-renames[=<n>]`), in git's grammar: `90%`, or digits read as
+    /// a fraction, so `9` is 90%. Default 50%. `-M` takes its value only
+    /// attached, as in git, so `-M HEAD~1` is the flag then a revision.
+    #[arg(long = "find-renames", value_name = "N", num_args = 0..=1, require_equals = true, default_missing_value = "")]
     find_renames: Option<String>,
+
+    /// Skip the similarity pass when more than `<n>` squared pairs would
+    /// need a score (`-l<n>`, default 1000, `0` for no limit).
+    #[arg(
+        long = "rename-limit",
+        value_name = "N",
+        require_equals = true,
+        hide = true
+    )]
+    rename_limit: Option<usize>,
 
     /// Colorize the patch: `always`, `auto` (default, tty-only), or
     /// `never` (like `git diff --color[=<when>]`). Honors `NO_COLOR` /
@@ -170,7 +184,8 @@ impl DiffOpts {
 
 #[must_use]
 pub fn run(args: &[String]) -> u8 {
-    let opts = match clap_args::parse::<DiffOpts>("kit diff", args) {
+    let args = attached_short_values(args);
+    let opts = match clap_args::parse::<DiffOpts>("kit diff", &args) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -190,13 +205,15 @@ pub fn run(args: &[String]) -> u8 {
         && color_choice.resolve(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let ws_mode = opts.whitespace_mode();
     let context = opts.unified.unwrap_or(DEFAULT_CONTEXT_LINES);
-    // A provided rename threshold must parse. The exact matcher ignores its
-    // magnitude.
-    if let Some(t) = &opts.find_renames {
-        let n = t.trim_end_matches('%');
-        if !n.is_empty() && n.parse::<u8>().is_err() {
-            return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE);
+    let mut rename_options = RenameOptions::default();
+    if let Some(t) = opts.find_renames.as_deref().filter(|t| !t.is_empty()) {
+        match parse_rename_score(t) {
+            Some(score) => rename_options.min_score = score,
+            None => return emit_err(&format!("invalid --find-renames value: {t}"), exit::USAGE),
         }
+    }
+    if let Some(limit) = opts.rename_limit {
+        rename_options.limit = limit;
     }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
@@ -208,18 +225,19 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     // Rename detection is on by default, like git's `diff.renames`. It
-    // collapses identical-content delete/add pairs into `R` entries before
-    // the path filter and the rendering.
+    // collapses similar delete/add pairs into `R` entries before the path
+    // filter and the rendering.
     let request = diff::Request {
         staged: opts.staged,
         merge_base: opts.merge_base,
-        renames: !opts.no_renames,
+        renames: (!opts.no_renames).then_some(rename_options),
         args: &opts.args,
     };
     let diff = match diff::compute(&repo, &request) {
         Ok(diff) => diff,
         Err(e) => return fail(e),
     };
+    warn_rename_limit(diff.renames());
     let selected = diff.entries();
 
     // `--exit-code`/`--quiet` report difference via the exit status (1 =
@@ -282,6 +300,44 @@ pub(super) fn patch_failure(error: diff::Error) -> (String, u8) {
 fn fail(error: diff::Error) -> u8 {
     let error = libkit::Error::from(error);
     emit_err(&exit_map::message(&error), exit_map::exit_code(&error))
+}
+
+/// git's warning when the candidate limit stopped the similarity pass.
+pub(super) fn warn_rename_limit(report: RenameReport) {
+    if let Some(needed) = report.limit_needed {
+        eprintln!("warning: exhaustive rename detection was skipped due to too many files.");
+        eprintln!(
+            "warning: you may want to set the rename limit (-l) to at least {needed} and retry the command."
+        );
+    }
+}
+
+/// Rewrite git's attached short values, `-M[<n>]` and `-l<n>`, to their long
+/// forms before clap reads them. clap would take a separate next argument
+/// as the value of `-M`, so `-M HEAD~1` would lose its revision. Arguments
+/// after `--` stay as they are.
+fn attached_short_values(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut rest = false;
+    for arg in args {
+        if rest {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            rest = true;
+            out.push(arg.clone());
+        } else if arg == "-M" {
+            out.push("--find-renames".to_owned());
+        } else if let Some(value) = arg.strip_prefix("-M") {
+            out.push(format!("--find-renames={value}"));
+        } else if let Some(value) = arg.strip_prefix("-l").filter(|v| !v.is_empty()) {
+            out.push(format!("--rename-limit={value}"));
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
 }
 
 /// ANSI-colorize a unified-diff patch line-by-line, matching git's default
@@ -347,7 +403,7 @@ fn name_status_letter(kind: DiffKind) -> char {
         DiffKind::Removed => 'D',
         DiffKind::Modified => 'M',
         DiffKind::ModeChanged => 'T',
-        // Renames carry a similarity score (`R100`) and two paths, so
+        // Renames carry a similarity score (`R090`) and two paths, so
         // `--name-status` formats them specially in `emit_entry_name`;
         // this bare letter is the fallback / name-only case.
         DiffKind::Renamed => 'R',
@@ -363,17 +419,19 @@ fn name_status_letter(kind: DiffKind) -> char {
 /// the status letter and path are each their own NUL-terminated field
 /// (matching `git diff --name-status -z`).
 fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bool) {
-    // `--name-status` rename: git emits `R100<sep><src><sep><dst>` (source
-    // first, unlike status's porcelain `-z`), TAB-separated by default and
-    // NUL-separated under `-z`. Verified against git.
+    // `--name-status` rename: git emits `R<score><sep><src><sep><dst>` with
+    // a three-digit score (source first, unlike status's porcelain `-z`),
+    // TAB-separated by default and NUL-separated under `-z`. Verified
+    // against git.
     if name_status && e.kind == DiffKind::Renamed {
         let src = e.old_path.as_deref().unwrap_or(&e.path);
+        let score = e.similarity.unwrap_or(100);
         if z {
-            let _ = write!(out, "R100\0{src}\0{}\0", e.path);
+            let _ = write!(out, "R{score:03}\0{src}\0{}\0", e.path);
         } else {
             let sq = super::c_quote_path(src).unwrap_or_else(|| src.to_string());
             let dq = super::c_quote_path(&e.path).unwrap_or_else(|| e.path.clone());
-            let _ = writeln!(out, "R100\t{sq}\t{dq}");
+            let _ = writeln!(out, "R{score:03}\t{sq}\t{dq}");
         }
         return;
     }
@@ -397,7 +455,7 @@ fn emit_entry_name(out: &mut impl Write, e: &DiffEntry, name_status: bool, z: bo
 const ZERO_ABBREV: &str = "0000000";
 
 /// git octal mode string for a [`DiffEntry`] side (`None` → regular file).
-fn git_octal(mode: Option<EntryMode>) -> &'static str {
+pub(super) fn git_octal(mode: Option<EntryMode>) -> &'static str {
     match mode {
         Some(EntryMode::Executable) => "100755",
         Some(EntryMode::Symlink) => "120000",
@@ -407,7 +465,7 @@ fn git_octal(mode: Option<EntryMode>) -> &'static str {
 }
 
 /// Abbreviated blob id for an `index` line side (`None` → all-zero).
-fn abbrev(h: Option<Hash>) -> String {
+pub(super) fn abbrev(h: Option<Hash>) -> String {
     h.map_or_else(|| ZERO_ABBREV.to_string(), |h| format::short_hash(&h, 7))
 }
 
@@ -448,13 +506,32 @@ pub(super) fn emit_entry_patch(
 
     match e.kind {
         DiffKind::Renamed => {
-            // Exact rename: identical content, so 100% similar and no hunk.
+            // git's order: mode lines, the similarity and the two names, then
+            // an `index` line only when the content differs (with the mode
+            // when both sides share it), then the hunks.
+            if e.old_mode != e.new_mode {
+                let _ = writeln!(out, "old mode {}", git_octal(e.old_mode));
+                let _ = writeln!(out, "new mode {}", git_octal(e.new_mode));
+            }
             let from = super::c_quote_path(a_src).unwrap_or_else(|| a_src.to_string());
             let to = super::c_quote_path(&e.path).unwrap_or_else(|| e.path.clone());
-            let _ = writeln!(out, "similarity index 100%");
+            let _ = writeln!(out, "similarity index {}%", e.similarity.unwrap_or(100));
             let _ = writeln!(out, "rename from {from}");
             let _ = writeln!(out, "rename to {to}");
-            return Ok(());
+            if matches!(body, PatchBody::Empty) {
+                return Ok(());
+            }
+            if e.old_mode == e.new_mode {
+                let _ = writeln!(
+                    out,
+                    "index {}..{} {}",
+                    abbrev(e.old_hash),
+                    abbrev(e.new_hash),
+                    git_octal(e.new_mode)
+                );
+            } else {
+                let _ = writeln!(out, "index {}..{}", abbrev(e.old_hash), abbrev(e.new_hash));
+            }
         }
         DiffKind::ModeChanged => {
             // Identical content, mode flip — only the mode lines, no hunks.
@@ -530,6 +607,7 @@ mod tests {
             old_mode: None,
             new_mode: None,
             old_path: None,
+            similarity: None,
         }
     }
 

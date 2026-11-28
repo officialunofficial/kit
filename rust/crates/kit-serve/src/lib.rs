@@ -10,6 +10,7 @@ mod repo;
 mod session;
 mod upload;
 mod verbs;
+mod window;
 
 pub use budget::{
     FRAME_BUDGET_EXCEEDED, MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, frame_byte_estimate,

@@ -118,6 +118,11 @@ fn start(
             upstream: None,
             branch: None,
             interactive,
+            favor: libkit::merge::Favor::None,
+            exec: &[],
+            autosquash: false,
+            update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         },
         &TestSigning,
         editor,
@@ -132,6 +137,7 @@ fn resume(f: &Fixture, skip: bool, editor: &mut Script) -> Result<Outcome, Error
         skip,
         &TestSigning,
         editor,
+        libkit::rerere::Settings::default(),
         &NoopObserver,
     )
 }
@@ -173,6 +179,7 @@ fn a_rebase_replays_signed_copies_that_keep_their_authorship() {
         old,
         new,
         replayed,
+        ..
     } = outcome
     else {
         panic!("expected a finished rebase: {outcome:?}");
@@ -246,6 +253,11 @@ fn an_upstream_limits_the_replay_to_the_commits_after_it() {
         upstream: Some(&short(&l.t[0])),
         branch: None,
         interactive: false,
+        favor: libkit::merge::Favor::None,
+        exec: &[],
+        autosquash: false,
+        update_refs: false,
+        rerere: libkit::rerere::Settings::default(),
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -275,6 +287,11 @@ fn a_named_branch_is_the_one_that_moves() {
         upstream: None,
         branch: Some("topic"),
         interactive: false,
+        favor: libkit::merge::Favor::None,
+        exec: &[],
+        autosquash: false,
+        update_refs: false,
+        rerere: libkit::rerere::Settings::default(),
     };
     let outcome = rebase::start(
         &l.f.layout,
@@ -304,6 +321,11 @@ fn an_unknown_upstream_or_branch_is_an_error() {
             upstream,
             branch,
             interactive: false,
+            favor: libkit::merge::Favor::None,
+            exec: &[],
+            autosquash: false,
+            update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         };
         let err = rebase::start(
             &l.f.layout,
@@ -484,6 +506,11 @@ fn reword_asks_the_editor_for_a_message_and_an_empty_reply_keeps_the_old_one() {
             upstream: None,
             branch: None,
             interactive: true,
+            favor: libkit::merge::Favor::None,
+            exec: &[],
+            autosquash: false,
+            update_refs: false,
+            rerere: libkit::rerere::Settings::default(),
         },
         &TestSigning,
         &mut script,
@@ -586,10 +613,11 @@ fn the_todo_parser_reads_every_verb_and_a_prefix() {
         hash::to_hex(&c[2])[..8].to_uppercase(),
         short(&c[1]),
     );
-    let (todo, actions) = rebase::parse_todo(&c, &text).unwrap();
-    assert_eq!(todo, [c[0], c[1], c[2], c[2]]);
+    let plan = rebase::parse_todo(&c, &text).unwrap();
+    assert_eq!(plan.todo, [c[0], c[1], c[2], c[2]]);
+    assert!(plan.exec.is_empty());
     assert_eq!(
-        actions,
+        plan.actions,
         [
             RebaseAction::Pick,
             RebaseAction::Reword,
@@ -600,11 +628,40 @@ fn the_todo_parser_reads_every_verb_and_a_prefix() {
 }
 
 #[test]
+fn the_todo_parser_reads_edit_and_exec_lines() {
+    let c = candidates();
+    let text = format!(
+        "e {}\nexec   make  test  \nx true\nedit {}\n",
+        short(&c[0]),
+        short(&c[1]),
+    );
+    let plan = rebase::parse_todo(&c, &text).unwrap();
+    assert_eq!(plan.todo, [c[0], c[1]]);
+    assert_eq!(
+        plan.actions,
+        [
+            RebaseAction::Edit,
+            RebaseAction::Exec,
+            RebaseAction::Exec,
+            RebaseAction::Edit
+        ]
+    );
+    assert_eq!(plan.exec, ["make  test", "true"]);
+}
+
+#[test]
 fn the_todo_parser_refuses_a_bad_line() {
     let c = candidates();
     let first = short(&c[0]);
-    let cases: [(String, TodoError); 6] = [
-        (format!("edit {first}\n"), TodoError::EditUnsupported),
+    let cases: [(String, TodoError); 7] = [
+        (
+            "exec   \n".to_owned(),
+            TodoError::MissingCommand("exec".to_owned()),
+        ),
+        (
+            format!("x {first}\nx\n"),
+            TodoError::MissingCommand("x".to_owned()),
+        ),
         (
             format!("boom {first}\n"),
             TodoError::UnknownCommand("boom".to_owned()),
@@ -653,5 +710,5 @@ fn the_todo_parser_bounds_its_input() {
         TodoError::TooLong
     );
     let text = "#".repeat(MAX_TODO_BYTES);
-    assert!(rebase::parse_todo(&c, &text).unwrap().0.is_empty());
+    assert!(rebase::parse_todo(&c, &text).unwrap().todo.is_empty());
 }

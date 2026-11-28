@@ -50,6 +50,9 @@ serde = { version = "1.0.229", features = ["derive"], optional = true }
 serde_json = { version = "1.0.154", optional = true }
 # The nonce of a statement.
 getrandom = "0.4.3"
+# The patterns of `kit grep`. It matches in linear time, so a pattern cannot
+# make a search hang; it is already in the lock file through the dev tools.
+regex = "1.13.1"
 thiserror = "2.0.21"
 zeroize = "1.9.2"
 
@@ -61,6 +64,8 @@ libc = "0.2.191"
 # Counts the full flushes of a commit and an add.
 kit-core = { path = "../kit-core", features = ["fault-injection"] }
 tempfile = "3.27.0"
+# The property tests of the grep scanner.
+proptest = "1.12.0"
 # Builds pools of a chosen size for the tests of the chunk fan-out.
 rayon = "1.12.0"
 # Signs the grants in the tests of the grant store.

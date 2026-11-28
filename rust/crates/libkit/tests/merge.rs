@@ -23,6 +23,8 @@ fn merge_request(target: &str) -> Request<'_> {
         no_commit: false,
         no_ff: false,
         message: None,
+        strategy: merge::Strategy::default(),
+        rerere: libkit::rerere::Settings::default(),
     }
 }
 
@@ -254,14 +256,28 @@ fn resume_refuses_markers_and_an_unstaged_resolution() {
     diverged(&f);
     start(&f, &merge_request("topic")).unwrap();
 
-    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    let err = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, Error::UnresolvedMarkers(ref p) if p == "a.txt"),
         "{err:?}"
     );
 
     f.write("a.txt", "resolved\n");
-    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    let err = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, Error::Conflict(conflict::Error::NotStaged(ref p)) if p == "a.txt"),
         "{err:?}"
@@ -278,7 +294,14 @@ fn resume_commits_the_resolved_index() {
     f.write("a.txt", "resolved\n");
     f.stage("a.txt");
 
-    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let merged = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     assert_eq!((merged.ours, merged.theirs), (ours, theirs));
     let commit = f.commit_object(merged.commit);
     assert_eq!(commit.parents, [ours, theirs]);
@@ -358,7 +381,14 @@ fn no_commit_stages_the_merge_and_resume_finishes_it() {
     assert_eq!(refs::read_ref(&f.layout, "main").unwrap(), Some(ours));
     assert!(is_merge_in_progress(&f.layout));
 
-    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let merged = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     assert_eq!(merged.tree, tree);
     assert_eq!(f.commit_object(merged.commit).parents, [ours, theirs]);
 }
@@ -385,7 +415,14 @@ fn no_commit_keeps_a_merge_that_only_deletes_files() {
         ..merge_request("topic")
     };
     start(&f, &request).unwrap();
-    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let merged = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     assert_eq!(f.files_of(merged.commit), []);
 }
 
@@ -410,7 +447,14 @@ fn a_head_without_a_commit_has_nothing_to_merge_into() {
 #[test]
 fn resume_and_abort_need_a_merge() {
     let f = init();
-    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    let err = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
     assert!(matches!(err, Error::NoMergeInProgress), "{err:?}");
     let err = merge::abort(&f.layout, &f.store).unwrap_err();
     assert_eq!(err.to_string(), "no merge in progress");
@@ -618,7 +662,14 @@ fn a_stale_conflict_list_cannot_continue_an_interrupted_merge() {
     assert!(stop.unwrap_err().is::<StopAfterMarkers>());
     assert!(f.read("a.txt").starts_with("<<<<<<< ours\n"));
 
-    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    let err = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
     assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
     assert!(is_merge_in_progress(&f.layout));
     assert_eq!(refs::read_ref(&f.layout, "main").unwrap(), Some(ours));
@@ -631,7 +682,14 @@ fn abort_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
     start(&f, &merge_request("topic")).unwrap();
     f.write("a.txt", "resolved\n");
     f.stage("a.txt");
-    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let merged = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     // The stop came after the branch moved and before the state was cleared.
     let state = MergeState {
         merge_head: theirs,
@@ -658,7 +716,14 @@ fn continue_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
     start(&f, &merge_request("topic")).unwrap();
     f.write("a.txt", "resolved\n");
     f.stage("a.txt");
-    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let merged = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     // The stop came after the branch moved and before the state was cleared.
     let state = MergeState {
         merge_head: theirs,
@@ -667,7 +732,14 @@ fn continue_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
     };
     conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
 
-    let again = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    let again = merge::resume(
+        &f.layout,
+        &f.store,
+        &TestSigning,
+        libkit::rerere::Settings::default(),
+        &NoopObserver,
+    )
+    .unwrap();
     assert_eq!(again.commit, merged.commit);
     assert_eq!((again.ours, again.theirs), (ours, theirs));
     assert_eq!(again.tree, merged.tree);

@@ -50,7 +50,6 @@ use std::io::Write;
 /// keeps the default action. A caller that did not call [`signal::enable`]
 /// gets no signal handler.
 #[must_use]
-#[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
 pub fn dispatch(argv: &[String]) -> u8 {
     // Consume leading global flags (`-C <path>` and `-c <key>=<val>`) BEFORE
     // resolving the subcommand, so they apply to every command and to repo
@@ -67,11 +66,106 @@ pub fn dispatch(argv: &[String]) -> u8 {
     }
     let cmd = &argv[cmd_idx];
     let rest: Vec<String> = argv.iter().skip(cmd_idx + 1).cloned().collect();
-    if signal::defers_interrupt(cmd, &rest) {
+
+    if let Some(code) = run_builtin(cmd, &rest) {
+        return code;
+    }
+    run_alias(cmd, &rest)
+}
+
+/// The commands that dispatch runs itself. An alias with one of these names
+/// is ignored, so a built-in always wins.
+pub const BUILTIN_COMMANDS: &[&str] = &[
+    "__complete",
+    "help",
+    "version",
+    "init",
+    "key",
+    "grant",
+    "epoch",
+    "visibility",
+    "keygen",
+    "hash",
+    "cat",
+    "cat-file",
+    "ls-tree",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "show-ref",
+    "for-each-ref",
+    "symbolic-ref",
+    "update-ref",
+    "ref",
+    "tree",
+    "add",
+    "rm",
+    "mv",
+    "restore",
+    "reset",
+    "status",
+    "commit",
+    "log",
+    "reflog",
+    "branch",
+    "tag",
+    "checkout",
+    "switch",
+    "merge-base",
+    "rev-list",
+    "clean",
+    "diff",
+    "prove",
+    "verify",
+    "verify-proof",
+    "attest",
+    "verify-attest",
+    "closure",
+    "trust",
+    "config",
+    "remote",
+    "push",
+    "pull",
+    "fetch",
+    "clone",
+    "mcp",
+    "merge",
+    "cherry-pick",
+    "revert",
+    "rebase",
+    "bisect",
+    "rerere",
+    "grep",
+    "shortlog",
+    "range-diff",
+    "describe",
+    "apply",
+    "archive",
+    "am",
+    "gc",
+    "stash",
+    "worktree",
+    "blame",
+    "self",
+    "serve",
+    "git",
+    "sparse-checkout",
+];
+
+/// Is `name` a built-in command (or one of its spellings, such as `-h`)?
+#[must_use]
+pub fn is_builtin(name: &str) -> bool {
+    BUILTIN_COMMANDS.contains(&name) || matches!(name, "-h" | "--help" | "--version" | "-V")
+}
+
+/// Run built-in command `cmd`, or `None` when there is none of that name.
+#[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
+fn run_builtin(cmd: &str, rest: &[String]) -> Option<u8> {
+    if signal::defers_interrupt(cmd, rest) {
         signal::install();
     }
-
-    match cmd.as_str() {
+    let rest = rest.to_vec();
+    Some(match cmd {
         "__complete" => completion::run(&rest),
         "-h" | "--help" | "help" => {
             let mut stdout = std::io::stdout().lock();
@@ -145,6 +239,14 @@ pub fn dispatch(argv: &[String]) -> u8 {
         "revert" => commands::revert::run(&rest),
         "rebase" => commands::rebase::run(&rest),
         "bisect" => commands::bisect::run(&rest),
+        "rerere" => commands::rerere::run(&rest),
+        "grep" => commands::grep::run(&rest),
+        "shortlog" => commands::shortlog::run(&rest),
+        "range-diff" => commands::range_diff::run(&rest),
+        "describe" => commands::describe::run(&rest),
+        "apply" => commands::apply::run(&rest),
+        "archive" => commands::archive::run(&rest),
+        "am" => commands::am::run(&rest),
         "gc" => commands::gc::run(&rest),
         "stash" => commands::stash::run(&rest),
         "worktree" => commands::worktree::run(&rest),
@@ -164,15 +266,58 @@ pub fn dispatch(argv: &[String]) -> u8 {
             exit::UNAVAILABLE
         }
         "sparse-checkout" => commands::sparse_checkout::run(&rest),
-        other => {
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(
-                stderr,
-                "error: unknown command '{other}' (run 'kit --help' for a list of commands)"
-            );
-            exit::USAGE
-        }
+        _ => return None,
+    })
+}
+
+/// Run `cmd` as an alias from the user-scoped config, or report an unknown
+/// command. An alias expands once: its first word must be a built-in.
+fn run_alias(cmd: &str, rest: &[String]) -> u8 {
+    let fail = |msg: &str, code: u8| {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "error: {msg}");
+        code
+    };
+    let unknown = |name: &str| {
+        fail(
+            &format!("unknown command '{name}' (run 'kit --help' for a list of commands)"),
+            exit::USAGE,
+        )
+    };
+    let name = cmd.to_ascii_lowercase();
+    if !config::valid_alias_name(&name) {
+        return unknown(cmd);
     }
+    let aliases = match config::read_user_aliases() {
+        Ok(a) => a,
+        Err(e) => return fail(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let Some(value) = aliases.get(&name) else {
+        return unknown(cmd);
+    };
+    let words = match config::split_alias(value) {
+        Ok(w) => w,
+        Err(e) => return fail(&format!("alias '{name}': {e}"), exit::CONFIG_ERROR),
+    };
+    let Some((first, more)) = words.split_first() else {
+        return fail(&format!("alias '{name}' is empty"), exit::USAGE);
+    };
+    if !is_builtin(first) {
+        if aliases.contains_key(&first.to_ascii_lowercase()) {
+            return fail(
+                &format!(
+                    "alias '{name}' expands to the alias '{first}'; aliases do not expand twice"
+                ),
+                exit::USAGE,
+            );
+        }
+        return fail(
+            &format!("alias '{name}' expands to the unknown command '{first}'"),
+            exit::USAGE,
+        );
+    }
+    let args: Vec<String> = more.iter().chain(rest).cloned().collect();
+    run_builtin(first, &args).unwrap_or(exit::USAGE)
 }
 
 /// Consume the leading global flags from `argv` (after `argv[0]`):
@@ -245,6 +390,28 @@ fn print_usage_stderr() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every name the dispatch match handles is in [`BUILTIN_COMMANDS`], and
+    /// every listed name has an arm, so an alias can never shadow a command.
+    #[test]
+    fn builtin_list_matches_the_dispatch_arms() {
+        let src = include_str!("lib.rs");
+        let body = &src[src.find("fn run_builtin").unwrap()..src.find("fn run_alias(").unwrap()];
+        let mut arms = std::collections::BTreeSet::new();
+        for line in body.lines() {
+            let t = line.trim();
+            if t.starts_with('"') && t.contains("=>") {
+                for part in t.split("=>").next().unwrap().split('|') {
+                    let name = part.trim().trim_matches('"');
+                    if !name.starts_with('-') {
+                        arms.insert(name);
+                    }
+                }
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = BUILTIN_COMMANDS.iter().copied().collect();
+        assert_eq!(arms, listed);
+    }
 
     #[test]
     fn dispatch_version_returns_ok() {

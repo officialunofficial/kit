@@ -58,6 +58,7 @@
 //! | `git/`                   | common   | `kit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
 //! | `PREVIOUS_HEAD`          | worktree | [`crate::refs`]         |
+//! | `HEAD_HISTORY`           | worktree | [`crate::refs`]         |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
 //! | `PULL_HEAD`              | worktree | `kit-sync`              |
 //! | `index`                  | worktree | [`crate::index`]        |
@@ -425,6 +426,12 @@ impl RepoLayout {
     #[must_use]
     pub fn rebase_dir(&self) -> PathBuf {
         self.worktree_state_dir.join(REBASE_DIR)
+    }
+
+    /// `am/` — the state of a paused `kit am` (SPEC-PATCH §6).
+    #[must_use]
+    pub fn am_dir(&self) -> PathBuf {
+        self.worktree_state_dir.join("am")
     }
 
     /// `bisect` — in-progress bisect state.

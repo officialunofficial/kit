@@ -59,6 +59,8 @@ mod source;
 mod source_error;
 mod tags;
 mod verify;
+mod window;
+pub use window::{WindowFetchError, receive_window};
 pub mod worktree;
 
 pub use applied_packs::AppliedPacks;

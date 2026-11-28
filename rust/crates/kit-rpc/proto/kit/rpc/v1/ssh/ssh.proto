@@ -102,6 +102,11 @@ message SshFrame {
     DownloadPack download_pack = 24;
     DownloadPackHeader download_pack_header = 25;
     PackChunk pack_chunk = 26;
+
+    // Shallow windows (SPEC-SHALLOW §8.2).
+    DownloadWindow download_window = 27;
+    DownloadWindowPack download_window_pack = 28;
+    DownloadWindowBoundary download_window_boundary = 29;
   }
 }
 
@@ -119,6 +124,9 @@ message Hello {
 message HelloResponse {
   ProtocolVersion proto = 1;
   string server_id = 2;
+  // Whether the server answers DownloadWindow (SPEC-SHALLOW §8.2). A client
+  // never sends DownloadWindow to a server that does not set it.
+  bool download_window = 3;
 }
 
 // Advisory close. Either side MAY simply close the underlying stream.
@@ -241,4 +249,31 @@ message PackChunk {
   uint64 offset = 2;
   bytes data = 3;
   bool last = 4;
+}
+
+// ----------------------------------------------------------------------------
+// Shallow windows (SPEC-SHALLOW §8.2).
+
+// The window of `tips` at `depth`, less what the client holds. At most
+// 1,000 tips and 1,000 `have` commits, each a raw 32-byte commit id;
+// `depth` from 1 to 2^31 - 1. The server answers with one or more packs,
+// each a DownloadWindowPack followed by its PackChunk frames, then one
+// DownloadWindowBoundary, or with Error.
+message DownloadWindow {
+  repeated bytes tips = 1;
+  uint32 depth = 2;
+  repeated bytes have = 3;
+}
+
+// Starts the next pack of a window: its id and exact length.
+message DownloadWindowPack {
+  bytes pack_id = 1;
+  uint64 total_bytes = 2;
+}
+
+// The boundary the server computed, advisory: the client computes it again
+// from the objects it received and refuses a response whose list differs.
+// It ends the window.
+message DownloadWindowBoundary {
+  repeated bytes commits = 1;
 }

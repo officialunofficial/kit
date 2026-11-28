@@ -1083,6 +1083,22 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         self.upload_pack(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
+    fn supports_download_window(&self) -> bool {
+        matches!(self.server_info(), ServerInfoView::V2(info) if info.supports_download_window == Some(true))
+    }
+    fn download_window(
+        &self,
+        request: &kit_core::protocol::WindowRequest,
+        sink: &mut dyn kit_core::protocol::WindowSink,
+    ) -> TransportResult<Vec<Hash>> {
+        request.validate()?;
+        if !self.supports_download_window() {
+            return Err(TransportError::Unsupported(
+                kit_core::protocol::SHALLOW_UNSUPPORTED,
+            ));
+        }
+        self.with_client_source(|source| source.download_window(request, sink))
+    }
     /// Streams the pack into `sink` as it arrives, holding one bounded
     /// Connect frame.
     fn download_pack(

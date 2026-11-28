@@ -1501,6 +1501,36 @@ mod tests {
         assert!(AncestrySnapshot::load(&layout, "main").is_err());
     }
 
+    /// A shallow repository cannot hold the chain from the root, so a
+    /// branch write there publishes no ancestry. The write still lands, and
+    /// the snapshot of the old tip no longer loads.
+    #[test]
+    fn a_shallow_repository_writes_branches_without_ancestry() {
+        let (_dir, layout, store) = repo();
+        let a = commit(&store, vec![], b"a");
+        let b = commit(&store, vec![a], b"b");
+        update(&layout, &store, "main", b);
+        let held = crate::shallow::lock(&layout).unwrap();
+        crate::shallow::write_locked(&layout, &held, &crate::shallow::Boundary::new([b])).unwrap();
+        drop(held);
+
+        let c = commit(&store, vec![b], b"c");
+        refs::update_ref_with_ancestry(&layout, "main", RefWriteCondition::Any, &c, &store)
+            .expect("a shallow branch write needs no history beyond the boundary");
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(c));
+        assert!(AncestrySnapshot::load(&layout, "main").is_err());
+        assert!(matches!(
+            refs::update_ref_with_ancestry(
+                &layout,
+                "main",
+                RefWriteCondition::Match(b),
+                &a,
+                &store
+            ),
+            Err(refs::RefError::Conflict(_))
+        ));
+    }
+
     /// `advance`'s `write_scrub_state` call is documented as purely
     /// advisory: `finish` (called just before it) has already durably
     /// committed the publish, so a failure writing the scrub bookkeeping

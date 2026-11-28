@@ -86,14 +86,15 @@ commands:
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable; `gc` can reclaim it.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-p|--patch] [--stat] [--all] [--decorate] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT]... [--grep PAT]... [-F] [-i] [--all-match] [--invert-grep] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-p|--patch] [--stat] [--all] [--decorate] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
                     --format=json emits JSONL with the raw timestamp).
                     --author/
-                    --grep filter by substring match on the author identity
-                    / commit message; --since/--until bound the commit
+                    --grep filter by regex on the author identity / commit
+                    message (-F literal, -i ignore case, --all-match needs
+                    every --grep, --invert-grep keeps non-matches); --since/--until bound the commit
                     timestamp (@<unix>, now/today/yesterday, N-unit-ago,
                     or YYYY-MM-DD[ HH:MM:SS]); --no-merges hides
                     merge commits from the output; --first-parent walks
@@ -175,6 +176,8 @@ commands:
   config <key> [--format=json]  Show one value
   config <key> <value>  Set a configuration value
   config --unset <key>  Remove a configuration value (idempotent; unknown key errors)
+  config --get-regexp <regex>  Print `key value` for each set key whose name matches
+  config alias.<name> <args>  Define a user-scoped alias: `kit <name>` runs `kit <args>`
   config [--local|--global] <key> <value>|--unset <key>  Force repo/user scope
   config user.identity <value>  Set author Identity
                         (ed25519:<hex>, mid:<N>, or raw [kind][len][bytes] hex)
@@ -222,6 +225,7 @@ commands:
   stash [--format=json]  Stash working dir changes (save WIP; -m for a message;
                     --format=json emits a JSON outcome, or JSONL on `list`)
   stash save|push -m <msg>  Stash with a message
+  stash push -a|--all  Also stash ignored files, such as build output
   stash list        List stash entries (printed as stash@{N})
   stash pop [--index] [<n>|stash@{n}]    Apply and remove a stash entry (default
                     0; --index also restores the staged state, like git)
@@ -230,12 +234,14 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
+  stash branch <name> [<n>|stash@{n}]  Branch from the stash's base commit and
+                    pop the entry there, staged state included
   clone [--sparse ...] [-b <branch>] [-o <name>] [--tags|--no-tags] <url>  Clone a repository
                     (-b checks out <branch> instead of the remote default;
                     -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds
                     `<name>	<url> (fetch)`/`(push)`; JSON with --format=json)
-  remote add [<name>] <url>  Add a remote (kit+file://, kit+https://, kit+s3://, kit+ssh://)
+  remote add [<name>] <url>  Add a remote (kit+file://, kit+https://, kit+s3://, kit+ssh://, kit+closure://)
   remote set [<name>] <url>  Alias for 'remote add'
   remote remove <name>  Remove a named remote (`default` clears the flat remote)
   remote rename <old> <new>  Rename a named remote
@@ -279,6 +285,9 @@ commands:
   bisect run <cmd>...  Auto-bisect: run <cmd> per candidate, classify by
                      exit status (0=good/125=skip/1-127=bad), print first bad
   bisect reset       End bisect and restore original state
+  rerere [status | diff | forget <path> | clear | gc]
+                    Inspect and maintain recorded conflict resolutions
+                    (on with `rerere.enabled`)
   gc [-n] [--grace-secs SECS]
                     Reclaim unreachable objects older than the grace
                     window (default 14d); -n/--dry-run previews
@@ -299,6 +308,24 @@ commands:
                     (--fork-audit re-derives referenced content)
   git status         Show bridge state dirs: direction, endpoints, key, refs
   git format-patch <range>  Render native commits as `git am`-able patches
+  apply [--index | --cached] [-R] [--check | --stat] <patch>...
+                    Apply patches to the worktree, the index or both; all
+                    or nothing, never with fuzz
+  am <mbox>... | --continue | --skip | --abort
+                    Apply a mailbox of patch mails as signed commits
+  archive [--format=tar|tar.gz] [--prefix=<dir>/] [-o <file>] <tree-ish> [<path>...]
+                    Write the tree of a revision as a tar archive, the
+                    same bytes on every machine
+  shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]
+                    Group commits by author, for release notes
+  range-diff [--creation-factor=<n>] <old-base>..<old-tip> <new-base>..<new-tip>
+                    Show how each commit of a series changed between two
+                    versions of it; also <old>...<new> and <base> <old> <new>
+  describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]] [--match <glob>] [--exclude <glob>] [<rev>]
+                    Name a commit after the nearest tag: <tag>-<n>-k<id>
+  grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F|-E|-G] [-e <pattern>]... [<pattern>] [--cached | <rev>...] [[--] <path>...]
+                    Print lines of tracked files that match a pattern;
+                    exit 0 on a match, 1 on none
   blame [--format=json|--porcelain|--line-porcelain] [-w] [-M[<num>]] [-C[<num>]] [--ignore-rev <rev>] [--ignore-rev-precise] [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>
                     Show line-level commit attribution; -L limits to a line
                     range, -w ignores whitespace, -M/-C detect moved/copied
@@ -321,7 +348,7 @@ commands:
   verify-proof <commit-id> <bundle|-> [--expect-path PATH] [--trusted] [--trust-roots PATH] [--format=json] [--payload-out FILE]
                     Verify a disclosure bundle against a trusted 64-hex
                     commit id (does not resolve refs)
-  closure export <rev> [--history] [-o DIR] [--force] [--format=json]
+  closure export <rev> [--history] [--branch <name>] [--since <rev>] [-o DIR] [--force] [--format=json]
                     Export a commit's object-set closure as MANIFEST.mkcl
                     plus raw-only packs (not `kit git export`)
   closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]

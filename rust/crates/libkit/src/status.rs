@@ -19,8 +19,8 @@ use kit_core::index::{self, EntryStatus, Index, IndexError};
 use kit_core::layout::RepoLayout;
 use kit_core::observer::Observer;
 use kit_core::ops::{
-    DiffEntry, DiffError, DiffKind, StatusEntry, StatusStaging, detect_content_renames,
-    status_diff_observed,
+    DiffEntry, DiffError, DiffKind, RenameOptions, StatusEntry, StatusStaging, detect_renames,
+    parse_rename_score, status_diff_observed,
 };
 use kit_core::refs::{self, Head};
 use kit_core::repo_lock;
@@ -75,9 +75,8 @@ pub struct Request<'a> {
     /// Pair a staged deletion and a staged addition of the same content into
     /// one rename.
     pub renames: bool,
-    /// The rename threshold the caller gave, such as `50` or `50%`. The
-    /// operation checks that it is a number and no more, because it pairs
-    /// exact content only, and any threshold up to 100 selects the same pairs.
+    /// The rename threshold the caller gave, in git's grammar, such as `50%`
+    /// or `5` (both 50%). `None` is the default, 50%.
     pub rename_threshold: Option<&'a str>,
 }
 
@@ -106,11 +105,12 @@ pub fn compute(
         Err(e) => return Err(Error::ReadIndex(e)),
     };
 
-    if let Some(threshold) = request.rename_threshold {
-        let number = threshold.trim_end_matches('%');
-        if !number.is_empty() && number.parse::<u8>().is_err() {
-            return Err(Error::InvalidRenameThreshold(threshold.to_owned()));
-        }
+    let mut rename_options = RenameOptions::default();
+    if let Some(threshold) = request.rename_threshold
+        && !threshold.is_empty()
+    {
+        rename_options.min_score = parse_rename_score(threshold)
+            .ok_or_else(|| Error::InvalidRenameThreshold(threshold.to_owned()))?;
     }
 
     let (mut entries, observations) =
@@ -122,7 +122,7 @@ pub fn compute(
     }
 
     if request.renames {
-        entries = detect_renames(&store, entries).map_err(Error::Renames)?;
+        entries = pair_renames(&store, entries, &rename_options).map_err(Error::Renames)?;
     }
     Ok(Report { head_tree, entries })
 }
@@ -198,21 +198,22 @@ fn refresh_stat_cache(
     }
 }
 
-/// Pair a staged deletion and a staged addition of the same content into one
+/// Pair a staged deletion and a staged addition of similar content into one
 /// rename.
 ///
 /// Only the staged side takes part. `mv` stages both sides, so the content is
 /// compared in one state. A move that is not staged leaves an untracked
 /// destination, and that never turns into a rename.
-fn detect_renames(
+fn pair_renames(
     store: &ObjectStore,
     entries: Vec<StatusEntry>,
+    options: &RenameOptions,
 ) -> Result<Vec<StatusEntry>, StoreError> {
     let (staged, others): (Vec<StatusEntry>, Vec<StatusEntry>) = entries
         .into_iter()
         .partition(|e| e.staging == StatusStaging::Staged);
     let mut staged_diffs: Vec<DiffEntry> = staged.into_iter().map(|e| e.diff).collect();
-    detect_content_renames(store, &mut staged_diffs)?;
+    detect_renames(store, &mut staged_diffs, options)?;
     let mut out: Vec<StatusEntry> = staged_diffs
         .into_iter()
         .map(|d| StatusEntry {
@@ -268,7 +269,12 @@ pub struct Record<'a> {
     pub path: &'a str,
     /// The source of a rename.
     pub old_path: Option<&'a str>,
+    /// The similarity of a rename in percent, as git prints it.
+    pub similarity: Option<u8>,
 }
+
+/// Per path: the two status columns, a rename's source and its similarity.
+type Slot<'e> = ([u8; 2], Option<&'e str>, Option<u8>);
 
 /// Fold the entries into one record for each path.
 ///
@@ -281,7 +287,7 @@ pub struct Record<'a> {
 #[must_use]
 pub fn records(entries: &[StatusEntry]) -> Vec<Record<'_>> {
     let mut tracked_order: Vec<&str> = Vec::new();
-    let mut tracked: HashMap<&str, ([u8; 2], Option<&str>)> = HashMap::new();
+    let mut tracked: HashMap<&str, Slot<'_>> = HashMap::new();
     let mut untracked: Vec<&str> = Vec::new();
     for e in entries {
         if e.staging == StatusStaging::Unstaged && e.diff.kind == DiffKind::Added {
@@ -291,7 +297,7 @@ pub fn records(entries: &[StatusEntry]) -> Vec<Record<'_>> {
         let c = code(e.staging, e.diff.kind).as_bytes();
         let slot = tracked.entry(&e.diff.path).or_insert_with(|| {
             tracked_order.push(&e.diff.path);
-            (*b"  ", None)
+            (*b"  ", None, None)
         });
         // Each column comes from the entry that sets it.
         if c[0] != b' ' {
@@ -303,19 +309,26 @@ pub fn records(entries: &[StatusEntry]) -> Vec<Record<'_>> {
         // A rename is keyed by its destination and carries its source.
         if e.diff.kind == DiffKind::Renamed {
             slot.1 = e.diff.old_path.as_deref();
+            slot.2 = e.diff.similarity;
         }
     }
     let mut out: Vec<Record<'_>> = tracked_order
         .into_iter()
         .map(|path| {
-            let (xy, old_path) = tracked[path];
-            Record { xy, path, old_path }
+            let (xy, old_path, similarity) = tracked[path];
+            Record {
+                xy,
+                path,
+                old_path,
+                similarity,
+            }
         })
         .collect();
     out.extend(untracked.into_iter().map(|path| Record {
         xy: *b"??",
         path,
         old_path: None,
+        similarity: None,
     }));
     out
 }
@@ -466,6 +479,7 @@ mod tests {
                 old_mode: None,
                 new_mode: None,
                 old_path: None,
+                similarity: None,
             },
             staging,
         }

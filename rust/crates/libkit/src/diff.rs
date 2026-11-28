@@ -29,10 +29,10 @@ use kit_core::hash::Hash;
 use kit_core::index;
 use kit_core::object::Object;
 use kit_core::ops::graph::AncestorError;
-use kit_core::ops::merge::find_merge_base_strict;
+use kit_core::ops::merge::find_merge_base_within;
 use kit_core::ops::{
-    BINARY_SNIFF_LEN, DiffEntry, DiffKind, WhitespaceMode, detect_content_renames,
-    diff_line_counts, diff_trees, is_binary, unified_hunks_opts,
+    BINARY_SNIFF_LEN, DiffEntry, DiffKind, RenameOptions, RenameReport, WhitespaceMode,
+    detect_renames, diff_line_counts, diff_trees, is_binary, unified_hunks_opts,
 };
 use kit_core::refs::{self, RefError};
 use kit_core::store::{DisplaySource, EphemeralSink, ObjectSource, StoreError};
@@ -85,6 +85,9 @@ pub enum Error {
     /// commit. The error names it.
     #[error("merge base: {0}")]
     History(AncestorError),
+    /// The shallow boundary record cannot be read or is not canonical.
+    #[error("{0}")]
+    Shallow(kit_core::shallow::ShallowError),
     /// `HEAD` could not be read.
     #[error("resolve HEAD: {0}")]
     ResolveHead(RefError),
@@ -123,9 +126,9 @@ pub struct Request<'a> {
     pub staged: bool,
     /// Compare against the merge base of the revisions.
     pub merge_base: bool,
-    /// Join a deleted file and an added file of the same content into one
-    /// rename entry.
-    pub renames: bool,
+    /// Join a deleted file and an added file into one rename entry when
+    /// their contents are similar enough. `None` turns detection off.
+    pub renames: Option<RenameOptions>,
     /// The revisions, then the paths.
     pub args: &'a [String],
 }
@@ -147,6 +150,8 @@ pub enum PatchBody {
 pub struct FileStat {
     /// The path of the file.
     pub path: String,
+    /// The source path of a rename, or `None`.
+    pub old_path: Option<String>,
     /// The change.
     pub change: StatChange,
 }
@@ -180,6 +185,7 @@ pub enum StatChange {
 pub struct Diff<'r> {
     snapshot: EphemeralSink<'r>,
     entries: Vec<DiffEntry>,
+    renames: RenameReport,
 }
 
 /// Compute the diff that `request` asks for.
@@ -193,33 +199,70 @@ pub fn compute<'r>(repo: &'r Repo, request: &Request<'_>) -> Result<Diff<'r>, Er
     let mut entries = diff_trees(&snapshot, old, new)
         .map_err(Error::Diff)?
         .entries;
-    if request.renames {
-        detect_content_renames(&snapshot, &mut entries).map_err(Error::RenameDetection)?;
-    }
+    let renames = match &request.renames {
+        Some(options) => {
+            detect_renames(&snapshot, &mut entries, options).map_err(Error::RenameDetection)?
+        }
+        None => RenameReport::default(),
+    };
     let pathspecs: Vec<String> = pathspecs.iter().map(|p| normalize_pathspec(p)).collect();
     entries.retain(|e| pathspecs.is_empty() || path_matches_any(&e.path, &pathspecs));
-    Ok(Diff { snapshot, entries })
+    Ok(Diff {
+        snapshot,
+        entries,
+        renames,
+    })
 }
 
 /// Compute the diff between two trees. A side that is `None` is the empty
-/// tree, so a root commit shows every file as added. The diff has no rename
-/// detection.
+/// tree, so a root commit shows every file as added. `renames` turns on
+/// rename detection, as in [`Request::renames`].
 ///
 /// # Errors
-/// [`Error::Diff`] when a tree cannot be read.
-pub fn between_trees(repo: &Repo, old: Option<Hash>, new: Option<Hash>) -> Result<Diff<'_>, Error> {
+/// [`Error::Diff`] when a tree cannot be read, and
+/// [`Error::RenameDetection`] when a candidate blob cannot be read.
+pub fn between_trees<'r>(
+    repo: &'r Repo,
+    old: Option<Hash>,
+    new: Option<Hash>,
+    renames: Option<&RenameOptions>,
+) -> Result<Diff<'r>, Error> {
     let snapshot = EphemeralSink::new(repo.store());
-    let entries = diff_trees(&snapshot, old, new)
+    let mut entries = diff_trees(&snapshot, old, new)
         .map_err(Error::Diff)?
         .entries;
-    Ok(Diff { snapshot, entries })
+    let renames = match renames {
+        Some(options) => {
+            detect_renames(&snapshot, &mut entries, options).map_err(Error::RenameDetection)?
+        }
+        None => RenameReport::default(),
+    };
+    Ok(Diff {
+        snapshot,
+        entries,
+        renames,
+    })
 }
 
 impl Diff<'_> {
+    /// Keep only the entries at or below one of `paths`, in the form of the
+    /// index. The empty path keeps every entry, and so does an empty list.
+    pub fn retain_paths(&mut self, paths: &[String]) {
+        if !paths.is_empty() {
+            self.entries.retain(|e| path_matches_any(&e.path, paths));
+        }
+    }
+
     /// The changed entries, sorted as `diff_trees` sorts them.
     #[must_use]
     pub fn entries(&self) -> &[DiffEntry] {
         &self.entries
+    }
+
+    /// What rename detection did, such as stopping at the candidate limit.
+    #[must_use]
+    pub fn renames(&self) -> RenameReport {
+        self.renames
     }
 
     /// The body of the patch for `entry`. Worktree bytes are read when
@@ -262,7 +305,9 @@ pub fn patch_body<S: ObjectSource + ?Sized>(
     context: usize,
     mode: WhitespaceMode,
 ) -> Result<PatchBody, Error> {
-    if matches!(entry.kind, DiffKind::Renamed | DiffKind::ModeChanged) {
+    if entry.kind == DiffKind::ModeChanged
+        || (entry.kind == DiffKind::Renamed && entry.old_hash == entry.new_hash)
+    {
         return Ok(PatchBody::Empty);
     }
     let load = |hash: Option<Hash>| match hash {
@@ -318,6 +363,7 @@ pub fn stats<S: ObjectSource + ?Sized>(
         .map(|entry| {
             Ok(FileStat {
                 path: entry.path.clone(),
+                old_path: entry.old_path.clone(),
                 change: stat_change(source, entry)?,
             })
         })
@@ -406,12 +452,12 @@ fn resolve_endpoints(
     {
         let commit_a = peeled(repo, a)?;
         let commit_b = peeled(repo, b)?;
-        let base = find_merge_base_strict(repo.store(), commit_a, commit_b)
-            .map_err(merge_base_error)?
-            .ok_or_else(|| Error::NoMergeBaseBetween {
+        let base = merge_base_within(repo, commit_a, commit_b)?.ok_or_else(|| {
+            Error::NoMergeBaseBetween {
                 a: a.to_owned(),
                 b: b.to_owned(),
-            })?;
+            }
+        })?;
         let old = tree_of(repo, &base)?;
         let new = tree_of(repo, &commit_b)?;
         return Ok((Some(old), Some(new), args[1..].to_vec()));
@@ -496,9 +542,13 @@ fn merge_base_endpoints(
 }
 
 fn merge_base_of(repo: &Repo, a: Hash, b: Hash) -> Result<Hash, Error> {
-    find_merge_base_strict(repo.store(), a, b)
-        .map_err(merge_base_error)?
-        .ok_or(Error::NoMergeBase)
+    merge_base_within(repo, a, b)?.ok_or(Error::NoMergeBase)
+}
+
+/// The merge base of `a` and `b` inside the repository's shallow boundary.
+fn merge_base_within(repo: &Repo, a: Hash, b: Hash) -> Result<Option<Hash>, Error> {
+    let boundary = kit_core::shallow::read(repo.layout()).map_err(Error::Shallow)?;
+    find_merge_base_within(repo.store(), &boundary, a, b).map_err(merge_base_error)
 }
 
 /// The error of a strict merge base walk. A base found in part of the
@@ -812,6 +862,7 @@ mod tests {
             old_mode: None,
             new_mode: None,
             old_path: None,
+            similarity: None,
         }
     }
 
@@ -833,6 +884,7 @@ mod tests {
         let diff = Diff {
             snapshot,
             entries: vec![modified("file.txt", old, new)],
+            renames: RenameReport::default(),
         };
 
         assert!(matches!(
@@ -905,6 +957,7 @@ mod tests {
             rows,
             [FileStat {
                 path: "big.bin".to_owned(),
+                old_path: None,
                 change: StatChange::Binary {
                     old_len: 3_000_000,
                     new_len: 4_000_000

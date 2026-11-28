@@ -501,7 +501,7 @@ must be a fully-qualified ref
 .Pq Pa refs/heads/<b> , refs/tags/<t> , refs/remotes/<r>/<b>
 or the literal
 .Cm HEAD .
-.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl allow-empty Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
+.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl allow-empty Oc Oo Fl Fl amend | Fl Fl fixup Ar rev | Fl Fl squash Ar rev Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
 Create a signed commit. With
 .Fl a
 or
@@ -556,7 +556,32 @@ launched. The superseded commit is not deleted; it remains on disk as an
 unreachable object until
 .Cm gc
 reclaims it.
-.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc
+.Pp
+With
+.Fl Fl fixup Ar rev ,
+the subject is
+.Ql fixup!\&
+followed by the subject of
+.Ar rev ,
+for
+.Cm rebase Fl Fl autosquash
+to fold into
+.Ar rev ;
+no editor opens, and
+.Fl m
+or
+.Fl F
+text goes in the body.
+.Fl Fl squash Ar rev
+writes
+.Ql squash!\&
+instead, and opens the editor for the body when neither
+.Fl m
+nor
+.Fl F
+is given. They do not combine with each other or with
+.Fl Fl amend .
+.It Cm log Oo Fl Fl oneline Oc Oo Fl Fl abbrev-commit Oc Oo Fl Fl abbrev Ns = Ns Ar N Oc Oo Fl Fl format Ar json Oc Oo Fl Fl author Ar pattern Oc Oo Fl Fl grep Ar pattern Oc Oo Fl F Oc Oo Fl i Oc Oo Fl Fl all-match Oc Oo Fl Fl invert-grep Oc Oo Fl Fl since Ar date Oc Oo Fl Fl until Ar date Oc Oo Fl Fl no-merges Oc Oo Fl Fl first-parent Oc Oo Fl p | Fl Fl stat Oc Oo Fl Fl decorate Oc Oo Fl Fl graph Oc Oo Fl n Ar N Oc Oo Fl Fl follow Oc Oo Fl L Ar start , Ns Ar end : Ns Ar file Oc Oo Fl Fl all | Ar rev | Ar A Ns .. Ns Ar B | Ar A Ns ... Ns Ar B Oc Oo Oo Fl - Oc Ar path ... Oc
 Show commit history. With no argument the walk starts at
 .Cm HEAD ;
 an optional
@@ -638,12 +663,26 @@ or
 .Fl Fl author Ar pattern
 and
 .Fl Fl grep Ar pattern
-filter by a plain substring match \(em
+filter by a regular expression \(em
 .Fl Fl author
 against the short and full identity forms,
 .Fl Fl grep
-against the full commit message. kit identities are opaque (Ed25519 keys,
-mid numbers, DID keys), not free-text names, so this is not a regex.
+against the commit message, with
+.Ql ^
+and
+.Ql $
+at each line. Both repeat; any pattern may match, or every
+.Fl Fl grep
+with
+.Fl Fl all-match .
+.Fl Fl invert-grep
+keeps the commits the
+.Fl Fl grep
+patterns reject.
+.Fl F
+takes the patterns literally and
+.Fl i
+ignores case.
 .Fl Fl since Ar date
 and
 .Fl Fl until Ar date
@@ -662,7 +701,40 @@ walks only first parents, so a merged side branch never enters the walk.
 These filters apply before
 .Fl n Ap s
 limit.
-.It Cm reflog Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
+.Pp
+Paths after the revision keep the commits that change them, with the
+default history simplification of
+.Xr git 1 :
+a merge that matches one parent at the paths is left out, and the walk
+follows that parent.
+A path names a file or a directory; globs are an error.
+Without
+.Fl - ,
+a path must exist in the worktree and must not also name a revision.
+.Fl Fl follow
+takes exactly one file and continues under its old name when a commit
+renames it, found by similarity as in
+.Cm diff .
+.Pp
+.Fl L Ar start , Ns Ar end : Ns Ar file
+follows the history of a range of lines, as
+.Xr git 1
+does: it lists each commit that changes a line of the range and shows
+the hunk of the range, following the range back through each edit.
+The range takes the forms of
+.Cm blame Fl L
+and may repeat, for more ranges or files.
+It combines with
+.Fl n ,
+.Fl Fl oneline ,
+.Fl Fl first-parent
+and
+.Fl Fl format Ns = Ns Cm json ,
+which adds a
+.Li hunks
+list; it takes at most one revision and no paths.
+Renames are not followed.
+.It Cm reflog Oo Fl Fl recovery Oc Oo Ar ref Oc Oo Fl Fl format Ns = Ns Cm json Oc Op Fl n Ar N
 Show a branch's recorded movement history, read-only. Walks the branch
 tip's first-parent chain newest-first, addressing each entry
 .Ar ref Ns Cm @{ Ns Ar N Ns Cm } ,
@@ -683,9 +755,27 @@ descriptor, binding repository, branch, generation, tip, count and root.
 .Cm @{ Ns Ar N Ns Cm }
 indexes the reachable first-parent chain, so commits superseded by
 .Cm commit --amend
-or a reset are no longer listed. Recovery records are separate. This command
+or a reset are no longer listed. This command
 never mutates refs, ancestry snapshots, or objects.
-.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
+.Pp
+.Fl Fl recovery
+lists the recovery log instead: the commits that
+.Cm commit --amend ,
+.Cm reset ,
+.Cm rebase
+and
+.Cm stash pop
+replaced, newest first, as
+.Ql <id> recovery@{N}: <op> (<branch>): <subject> .
+With
+.Ar ref ,
+only that branch's records are listed.
+The revision
+.Cm recovery@{ Ns Ar N Ns Cm }
+names the commit of a record in every command, so
+.Ql kit reset --hard recovery@{0}
+undoes the last rewrite.
+.It Cm diff Oo Fl Fl staged | Fl Fl cached Oc Oo Fl Fl name-only | Fl Fl name-status | Fl Fl stat Oc Oo Fl Fl merge-base Oc Oo Fl w | Fl b Oc Oo Fl U Ar n Oc Oo Fl z Oc Oo Fl M Ns Op Ar n | Fl Fl find-renames Ns Op = Ns Ar n | Fl Fl no-renames Oc Oo Fl l Ns Ar n Oc Oo Ar rev Op Ar rev | Ar a Ns .. Ns Ar b | Ar a Ns ... Ns Ar b Oc Ar path ...
 Show changes as a unified patch. With no arguments, compares the HEAD tree to
 a fresh worktree snapshot.
 .Fl Fl staged
@@ -750,7 +840,43 @@ bytes, only comparison changes.
 .Fl U Ar n
 .Pq Fl Fl unified Ns = Ns Ar n
 sets the number of unchanged context lines around each hunk (default 3).
-.It Cm status Oo Fl Fl porcelain Ns Oo = Ns Cm v1 | Cm v2 Oc Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc
+Rename detection is on by default: a deleted and an added file pair into a
+rename when their contents are at least 50% similar, scored as git scores
+them.
+.Fl M Ns Ar n
+.Pq Fl Fl find-renames Ns = Ns Ar n
+sets the threshold in git's grammar
+.Po
+.Ql 90%
+is 90%, while digits without
+.Ql %
+are a fraction, so
+.Ql 9
+is 90%
+.Pc ,
+and
+.Fl Fl no-renames
+turns detection off.
+A rename prints
+.Ql R<score>
+in
+.Fl Fl name-status ,
+.Ql old => new
+in
+.Fl Fl stat ,
+and
+.Ql similarity index ,
+.Ql rename from
+and
+.Ql rename to
+lines in the patch.
+When more than
+.Fl l Ns Ar n
+(default 1000) squared pairs would need a score, only identical-content
+renames are found and a warning goes to stderr;
+.Fl l Ns 0
+removes the limit.
+.It Cm status Oo Fl Fl porcelain Ns Oo = Ns Cm v1 | Cm v2 Oc Oc Oo Fl s | Fl Fl short Oc Oo Fl z Oc Oo Fl Fl find-renames Ns Op = Ns Ar n | Fl Fl no-renames Oc
 Show the staged and working-tree changes.
 .Fl s
 .Pq alias Fl Fl short
@@ -765,12 +891,15 @@ NUL-terminates records and emits raw, unquoted paths.
 .Fl Fl porcelain Ns = Ns Cm v2
 emits git's richer per-path format \(em
 .Ql 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
-for tracked changes (octal modes, full object ids; kit emits no rename
-.Ql 2
-lines and is never a submodule, so
+for tracked changes (octal modes, full object ids; kit is never a
+submodule, so
 .Ar sub
 is always
 .Ql N... ) ,
+.Ql 2 <XY> ... R<score> <path> <orig>
+for a staged rename, found by similarity as in
+.Cm diff
+.Pq Fl Fl find-renames Ns = Ns Ar n , Fl Fl no-renames ,
 and
 .Ql ? <path>
 for untracked. Header lines
@@ -879,7 +1008,7 @@ a branch at
 .Ar start
 .Pq default HEAD
 and switch to it.
-.It Cm switch Ar branch | - | @{-1}
+.It Cm switch Ar branch | - | @{-N}
 Switch branches (git
 .Cm switch ) .
 A thin front-end over
@@ -889,10 +1018,16 @@ Use
 .Cm switch - , checkout - ,
 or
 .Cm switch @{-1}
-to return to the previous HEAD, detached if it was detached.
-Only one previous HEAD is stored, atomically, in the per-worktree
+to return to the previous HEAD, detached if it was detached, and
+.Cm switch @{-N}
+for the N-th previous HEAD.
+.Li @{-N}
+also names that commit in any revision argument.
+Each tree records its last 16 previous HEADs, atomically, in the per-worktree
+.Pa HEAD_HISTORY
+and
 .Pa PREVIOUS_HEAD
-file. Older selections are not supported.
+files; N past the record is an error.
 .It Cm switch Oo Fl c | Fl C Oc Ar new Op Ar start
 Create
 .Pq Fl c , or create-or-reset Fl C
@@ -932,7 +1067,7 @@ prints the current patterns,
 clears them, and
 .Cm reapply
 re-materialises the working tree from the current patterns.
-.It Cm merge Oo Fl Fl no-commit Oc Oo Fl m Ar msg Oc Ar branch | Fl Fl continue | Fl Fl abort
+.It Cm merge Oo Fl Fl no-commit Oc Oo Fl m Ar msg Oc Oo Fl s Ar strategy Oc Oo Fl X Ar option Oc Ar branch | Fl Fl continue | Fl Fl abort
 Merge
 .Ar branch
 into HEAD. Fast-forwards when possible.
@@ -945,14 +1080,40 @@ or
 .Fl m
 or
 .Fl Fl message
-overrides the merge commit message. After a conflict, resolve and
+overrides the merge commit message.
+The merge follows a file that one side renamed, found by similarity as in
+.Cm diff :
+the other side's edit goes to the new path.
+A rename against a delete, or two renames of one file to different names,
+is a conflict at each new path.
+.Cm cherry-pick ,
+.Cm revert
+and
+.Cm rebase
+follow renames the same way.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+.Pq Fl Fl strategy-option
+resolve each conflict in a text file to that side's lines, and a conflict in
+a binary or large file to that side's whole file; changes that do not
+conflict still merge from both sides.
+A delete/modify conflict, a file against a directory and two different modes
+still stop the merge.
+.Fl s Cm ours
+records a merge commit with the tree of HEAD and never fast-forwards;
+.Fl s Cm ort
+and
+.Fl s Cm recursive
+name the default merge.
+After a conflict, resolve and
 .Cm add
 the paths, then
 .Fl Fl continue ,
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm rebase Oo Fl i Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
+.It Cm rebase Oo Fl i Oc Oo Fl Fl autosquash | Fl Fl no-autosquash Oc Oo Fl Fl update-refs | Fl Fl no-update-refs Oc Oo Fl X Ar option Oc Oo Fl x Ar cmd Oc Oo Fl Fl onto Ar newbase Oc Ar branch Op Ar branch
 Replay commits from HEAD onto
 .Ar branch .
 With
@@ -984,7 +1145,76 @@ previous one with
 cannot be the first line and is rejected before any mutation. Removing every
 line resets the branch to the base.
 .Cm edit
-(stop-to-amend) is not yet supported.
+replays the commit and stops: amend it with
+.Cm kit commit Fl Fl amend
+or add commits, then run
+.Cm kit rebase Fl Fl continue .
+.Cm exec Ar command
+runs the rest of the line with
+.Ql sh -c
+in the worktree root, its output on standard error; a command that fails
+stops the rebase after its line, and
+.Fl Fl continue
+goes on.
+.Fl x Ar cmd
+.Pq Fl Fl exec
+adds an
+.Cm exec Ar cmd
+line after each commit of the plan, or after the last commit of a squash or
+fixup chain; it may repeat.
+.Fl Fl autosquash
+moves each commit whose subject starts with
+.Ql fixup!\&
+or
+.Ql squash!\&
+to just after the earlier commit it names, by subject, by id prefix of 4 or
+more hex digits, or by subject prefix, and marks it
+.Cm fixup
+or
+.Cm squash ;
+a commit with no target in the range stays a
+.Cm pick .
+With
+.Fl i
+the todo list opens arranged; without it the arranged plan runs directly.
+Setting
+.Cm rebase.autosquash
+to
+.Cm true
+turns it on for
+.Fl i ,
+and
+.Fl Fl no-autosquash
+turns it off.
+.Fl Fl update-refs
+moves every other local branch that points at a replayed commit to that
+commit's replacement when the rebase finishes; with
+.Fl i
+the todo list shows an
+.Cm update-ref Ar refs/heads/branch
+line for each, which can be deleted or typed. A branch checked out in another
+worktree is left out with a warning. If a branch moved during the rebase, no
+branch moves and the rebase stays in progress;
+.Fl Fl abort
+moves no branch. Each moved branch's old tip goes to the recovery log.
+Setting
+.Cm rebase.updateRefs
+to
+.Cm true
+turns it on, and
+.Fl Fl no-update-refs
+turns it off.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge ;
+as in
+.Xr git 1 ,
+.Cm ours
+is the base being rebased onto and
+.Cm theirs
+the replayed commit, and a paused rebase keeps the option.
 Accepts
 .Fl Fl continue ,
 .Fl Fl skip ,
@@ -1032,7 +1262,7 @@ A name the remote holds as both a branch and a tag needs
 or
 .Pa refs/tags/ .
 An S3 remote refuses every delete.
-.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
+.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl X Ar option Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 .It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 Download or download-and-merge from the remote.
 Both take every remote tag after the branches unless
@@ -1058,13 +1288,35 @@ It does not combine with
 .Fl Fl all
 or
 .Fl Fl rebase .
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve the conflicts of the merge or the replay as in
+.Cm merge
+and
+.Cm rebase .
 .Cm fetch Fl Fl prune
 then deletes the remote-tracking refs whose branch is gone from the remote;
 it deletes no local branch and no tag.
+.Cm fetch
+also takes a closure export, as
+.Ql kit+closure:// Ns Ar dir
+or the path of its
+.Pa MANIFEST.mkcl ,
+and writes
+.Pa refs/remotes/closure/ Ns Ar branch .
+
 .It Cm clone Oo Fl Fl sparse ... Oc Oo Fl Fl tags | Fl Fl no-tags Oc Ar url
 Clone a remote into a new working directory, with its tags unless
 .Fl Fl no-tags
 is given.
+.Ar url
+may be a closure export written with
+.Cm closure Cm export Fl Fl history Fl Fl branch ,
+as
+.Ql kit+closure:// Ns Ar dir
+or the path of its
+.Pa MANIFEST.mkcl .
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
 Show or configure remotes. With no subcommand, lists the configured
 remotes.
@@ -1088,7 +1340,7 @@ renames a named remote and repoints any branch upstream tracking it.
 Removing or renaming a remote never touches the user-scoped
 .Ar trusted_remote_endpoint ,
 which is keyed by exact URL rather than remote name.
-.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Ar hash | Fl Fl continue | Fl Fl abort
+.It Cm cherry-pick Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Oo Fl X Ar option Oc Ar hash | Fl Fl continue | Fl Fl abort
 Apply a single commit from elsewhere onto HEAD.
 .Fl n
 or
@@ -1106,6 +1358,11 @@ This differs from
 git's
 .Cm cherry-pick Fl m
 is mainline selection, not a message override.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge .
 On conflict, resolve and
 .Cm add
 the paths, then
@@ -1113,7 +1370,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc
+.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc Op Fl X Ar option
 Create a new commit that undoes
 .Ar commit
 (the inverse of cherry-pick). A normal forward commit — it does not rewrite
@@ -1136,8 +1393,49 @@ which undoes the merge relative to that parent, counted from 1; a number out
 of range, and
 .Fl m
 on a commit that is not a merge, are errors.
+.Fl X Cm ours
+and
+.Fl X Cm theirs
+resolve conflicts as in
+.Cm merge .
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
+.It Cm rerere Oo Cm status | Cm diff | Cm forget Ar path | Cm clear | Cm gc Oc
+Inspect and maintain recorded conflict resolutions.
+With
+.Cm rerere.enabled
+set to
+.Cm true ,
+.Cm merge ,
+.Cm cherry-pick ,
+.Cm revert
+and
+.Cm rebase
+record how each text conflict was resolved when the operation continues or
+its merge is committed, and write that resolution into the file the next
+time the same conflict appears, with its sides in either order. The file is
+left unstaged unless
+.Cm rerere.autoUpdate
+is
+.Cm true .
+.Cm status
+lists the current conflicts that have an entry,
+.Cm diff
+shows the change from each conflict to its file now,
+.Cm forget
+drops the recorded resolution at
+.Ar path ,
+.Cm clear
+deletes every entry, and
+.Cm gc
+deletes entries older than
+.Cm gc.rerereResolved
+.Pq default 60
+or, with no resolution,
+.Cm gc.rerereUnresolved
+.Pq default 15
+days. The cache lives in
+.Pa .kit/rr-cache/ .
 .It Cm gc Oo Fl n | Fl Fl dry-run Oc Oo Fl Fl grace-secs Ar secs Oc
 Reclaim unreachable objects (mark-and-sweep). Keeps everything reachable from
 the retention roots (refs, stash, in-progress operations, attestations, and the
@@ -1208,15 +1506,29 @@ renames a tree to a path that does not exist and updates its links.
 .Cm repair
 fixes the links of a tree that was moved by hand. On-disk format:
 .Pa docs/specs/SPEC-WORKTREE.md .
-.It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
+.It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref | Cm branch Ar name Op Ar ref Oc
 .Cm stash push Fl u
 or
 .Fl Fl include-untracked
 includes non-ignored untracked files (also included by default).
-.Fl a
-and
+.Cm stash push Fl a
+or
 .Fl Fl all
-are not supported.
+also saves the files the ignore rules match and removes them from the
+working tree;
+.Cm pop
+puts them back.
+.Pa .kit
+and
+.Pa .git
+are never saved, and
+.Fl a
+does not combine with paths.
+.Cm stash branch Ar name Op Ar ref
+creates
+.Ar name
+at the commit the stash was made on, switches to it, and pops the entry
+with its staged state. A failed restore keeps the entry.
 .Cm stash push Op Fl Fl Ar path ...
 saves only matching files or directory prefixes relative to the current directory.
 Other worktree files and staged entries stay unchanged.
@@ -1255,6 +1567,155 @@ that may be either a bare index
 or the
 .Cm stash@{ Ns Ar N Ns Cm }
 form.
+.It Cm apply Oo Fl Fl index | Fl Fl cached Oc Oo Fl R Oc Oo Fl Fl check | Fl Fl stat Oc Ar patch ...
+Apply unified diffs, as
+.Cm kit diff
+or git writes them, to the worktree;
+.Fl Fl cached
+applies to the index alone and
+.Fl Fl index
+to both, which must agree.
+A hunk applies only where its old lines match exactly, at the line its
+header names or the nearest one; kit never applies with fuzz.
+Either every file patch applies or nothing changes: a patch that does not
+apply exits 1.
+.Fl R
+reverses the patch,
+.Fl Fl check
+writes nothing, and
+.Fl Fl stat
+prints a diffstat.
+A malformed or binary patch, a copy, a symlink and a path outside the
+worktree exit 65.
+.It Cm am Ar mbox ... | Fl Fl continue | Fl Fl skip | Fl Fl abort
+Apply each mail of a mailbox, as
+.Cm git format-patch
+writes it, as a signed commit on the current branch, with the
+.Sy From:
+of the mail as the author.
+When a patch does not apply, kit changes nothing, keeps the mails in
+.Pa .kit/am/
+and exits 1.
+.Fl Fl continue
+commits the staged result,
+.Fl Fl skip
+drops the mail, and
+.Fl Fl abort
+returns to where
+.Cm am
+started.
+.It Cm shortlog Oo Fl s Oc Oo Fl n Oc Oo Fl e Oc Oo Fl Fl format Ns = Ns Cm json Oc Oo Ar rev | Ar range Oc Oo Oo Fl Fl Oc Ar path ... Oc
+Group the commits that
+.Cm kit log
+shows by author, each with its subjects oldest first.
+.Fl n
+sorts by count,
+.Fl s
+prints only the counts, and
+.Fl e
+keeps the email, or the key id of a key author.
+With no revision and standard input that is not a terminal, kit reads
+.Cm kit log
+output from it.
+.It Cm archive Oo Fl Fl format Ns = Ns Cm tar | Ns Cm tar.gz Oc Oo Fl Fl prefix Ns = Ns Ar dir/ Oc Oo Fl o Ar file Oc Ar tree-ish Op Ar path ...
+Write the tree of
+.Ar tree-ish
+as a tar archive, reading only the tree.
+The format comes from
+.Fl Fl format ,
+else from the extension of
+.Fl o
+.Pq Pa .tar , .tar.gz , .tgz ,
+else tar.
+The bytes depend only on the tree: entries in tree order, uid and gid 0,
+the commit's time as mtime, modes 0644, 0755 and symlinks, and a pax
+global header holding the commit id.
+.Fl Fl prefix
+is put before every path, and each
+.Ar path
+keeps only that file or directory.
+Without
+.Fl o
+the archive goes to standard output, which must not be a terminal.
+.It Cm range-diff Oo Fl Fl creation-factor Ns = Ns Ar n Oc Oo Fl Fl no-dual-color Oc Ar old-base Ns .. Ns Ar old-tip Ar new-base Ns .. Ns Ar new-tip
+Show how each commit of a series changed between two versions of it,
+such as a branch before and after a rebase.
+.Ar old Ns ... Ns Ar new
+takes the merge base as both bases, and
+.Ar base old-tip new-tip
+takes one base for both.
+kit pairs the commits by the assignment of least total cost, as git does,
+and marks each line
+.Sq =
+for the same patch,
+.Sq \&!
+for a changed one, followed by the diff of the two patches,
+.Sq <
+for a dropped commit and
+.Sq >
+for an added one.
+Leaving a commit unpaired costs
+.Ar n Ns %
+.Pq default 60
+of the size of its diff.
+Each side holds at most 1,000 commits.
+.It Cm describe Oo Fl Fl tags Oc Oo Fl Fl always Oc Oo Fl Fl abbrev Ns = Ns Ar n Oc Oo Fl Fl long Oc Oo Fl Fl dirty Ns Oo = Ns Ar mark Oc Oc Oo Fl Fl match Ar glob Oc Oo Fl Fl exclude Ar glob Oc Op Ar rev
+Name
+.Ar rev
+.Pq default Cm HEAD
+after the nearest annotated tag that reaches it, or any tag with
+.Fl Fl tags ,
+as
+.Ar tag Ns - Ns Ar n Ns -k Ns Ar id ,
+where
+.Ar n
+counts the commits that
+.Ar rev
+reaches and the tag does not. kit writes
+.Sq k
+where git writes
+.Sq g .
+A tag on
+.Ar rev
+prints alone unless
+.Fl Fl long .
+With no tag,
+.Fl Fl always
+prints the short id; otherwise the exit status is 1.
+.Fl Fl dirty
+appends a mark when a tracked file differs from
+.Cm HEAD .
+.It Cm grep Oo Fl i Oc Oo Fl w Oc Oo Fl v Oc Oo Fl n Oc Oo Fl l | Fl c | Fl q Oc Oo Fl F | Fl E | Fl G Oc Oo Fl e Ar pattern Oc Ar ... Oo Ar pattern Oc Oo Fl Fl cached | Ar rev ... Oc Oo Oo Fl Fl Oc Ar path ... Oc
+Print the lines of tracked files that match a pattern, as
+.Ar path : Ns Ar line ,
+or with
+.Fl n
+as
+.Ar path : Ns Ar number : Ns Ar line .
+It searches the tracked files in the worktree, the staged content with
+.Fl Fl cached ,
+or the tree of each
+.Ar rev ,
+whose name goes before each path. Untracked files and symlinks are never
+searched.
+.Fl i
+ignores case,
+.Fl w
+keeps whole words,
+.Fl v
+selects lines that do not match,
+.Fl l
+prints the paths,
+.Fl c
+prints a count for each file and
+.Fl q
+prints nothing. Patterns use the syntax of Rust's
+.Sy regex
+crate;
+.Fl F
+takes them literally. A binary file prints
+.Dq Binary file Ar path Li matches .
+The exit status is 0 when a line was selected and 1 when none was.
 .It Cm blame Oo Fl Fl format Ns = Ns Cm json Oc Op Fl w Op Fl M Op Fl C Oo Fl Fl ignore-rev Ar rev Oc Oo Fl Fl ignore-rev-precise Oc Op Fl Fl first-parent Op Fl Fl reverse Oo Fl L Ar start , end Oc Op Ar rev Ar file
 Line-level attribution of
 .Ar file
@@ -1420,7 +1881,7 @@ emits the disclosure result as JSON.
 .Fl Fl payload-out Ar file
 writes the verified payload bytes to
 .Ar file .
-.It Cm closure Cm export Ar rev Op Fl Fl history Oo Fl o | Fl Fl output Ar dir Oc Op Fl Fl force Oo Fl Fl format Ns = Ns Cm json Oc
+.It Cm closure Cm export Ar rev Op Fl Fl history Oo Fl Fl branch Ar name Oc Oo Fl Fl since Ar rev Oc Oo Fl o | Fl Fl output Ar dir Oc Op Fl Fl force Oo Fl Fl format Ns = Ns Cm json Oc
 Export a commit's object-set closure as
 .Pa MANIFEST.mkcl
 plus raw-only v1 packs (default snapshot;
@@ -1440,7 +1901,24 @@ emits
 .Cm root , mode , packs , objects ,
 and
 .Cm manifest
-keys.
+keys, plus
+.Cm branch
+and
+.Cm since
+when given.
+.Fl Fl branch Ar name
+records the branch of the root, a commit, so
+.Cm clone
+and
+.Cm fetch
+read the directory as a
+.Ql kit+closure://
+remote with that branch.
+.Fl Fl since Ar rev
+(history mode only, repeatable) leaves out every object
+.Ar rev
+reaches, for a receiver that holds it.
+Either flag writes manifest version 2.
 .It Cm closure Cm verify Ar commit-id Oo Fl Fl from Ar dir Oc Op Fl Fl history Op Fl Fl show-unreferenced Oo Fl Fl format Ns = Ns Cm json Oc
 With
 .Fl Fl from Ar dir ,
@@ -1462,6 +1940,10 @@ list is checked only when
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
 emits the closure report as JSON.
+With
+.Fl Fl from ,
+the objects an incremental export leaves out count as present when the
+local repository holds them.
 .It Cm closure Cm repair-indexes
 Rebuild damaged local pack indexes beside verified packs.
 Run it from any
@@ -1564,7 +2046,18 @@ overwrites an existing key file at the target path; and
 .Fl Fl print-pubkey
 emits the canonical keyid on stdout for trust-roots entries.
 .It Cm config Oo Ar key Oo Ar value Oc Oc Op Fl Fl format Ns = Ns Cm json
-Read or write a config key. With no
+Read or write a config key.
+.Fl Fl get-regexp Ar regex
+prints
+.Ql key value
+for each key with a value whose name matches.
+.Cm alias. Ns Ar name
+names kit arguments that run when
+.Ar name
+is typed as a command; it is user-scoped only, a value starting with
+.Ql \&!
+is refused, a built-in command always wins, and an alias cannot expand to
+another alias. With no
 .Ar key ,
 shows every configuration value; with a
 .Ar key
@@ -1576,6 +2069,12 @@ emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
 .Cm ssh.identity_file ,
+.Cm rebase.autosquash ,
+.Cm rebase.updateRefs ,
+.Cm rerere.enabled ,
+.Cm rerere.autoUpdate ,
+.Cm gc.rerereResolved ,
+.Cm gc.rerereUnresolved ,
 and
 .Cm gc.auto .
 Setting

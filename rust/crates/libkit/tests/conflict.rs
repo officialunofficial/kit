@@ -343,6 +343,7 @@ mod marker_scan {
             base_hash: None,
             ours_hash: None,
             theirs_hash: None,
+            rename: None,
         }
     }
 
@@ -632,6 +633,7 @@ fn paused_below_a_tracked_symlink() -> (Paused, kit_core::ops::merge::Conflict) 
         theirs_hash: Some(blob("theirs\n")),
         ours_mode: None,
         theirs_mode: Some(EntryMode::Blob),
+        rename: None,
     };
     let paused = Paused {
         f,

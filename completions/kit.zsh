@@ -71,11 +71,19 @@ _kit() {
         'revert:Create a new commit undoing a previous commit'
         'rebase:Replay commits onto a different base'
         'bisect:Binary search for a bad commit'
+        'rerere:Reuse recorded conflict resolutions'
         'gc:Reclaim unreachable objects'
         'sparse-checkout:Manage sparse checkout patterns'
         'serve:Start SSH transport server (internal)'
         'mcp:Start a Model Context Protocol server on stdio for MCP clients'
         'git:Git-bridge subcommands (git export, feature-gated)'
+        'grep:Print lines of tracked files that match a pattern'
+        'shortlog:Group commits by author'
+        'range-diff:Compare two versions of a series'
+        'archive:Write the tree of a revision as a tar archive'
+        'describe:Name a commit after the nearest tag'
+        'apply:Apply patches to the worktree, the index or both'
+        'am:Apply a mailbox of patches as commits'
         'blame:Show line-level commit attribution'
         'prove:Build a disclosure bundle for a path, chunk, or byte range'
         'verify:Verify the signature on a commit'
@@ -176,6 +184,9 @@ _kit() {
                         '(-b --ignore-space-change)'{-b,--ignore-space-change}'[ignore changes in the amount of whitespace]' \
                         '(-U --unified)'{-U,--unified}'[context lines around each hunk (default 3)]:n:' \
                         '-z[NUL-terminate name-only/name-status records, raw paths]' \
+                        '(-M --find-renames --no-renames)'{-M-,--find-renames=-}'[detect renames at a similarity threshold (default 50%)]::threshold:' \
+                        '(-M --find-renames --no-renames)--no-renames[turn off rename detection]' \
+                        '-l-[rename candidate limit (default 1000, 0 for none)]:n:' \
                         '--help[show help]' \
                         '*:file:_files'
                     ;;
@@ -275,13 +286,17 @@ _kit() {
                         '--porcelain=-[machine-readable XY output]::version:(v1 v2)' \
                         '(-s --short)'{-s,--short}'[short format; alias for --porcelain=v1]' \
                         '-z[NUL-terminate records; raw unquoted paths]' \
+                        '(--find-renames --no-renames)--find-renames=-[detect renames at a similarity threshold (default 50%)]::threshold:' \
+                        '(--find-renames --no-renames)--no-renames[turn off rename detection]' \
                         '--help[show help]'
                     ;;
                 commit)
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
                         '--allow-empty[accept a first commit with nothing staged]' \
-                        '--amend[replace HEAD instead of adding a new commit]' \
+                        '(--fixup --squash)--amend[replace HEAD instead of adding a new commit]' \
+                        '(--amend --squash)--fixup[make a fixup! commit for rebase --autosquash]:revision:' \
+                        '(--amend --fixup)--squash[make a squash! commit for rebase --autosquash]:revision:' \
                         '(-m --message)-m[commit message]:message:' \
                         '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
                         '--author[override the author identity]:spec:' \
@@ -313,8 +328,13 @@ _kit() {
                         '--abbrev-commit[abbreviate commit ids]' \
                         '--abbrev[set abbreviation length]:length:' \
                         '--format[output format]:format:(json)' \
-                        '--author[filter by author substring]:pattern:' \
-                        '--grep[filter by message substring]:pattern:' \
+                        '*--author[filter by author regex]:pattern:' \
+                        '*--grep[filter by message regex]:pattern:' \
+                        '(-F --fixed-strings)'{-F,--fixed-strings}'[take patterns literally]' \
+                        '(-i --regexp-ignore-case)'{-i,--regexp-ignore-case}'[ignore case in patterns]' \
+                        '(-E --extended-regexp)'{-E,--extended-regexp}'[extended regex (default)]' \
+                        '--all-match[require every --grep]' \
+                        '--invert-grep[keep commits that do not match]' \
                         '--since[only commits at or after this date]:date:' \
                         '--until[only commits at or before this date]:date:' \
                         '--no-merges[hide merge commits from the output]' \
@@ -324,6 +344,7 @@ _kit() {
                         '--decorate[show the refs that name each commit]' \
                         '--graph[draw the commit graph in the left margin]' \
                         '--all[start from every ref and HEAD]' \
+                        '--follow[follow one file across renames]' \
                         '-n[limit number of commits]:count:' \
                         '--help[show help]'
                     ;;
@@ -331,6 +352,7 @@ _kit() {
                     _arguments \
                         '--format[output format]:format:(default json)' \
                         '-n[limit number of entries]:count:' \
+                        '--recovery[list commits that amend, reset and rebase replaced]' \
                         '--help[show help]' \
                         '1:ref:'
                     ;;
@@ -339,6 +361,7 @@ _kit() {
                         '--all[pull from every configured remote]' \
                         '(--rebase --no-ff)--rebase[replay the current branch onto the fetched branch]' \
                         '(--rebase --no-ff)--no-ff[always create a merge commit]' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
                         '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
@@ -410,7 +433,13 @@ _kit() {
                 rebase)
                     _arguments \
                         '(-i --interactive)'{-i,--interactive}'[edit the todo list before replaying]' \
+                        '(--no-autosquash)--autosquash[fold fixup! and squash! commits into their targets]' \
+                        '(--autosquash)--no-autosquash[ignore rebase.autosquash]' \
+                        '(--no-update-refs)--update-refs[move the branches stacked on the replayed commits]' \
+                        '(--update-refs)--no-update-refs[ignore rebase.updateRefs]' \
                         '--onto[replay onto this revision instead of the upstream]:newbase:' \
+                        '*'{-x,--exec}'[run a shell command after each replayed commit]:command:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--continue[continue after conflict resolution]' \
                         '--skip[skip the current commit]' \
                         '--abort[abort rebase]' \
@@ -422,6 +451,7 @@ _kit() {
                         '--abort[abort revert]' \
                         '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
                         '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
@@ -431,6 +461,8 @@ _kit() {
                         '--abort[abort the in-progress merge]' \
                         '--no-commit[merge but stop before creating the merge commit]' \
                         '(-m --message)'{-m,--message}'[override the merge commit message]:message:' \
+                        '(-s --strategy)'{-s,--strategy}'[merge strategy]:strategy:(ort recursive ours)' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--help[show help]' \
                         '1:branch:'
                     ;;
@@ -440,6 +472,7 @@ _kit() {
                         '--abort[abort the cherry-pick]' \
                         '(-n --no-commit)'{-n,--no-commit}'[apply the change without creating a commit]' \
                         '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '(-X --strategy-option)'{-X,--strategy-option}'[resolve every conflict to one side]:option:(ours theirs)' \
                         '--help[show help]' \
                         '1:commit:'
                     ;;
@@ -462,6 +495,14 @@ _kit() {
                         'good[mark a commit as good]' \
                         'bad[mark a commit as bad]' \
                         'reset[end bisect and restore HEAD]'
+                    ;;
+                rerere)
+                    _values 'rerere subcommand' \
+                        'status[list tracked conflicts]' \
+                        'diff[show changes from each tracked conflict]' \
+                        'forget[drop a recorded resolution]' \
+                        'clear[delete every entry]' \
+                        'gc[delete old entries]'
                     ;;
                 self)
                     if (( CURRENT == 2 )); then
@@ -523,8 +564,11 @@ _kit() {
                         'drop[remove stash entry]' \
                         'clear[remove all stash entries]' \
                         'show[show diff of stash entry]' \
+                        'branch[branch from the stash base and pop it]' \
                         '-u[include non-ignored untracked files]' \
-                        '--include-untracked[include non-ignored untracked files]'
+                        '--include-untracked[include non-ignored untracked files]' \
+                        '-a[also stash ignored files]' \
+                        '--all[also stash ignored files]'
                     ;;
                 remote)
                     _values 'remote subcommand' \
@@ -645,6 +689,8 @@ _kit() {
                         export)
                             _arguments \
                                 '--history[full ancestry (history mode)]' \
+                                '--branch[record the branch of the root]:branch:' \
+                                '*--since[leave out what this commit reaches]:revision:' \
                                 '-o[output directory]:dir:_files -/' \
                                 '--output[output directory]:dir:_files -/' \
                                 '--force[overwrite a non-empty directory]' \

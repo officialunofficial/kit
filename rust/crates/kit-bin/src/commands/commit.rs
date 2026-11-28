@@ -11,7 +11,7 @@ use std::io::{BufWriter, Write};
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Commit, Identity, Tag};
+use kit_core::object::{Commit, Identity, Object, Tag};
 use kit_core::ops::conflict_state::ConflictRecord;
 use libkit::signer::{self, Signer};
 
@@ -71,6 +71,15 @@ struct CommitOptions {
     /// an unreachable object until `kit gc` reclaims it.
     #[arg(long)]
     amend: bool,
+    /// Make a commit whose subject is `fixup! ` and the subject of `<rev>`,
+    /// for `kit rebase --autosquash` to fold into `<rev>`. No editor opens;
+    /// `-m` or `-F` text goes in the body.
+    #[arg(long, value_name = "REV", conflicts_with_all = ["amend", "squash"])]
+    fixup: Option<String>,
+    /// Make a commit whose subject is `squash! ` and the subject of `<rev>`.
+    /// The body comes from `-m` or `-F`, else from `$EDITOR`.
+    #[arg(long, value_name = "REV", conflicts_with = "amend")]
+    squash: Option<String>,
     /// Suppress the commit summary line (git `-q`).
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
@@ -118,32 +127,70 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return super::fail(e),
     };
 
-    // Message precedence: `-m` → `-F <file>` → amend-reuse → merge message
-    // (`MERGE_MSG`) → `$EDITOR`. `-F` and the defaults never launch the editor,
-    // so they stay usable in non-interactive contexts.
-    let msg = match opts.message {
-        Some(m) => m,
-        None => match &opts.file {
-            Some(path) => match read_message_file(path) {
-                Ok(m) if !m.trim().is_empty() => m,
-                Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+    // `--fixup` and `--squash` put their subject before the `-m` or `-F`
+    // text. `--squash` without either opens the editor on the subject.
+    let fold = match fold_subject(&layout, &store, &opts) {
+        Ok(fold) => fold,
+        Err(code) => return code,
+    };
+    let msg = if let Some((subject, opens_editor)) = fold {
+        let body = match (&opts.message, &opts.file) {
+            (Some(m), _) => Some(m.clone()),
+            (None, Some(path)) => match read_message_file(path) {
+                Ok(m) => Some(m),
                 Err(e) => return emit_err(&format!("read message file: {e}"), exit::NOINPUT),
             },
-            None => {
-                if let Some(m) = pending.default_message() {
-                    m
-                } else {
-                    if let Err(e) = check_usable() {
-                        return emit_err(&format!("commit: {e}, or pass -m <msg>"), exit::USAGE);
-                    }
-                    match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-                        Ok(m) if !m.is_empty() => m,
-                        Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
-                        Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
-                    }
+            (None, None) => None,
+        };
+        match body {
+            Some(body) if !body.trim().is_empty() => format!("{subject}\n\n{}", body.trim()),
+            None if opens_editor => {
+                if let Err(e) = check_usable() {
+                    return emit_err(&format!("commit: {e}, or pass -m <msg>"), exit::USAGE);
+                }
+                match spawn_editor(&format!("{subject}\n{COMMIT_EDITMSG_TEMPLATE}")) {
+                    Ok(m) if !m.is_empty() => m,
+                    Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+                    Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
                 }
             }
-        },
+            Some(_) | None => subject,
+        }
+    } else {
+        // Message precedence: `-m` → `-F <file>` → amend-reuse → merge message
+        // (`MERGE_MSG`) → `$EDITOR`. `-F` and the defaults never launch the editor,
+        // so they stay usable in non-interactive contexts.
+        match opts.message {
+            Some(m) => m,
+            None => match &opts.file {
+                Some(path) => match read_message_file(path) {
+                    Ok(m) if !m.trim().is_empty() => m,
+                    Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+                    Err(e) => return emit_err(&format!("read message file: {e}"), exit::NOINPUT),
+                },
+                None => {
+                    if let Some(m) = pending.default_message() {
+                        m
+                    } else {
+                        if let Err(e) = check_usable() {
+                            return emit_err(
+                                &format!("commit: {e}, or pass -m <msg>"),
+                                exit::USAGE,
+                            );
+                        }
+                        match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                            Ok(m) if !m.is_empty() => m,
+                            Ok(_) => {
+                                return emit_err("empty commit message — aborting", exit::USAGE);
+                            }
+                            Err(e) => {
+                                return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR);
+                            }
+                        }
+                    }
+                }
+            },
+        }
     };
 
     let mut signer = match load_commit_signer(&layout, &cfg) {
@@ -175,7 +222,15 @@ pub fn run(args: &[String]) -> u8 {
                  conflict markers; resolve it and `kit add` it"
             ));
         }
-        libkit::conflict::ensure_staged(&layout, &store, records).map_err(|e| e.to_string())
+        libkit::conflict::ensure_staged(&layout, &store, records).map_err(|e| e.to_string())?;
+        libkit::rerere::record(
+            &layout,
+            &store,
+            super::conflict::rerere(&layout),
+            records,
+            &super::conflict::Notes,
+        );
+        Ok(())
     };
     let request = libkit::commit::Request {
         message: &msg,
@@ -248,6 +303,46 @@ pub fn run(args: &[String]) -> u8 {
     exit::OK
 }
 
+/// The subject that `--fixup` or `--squash` asks for, with whether the
+/// editor opens when no `-m` or `-F` gives a body, or `None` without either
+/// flag.
+fn fold_subject(
+    layout: &RepoLayout,
+    store: &kit_core::store::ObjectStore,
+    opts: &CommitOptions,
+) -> Result<Option<(String, bool)>, u8> {
+    let (prefix, spec, opens_editor) = match (&opts.fixup, &opts.squash) {
+        (Some(spec), _) => ("fixup!", spec, false),
+        (None, Some(spec)) => ("squash!", spec, true),
+        (None, None) => return Ok(None),
+    };
+    let target = libkit::revspec::resolve_revision(store, layout, spec)
+        .map(|h| libkit::revspec::peel_tags(store, h))
+        .map_err(|e| emit_err(&format!("bad commit '{spec}': {e}"), exit::DATAERR))?;
+    let message = match store.read_object(&target) {
+        Ok(Object::Commit(c)) => c.message,
+        Ok(_) => {
+            return Err(emit_err(
+                &format!("'{spec}' is not a commit"),
+                exit::DATAERR,
+            ));
+        }
+        Err(e) => {
+            return Err(emit_err(
+                &format!("read '{spec}': {e}"),
+                exit::GENERAL_ERROR,
+            ));
+        }
+    };
+    let subject = String::from_utf8_lossy(&message)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    Ok(Some((format!("{prefix} {subject}"), opens_editor)))
+}
+
 /// Pre-process `args` to canonicalize the combined `-am<msg>` /
 /// `-am <msg>` shortcut into `-a -m <msg>`. Everything else passes
 /// through unchanged. Clap then sees only canonical forms.
@@ -276,7 +371,7 @@ fn expand_dash_am(args: &[String]) -> Vec<String> {
 
 /// A key that signs objects, with the failure shape that the commands share:
 /// a message and an exit code.
-pub(super) struct CommitSigner(Signer);
+pub(super) struct CommitSigner(pub(super) Signer);
 
 impl CommitSigner {
     pub(super) fn public_key(&self) -> Result<[u8; 32], (String, u8)> {

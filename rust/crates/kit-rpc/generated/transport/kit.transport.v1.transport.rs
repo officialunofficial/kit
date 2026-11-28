@@ -6433,6 +6433,875 @@ pub mod download_pack_response {
     #[doc(inline)]
     pub use super::__buffa::view::oneof::download_pack_response::Body as BodyView;
 }
+/// The window of `tips` at `depth`, less what the client holds (SPEC-SHALLOW
+/// §8.2). At most 1,000 tips and 1,000 `have` commits, each a raw 32-byte
+/// commit id; `depth` from 1 to 2^31 - 1.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
+pub struct DownloadWindowRequest {
+    /// Field 1: `tips`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "tips",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
+    )]
+    pub tips: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `depth`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "depth",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
+    )]
+    pub depth: ::core::option::Option<u32>,
+    /// Field 3: `have`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "have",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
+    )]
+    pub have: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[cfg_attr(feature = "json", serde(skip))]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowRequest {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowRequest")
+            .field("tips", &self.tips)
+            .field("depth", &self.depth)
+            .field("have", &self.have)
+            .finish()
+    }
+}
+impl DownloadWindowRequest {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowRequest";
+}
+impl DownloadWindowRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::depth`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_depth(mut self, value: u32) -> Self {
+        self.depth = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(DownloadWindowRequest);
+impl ::buffa::MessageName for DownloadWindowRequest {
+    const PACKAGE: &'static str = "kit.transport.v1";
+    const NAME: &'static str = "DownloadWindowRequest";
+    const FULL_NAME: &'static str = "kit.transport.v1.DownloadWindowRequest";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowRequest";
+}
+impl ::buffa::Message for DownloadWindowRequest {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.tips {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.depth {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        for v in &self.have {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.tips {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.depth {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        for v in &self.have {
+            ::buffa::types::put_shared_bytes_field(3u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.tips.push(__elem);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.depth = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.have.push(__elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.tips.clear();
+        self.depth = ::core::option::Option::None;
+        self.have.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowRequest {
+    const PROTO_FQN: &'static str = "kit.transport.v1.DownloadWindowRequest";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+#[cfg(feature = "json")]
+impl ::buffa::json_helpers::ProtoElemJson for DownloadWindowRequest {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[cfg(feature = "json")]
+#[doc(hidden)]
+pub const __DOWNLOAD_WINDOW_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/kit.transport.v1.DownloadWindowRequest",
+    to_json: ::buffa::type_registry::any_to_json::<DownloadWindowRequest>,
+    from_json: ::buffa::type_registry::any_from_json::<DownloadWindowRequest>,
+    is_wkt: false,
+};
+/// The boundary the server computed, advisory: the client computes it again
+/// from the objects it received and refuses a response whose list differs.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
+pub struct DownloadWindowBoundary {
+    /// Field 1: `commits`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "commits",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
+    )]
+    pub commits: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    #[cfg_attr(feature = "json", serde(skip))]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowBoundary {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowBoundary").field("commits", &self.commits).finish()
+    }
+}
+impl DownloadWindowBoundary {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowBoundary";
+}
+::buffa::impl_default_instance!(DownloadWindowBoundary);
+impl ::buffa::MessageName for DownloadWindowBoundary {
+    const PACKAGE: &'static str = "kit.transport.v1";
+    const NAME: &'static str = "DownloadWindowBoundary";
+    const FULL_NAME: &'static str = "kit.transport.v1.DownloadWindowBoundary";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowBoundary";
+}
+impl ::buffa::Message for DownloadWindowBoundary {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.commits {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.commits {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.commits.push(__elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.commits.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowBoundary {
+    const PROTO_FQN: &'static str = "kit.transport.v1.DownloadWindowBoundary";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+#[cfg(feature = "json")]
+impl ::buffa::json_helpers::ProtoElemJson for DownloadWindowBoundary {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[cfg(feature = "json")]
+#[doc(hidden)]
+pub const __DOWNLOAD_WINDOW_BOUNDARY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/kit.transport.v1.DownloadWindowBoundary",
+    to_json: ::buffa::type_registry::any_to_json::<DownloadWindowBoundary>,
+    from_json: ::buffa::type_registry::any_from_json::<DownloadWindowBoundary>,
+    is_wkt: false,
+};
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
+pub struct DownloadWindowResponse {
+    #[cfg_attr(feature = "json", serde(flatten))]
+    pub body: ::core::option::Option<__buffa::oneof::download_window_response::Body>,
+    #[cfg_attr(feature = "json", serde(skip))]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowResponse {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowResponse").field("body", &self.body).finish()
+    }
+}
+impl DownloadWindowResponse {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowResponse";
+}
+::buffa::impl_default_instance!(DownloadWindowResponse);
+impl ::buffa::MessageName for DownloadWindowResponse {
+    const PACKAGE: &'static str = "kit.transport.v1";
+    const NAME: &'static str = "DownloadWindowResponse";
+    const FULL_NAME: &'static str = "kit.transport.v1.DownloadWindowResponse";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowResponse";
+}
+impl ::buffa::Message for DownloadWindowResponse {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let ::core::option::Option::Some(ref v) = self.body {
+            match v {
+                __buffa::oneof::download_window_response::Body::Pack(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::download_window_response::Body::Chunk(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+                __buffa::oneof::download_window_response::Body::Boundary(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
+            }
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let ::core::option::Option::Some(ref v) = self.body {
+            match v {
+                __buffa::oneof::download_window_response::Body::Pack(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::download_window_response::Body::Chunk(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::download_window_response::Body::Boundary(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+            }
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::download_window_response::Body::Pack(
+                        ref mut existing,
+                    ),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::download_window_response::Body::Pack(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::download_window_response::Body::Chunk(
+                        ref mut existing,
+                    ),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::download_window_response::Body::Chunk(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::download_window_response::Body::Boundary(
+                        ref mut existing,
+                    ),
+                ) = self.body
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.body = ::core::option::Option::Some(
+                        __buffa::oneof::download_window_response::Body::Boundary(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.body = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowResponse {
+    const PROTO_FQN: &'static str = "kit.transport.v1.DownloadWindowResponse";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+#[cfg(feature = "json")]
+impl<'de> ::serde::Deserialize<'de> for DownloadWindowResponse {
+    fn deserialize<D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        struct _V;
+        impl<'de> ::serde::de::Visitor<'de> for _V {
+            type Value = DownloadWindowResponse;
+            fn expecting(
+                &self,
+                f: &mut ::core::fmt::Formatter<'_>,
+            ) -> ::core::fmt::Result {
+                f.write_str("struct DownloadWindowResponse")
+            }
+            #[allow(clippy::field_reassign_with_default)]
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> ::core::result::Result<DownloadWindowResponse, A::Error> {
+                let mut __oneof_body: ::core::option::Option<
+                    __buffa::oneof::download_window_response::Body,
+                > = None;
+                while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
+                    match key.as_str() {
+                        "pack" => {
+                            let v: ::core::option::Option<DownloadWindowPack> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            DownloadWindowPack,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_body.is_some() {
+                                    return Err(
+                                        ::serde::de::Error::custom(
+                                            "multiple oneof fields set for 'body'",
+                                        ),
+                                    );
+                                }
+                                __oneof_body = Some(
+                                    __buffa::oneof::download_window_response::Body::Pack(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "chunk" => {
+                            let v: ::core::option::Option<PackChunk> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            PackChunk,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_body.is_some() {
+                                    return Err(
+                                        ::serde::de::Error::custom(
+                                            "multiple oneof fields set for 'body'",
+                                        ),
+                                    );
+                                }
+                                __oneof_body = Some(
+                                    __buffa::oneof::download_window_response::Body::Chunk(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "boundary" => {
+                            let v: ::core::option::Option<DownloadWindowBoundary> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            DownloadWindowBoundary,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_body.is_some() {
+                                    return Err(
+                                        ::serde::de::Error::custom(
+                                            "multiple oneof fields set for 'body'",
+                                        ),
+                                    );
+                                }
+                                __oneof_body = Some(
+                                    __buffa::oneof::download_window_response::Body::Boundary(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            map.next_value::<::serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let mut __r = <DownloadWindowResponse as ::core::default::Default>::default();
+                __r.body = __oneof_body;
+                Ok(__r)
+            }
+        }
+        d.deserialize_map(_V)
+    }
+}
+#[cfg(feature = "json")]
+impl ::buffa::json_helpers::ProtoElemJson for DownloadWindowResponse {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[cfg(feature = "json")]
+#[doc(hidden)]
+pub const __DOWNLOAD_WINDOW_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/kit.transport.v1.DownloadWindowResponse",
+    to_json: ::buffa::type_registry::any_to_json::<DownloadWindowResponse>,
+    from_json: ::buffa::type_registry::any_from_json::<DownloadWindowResponse>,
+    is_wkt: false,
+};
+pub mod download_window_response {
+    #[allow(unused_imports)]
+    use super::*;
+    #[doc(inline)]
+    pub use super::__buffa::oneof::download_window_response::Body;
+    #[cfg(feature = "transport-messages")]
+    #[doc(inline)]
+    pub use super::__buffa::view::oneof::download_window_response::Body as BodyView;
+}
+/// Sent before the chunks of each pack of a window.
+#[derive(Clone, PartialEq, Default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
+pub struct DownloadWindowPack {
+    /// Field 1: `pack_id`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
+    )]
+    pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    /// Field 2: `total_bytes`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "totalBytes",
+            alias = "total_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
+    )]
+    pub total_bytes: ::core::option::Option<u64>,
+    #[cfg_attr(feature = "json", serde(skip))]
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for DownloadWindowPack {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("DownloadWindowPack")
+            .field("pack_id", &self.pack_id)
+            .field("total_bytes", &self.total_bytes)
+            .finish()
+    }
+}
+impl DownloadWindowPack {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowPack";
+}
+impl DownloadWindowPack {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::pack_id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_pack_id(
+        mut self,
+        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
+    ) -> Self {
+        self.pack_id = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::total_bytes`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_total_bytes(mut self, value: u64) -> Self {
+        self.total_bytes = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(DownloadWindowPack);
+impl ::buffa::MessageName for DownloadWindowPack {
+    const PACKAGE: &'static str = "kit.transport.v1";
+    const NAME: &'static str = "DownloadWindowPack";
+    const FULL_NAME: &'static str = "kit.transport.v1.DownloadWindowPack";
+    const TYPE_URL: &'static str = "type.googleapis.com/kit.transport.v1.DownloadWindowPack";
+}
+impl ::buffa::Message for DownloadWindowPack {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.pack_id {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
+        if let Some(v) = self.total_bytes {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.pack_id {
+            ::buffa::types::put_shared_bytes_field(1u32, v, buf);
+        }
+        if let Some(v) = self.total_bytes {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_bytes(
+                    self.pack_id.get_or_insert_with(::buffa::alloc::vec::Vec::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.total_bytes = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.pack_id = ::core::option::Option::None;
+        self.total_bytes = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for DownloadWindowPack {
+    const PROTO_FQN: &'static str = "kit.transport.v1.DownloadWindowPack";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+#[cfg(feature = "json")]
+impl ::buffa::json_helpers::ProtoElemJson for DownloadWindowPack {
+    fn serialize_proto_json<S: ::serde::Serializer>(
+        v: &Self,
+        s: S,
+    ) -> ::core::result::Result<S::Ok, S::Error> {
+        ::serde::Serialize::serialize(v, s)
+    }
+    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+        d: D,
+    ) -> ::core::result::Result<Self, D::Error> {
+        <Self as ::serde::Deserialize>::deserialize(d)
+    }
+}
+#[cfg(feature = "json")]
+#[doc(hidden)]
+pub const __DOWNLOAD_WINDOW_PACK_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
+    type_url: "type.googleapis.com/kit.transport.v1.DownloadWindowPack",
+    to_json: ::buffa::type_registry::any_to_json::<DownloadWindowPack>,
+    from_json: ::buffa::type_registry::any_from_json::<DownloadWindowPack>,
+    is_wkt: false,
+};
 /// ----------------------------------------------------------------------------
 /// Discovery.
 ///
@@ -6835,6 +7704,19 @@ pub struct GetServerInfoResponse {
         )
     )]
     pub supports_attestations: ::core::option::Option<bool>,
+    /// Whether DownloadWindow serves shallow fetches (SPEC-SHALLOW §8.2);
+    /// absent means unsupported.
+    ///
+    /// Field 24: `supports_download_window`
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "supportsDownloadWindow",
+            alias = "supports_download_window",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
+    )]
+    pub supports_download_window: ::core::option::Option<bool>,
     #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -6865,6 +7747,7 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("max_pack_location_lifetime_ms", &self.max_pack_location_lifetime_ms)
             .field("max_tickets_per_advance", &self.max_tickets_per_advance)
             .field("supports_attestations", &self.supports_attestations)
+            .field("supports_download_window", &self.supports_download_window)
             .finish()
     }
 }
@@ -7042,6 +7925,13 @@ impl GetServerInfoResponse {
         self.supports_attestations = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::supports_download_window`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_supports_download_window(mut self, value: bool) -> Self {
+        self.supports_download_window = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -7132,6 +8022,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         if self.supports_attestations.is_some() {
             size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        if self.supports_download_window.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -7210,6 +8103,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.supports_attestations {
             ::buffa::types::put_bool_field(23u32, v, buf);
+        }
+        if let Some(v) = self.supports_download_window {
+            ::buffa::types::put_bool_field(24u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -7445,6 +8341,15 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            24u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.supports_download_window = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -7476,6 +8381,7 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.max_pack_location_lifetime_ms = ::core::option::Option::None;
         self.max_tickets_per_advance = ::core::option::Option::None;
         self.supports_attestations = ::core::option::Option::None;
+        self.supports_download_window = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

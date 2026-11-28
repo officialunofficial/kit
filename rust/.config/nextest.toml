@@ -21,6 +21,10 @@ fail-fast = false
 retries = 2
 # Same slow-test envelope as default; CI machines vary so cap higher.
 slow-timeout = { period = "30s", terminate-after = 4 }
+# Print each failure as it happens and again after the summary, so the
+# end of a long log, which is what log viewers keep, still shows why a
+# test failed.
+failure-output = "immediate-final"
 
 [profile.ci.junit]
 # Emit JUnit XML alongside the human-readable output so GitHub Actions

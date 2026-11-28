@@ -152,13 +152,26 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
     // Preserve the remembered type: a branch may itself be named like a hash.
-    let previous_head = if matches!(opts.target.as_deref(), Some("-" | "@{-1}")) {
-        match refs::read_previous_head(&layout) {
-            Ok(head) => Some(head),
-            Err(_) => return emit_err("no previous branch", exit::GENERAL_ERROR),
-        }
-    } else {
-        None
+    let back = match opts.target.as_deref() {
+        Some("-") => Some(1),
+        Some(t) => refs::parse_previous_spec(t),
+        None => None,
+    };
+    let previous_head = match back {
+        Some(n) => match refs::nth_previous_head(&layout, n) {
+            Ok(Some(head)) => Some(head),
+            Ok(None) if n > 1 => {
+                return emit_err(
+                    &format!(
+                        "no previous HEAD @{{-{n}}}; this tree records at most {}",
+                        refs::HEAD_HISTORY_MAX
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Ok(None) | Err(_) => return emit_err("no previous branch", exit::GENERAL_ERROR),
+        },
+        None => None,
     };
     let previous_commit = match previous_head.as_ref() {
         Some(refs::Head::Branch(b)) => match refs::read_ref(&layout, b) {
@@ -497,7 +510,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         .map_err(|e| format!("update HEAD: {e}"))?;
         super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)?;
         if old_head != new_head {
-            refs::write_previous_head(&layout, &old_head)
+            refs::record_previous_head(&layout, &old_head)
                 .map_err(|e| format!("save previous HEAD: {e}"))?;
         }
         Ok(())

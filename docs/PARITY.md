@@ -38,7 +38,9 @@ These divergences stay while kit uses BLAKE3.
 - **Default remote name.** The default remote of kit is `default`, not
   `origin`. Its tracking refs live under `refs/remotes/default/`.
 - **Remote URLs.** A kit remote URL starts with `kit+<scheme>://`. Plain
-  `https://` and plain paths are errors.
+  `https://` and plain paths are errors. The one exception is a path to a
+  closure export's `MANIFEST.mkcl`, which `clone` and `fetch` read as
+  `kit+closure://`.
 
 ## Non-goals
 
@@ -50,8 +52,10 @@ These divergences stay while kit uses BLAKE3.
   takes one branch or tag, never an empty `<src>`.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
-- Shallow clone. `clone --depth` is a usage error. A clone holds the full
-  history, so every commit verifies with its ancestors.
+- Shallow clone. `clone --depth` is a usage error, and a clone holds the full
+  history. A design is in draft ([SPEC-SHALLOW](specs/SPEC-SHALLOW.md)): a
+  window of commits whose tree and parent IDs the hash chain fixes, with no
+  commit beyond the boundary reported as verified.
 - `.git` on-disk interop and SHA-1 objects.
 - Shadowing the `git` binary on `PATH`.
 
@@ -185,9 +189,15 @@ instead, what it costs, and what would reopen the decision.
   An attestation takes the place of a note. `kit git import` does not bring in
   `refs/notes`.
 - **Cost.** An attestation is signed, so it has a predicate type and it cannot
-  be edited. A correction is a new attestation. Attestations are local today.
-  `kit push`, `kit pull` and `kit fetch` move only the object graph, so a
-  teammate does not receive them. The spec plans transport for them.
+  be edited. A correction is a new attestation. Attestations travel apart
+  from the commit graph, on the remote's `refs/kit/attestmap` log.
+  `kit push` publishes the envelopes you authored only with `--attestations`
+  or `push.attestations = true`, and a published envelope is permanent.
+  `kit clone`, `kit fetch` and `kit pull` fetch the published envelopes by
+  default and keep each valid one whose commit exists locally;
+  `--no-attestations` or `fetch.attestations = false` skips them. A fetched
+  envelope is never pushed again, and trusting its signer stays a
+  `kit verify-attest` decision.
 - **Would reopen.** A need for an annotation that is unsigned and editable. A
   shared attestation store does not reopen it, because that answers the sharing
   cost.
@@ -228,7 +238,7 @@ Object IDs are the only difference. They are 64 hex characters.
   special bytes uses C-style quoting. `-z` prints raw paths with NUL
   terminators.
 - `status --porcelain=v2` prints `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
-  for a tracked change. It prints `2 ... R100` for an exact rename and
+  for a tracked change. It prints `2 ... R<score>` for a staged rename and
   `? <path>` for an untracked path. It prints no `--branch` header lines.
 - `diff --name-only -z` and `ls-files -z` print raw paths with NUL
   terminators.
@@ -286,8 +296,9 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 - **Author and date.** `log` prints the signing identity, for example
   `ed25519:11de6447`, and a UTC date. Git prints `Name <email>` and a local
   date.
-- **`log` filters.** `--author` and `--grep` match a substring. Git matches a
-  regular expression. `--since` and `--until` accept `@<unix>`, `now`,
+- **`log` filters.** `--author` and `--grep` use the Rust `regex` syntax,
+  which is close to git's extended syntax but has no back-references.
+  `--since` and `--until` accept `@<unix>`, `now`,
   `today`, `yesterday`, `<N> <unit> ago`, `YYYY-MM-DD` and
   `YYYY-MM-DD HH:MM:SS`. Git accepts more forms.
 - **`<rev>:<path>`.** `show`, `cat-file` and `rev-parse` resolve
@@ -296,12 +307,114 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   is at most 4096 bytes. The index form `:<path>` and `:<n>:<path>` is an
   error. `show <rev>:<dir>` prints the `ls-tree` listing, not the Git
   header and the names.
+- **Rename detection.** `diff`, `status`, `show`, `log -p`, `log --follow`
+  and the three-way merge of `merge`, `cherry-pick`, `revert` and `rebase`
+  pair renames by similarity with git's scoring, threshold grammar and
+  limit warning.
+  Three things differ. Pathspecs filter after detection, so a rename keeps
+  its source path when only its destination matches; Git limits the
+  candidates first. Ties between equal scores break by path order, where
+  Git's order depends on its sort. Copy detection (`-C`), break detection
+  (`-B`) and the `diff.renames` and `diff.renameLimit` config keys are not
+  supported; `show` and `log` have no rename flags and use the default 50%.
+  The merge uses the default 50% and takes no `-X find-renames` or
+  `-X no-renames`. It detects no directory renames, where git moves the
+  files that the other side added to a renamed directory. When the other
+  side also adds a file at the new path, kit does not follow the rename,
+  and both files meet at that path as an add/add conflict.
+- **`rebase` `edit` and `exec` stops.** At an `edit` stop, `--continue`
+  does not commit staged changes into the edited commit, as Git does;
+  commit them with `kit commit --amend` first. `--skip` at an `edit` or
+  `exec` stop is an error. An `exec` command that leaves files changed
+  does not stop the rebase. kit has no `break`, `label`, `reset` or
+  `merge` todo lines, and no `--reschedule-failed-exec`.
+- **Autosquash.** `rebase --autosquash` and `commit --fixup` and
+  `--squash` follow git, with three differences. Only an earlier commit of
+  the range that is not itself moved can be a target, where git can also
+  match a later commit by id or a moved commit by subject prefix. An id
+  prefix needs 4 or more hex digits and names a commit of the range only.
+  `commit --fixup=amend:` and `--fixup=reword:`, and `amend!` subjects,
+  are not supported.
+- **`rebase --update-refs`.** If a stacked branch moved during the rebase,
+  kit moves no branch and keeps the rebase in progress, where git updates
+  the rebased branch and reports the refs it could not update. kit moves
+  only local branches; an `update-ref` line must name `refs/heads/<branch>`
+  of an existing branch other than the rebased one.
+- **`apply` and `am`.** kit applies a hunk only where its context matches
+  exactly, with no fuzz and no whitespace options, and either the whole
+  patch applies or nothing changes; there is no `--reject` or `-3`. Binary
+  patches, copies and symlinks are refused. `am` keeps no mail date: the
+  commit date is the time of the commit, and the applier signs it. It reads
+  no `-s`, `-k`, `--3way`, `--interactive` or `--quoted-cr`, and refuses a
+  base64 or quoted-printable mail.
+- **`archive`.** The formats are `tar` and `tar.gz`; there is no `zip`,
+  no `--remote`, no `--add-file` and no `export-ignore` or `export-subst`
+  attributes. File modes are 0644 and 0755 where git applies its umask
+  (0664 and 0775 by default), and a tree id gives mtime 0 where git uses
+  the current time, so the bytes differ from `git archive` while the files
+  are the same.
+- **Bundles.** kit has no `git bundle` file. `kit closure export --history
+  --branch <name>` writes a directory (a `MANIFEST.mkcl` and packs) that
+  `clone` and `fetch` read as a `kit+closure://` remote, and `--since <rev>`
+  makes it incremental. An export carries one branch and no tags. A fetch
+  from a path, with no configured remote, writes
+  `refs/remotes/closure/<branch>`, where git writes `FETCH_HEAD`.
+- **`log -L`.** kit does not follow a renamed file: the range ends at
+  the commit that creates the file under its name. There is no
+  `:<funcname>:<file>` or `/<regex>/` form, and no `--author`, `--grep`,
+  `--since`, `--until`, `--no-merges` or `--stat` with `-L`. Commits come in
+  kit's date order, where git uses topological order, so the order of two
+  branches of a merge can differ. When a file repeats lines, several
+  smallest diffs exist, and kit's line diff may pick another one than
+  git's; kit follows the copy that `kit blame` credits.
+- **`range-diff`.** kit pairs the commits with git's costs, but it solves
+  the assignment with its own Hungarian method, so two pairings of equal
+  cost may come out differently. The `## Metadata ##` section names the
+  author as `kit log` prints it. The diff under a `!` line is a plain diff of the two
+  patches, without git's dual coloring or its section names in the hunk
+  headers. There are no `--left-only`, `--right-only` or diff options, and
+  a side over 1,000 commits is an error.
+- **`shortlog`.** The author is the name `kit log` prints, so a commit
+  made with a signing key groups under its key, not under a name and
+  email. There is no `-c`/`--committer`, `--group`, `-w` or `--format`
+  other than `json`. On standard input kit reads the default `kit log`
+  format only.
+- **`describe`.** A name reads `<tag>-<n>-k<id>` where git writes
+  `g<id>`, so it never passes for a git name. kit counts `<n>` exactly over
+  the whole history and picks the smallest, where git stops its walk after
+  ten candidates. With no tag kit exits 1 where git exits 128. There is no
+  `--contains`, `--all`, `--first-parent` or `--candidates`.
+- **`grep`.** Patterns use Rust's `regex` syntax: there is no `-P` and no
+  backreference, and `-G` reads a pattern as `-E` does instead of as a basic
+  regular expression. Symlinks are not searched. There are no context,
+  color or `--and`/`--or` options, and an invalid pattern or an unknown
+  argument exits 64 where git exits 128.
+- **`rerere`.** kit writes a conflict as whole-file markers, so an entry
+  records one whole file and replays only when both sides match exactly,
+  where git records each conflicting hunk and merges a resolution into a
+  file whose context changed. `rerere clear` deletes every entry, where
+  git drops only the entries of the conflict in progress. `kit gc` does not
+  run `rerere gc`. `rerere remaining` and `rerere.enabled` turning on by the
+  presence of `rr-cache/` are not supported.
+- **Strategy options.** `merge`, `cherry-pick`, `revert`, `rebase` and
+  `pull` take `-X ours` and `-X theirs`, and `merge` takes `-s ours`, `-s
+  ort` and `-s recursive`. Other strategies and options, such as
+  `octopus`, `subtree`, `patience` or `ignore-space-change`, are usage
+  errors. kit merges changes to adjacent lines without a conflict, where
+  Git reports one; under `-X` Git then keeps only the favored side's
+  lines, and kit keeps both changes. A file and a directory at one path,
+  or two different modes, still stop the merge under `-X`.
 - **`log -p` and `--stat`.** A merge commit shows its diff against its
   first parent, as `show` does. Git `log -p` shows no diff for a merge.
   `-p` and `--stat` together are a usage error. Git prints both, with a
   `---` line between the message and the stat. Neither flag combines
   with `--format=json`. A blank line ends each commit, also the last
   one. The diff text is the text of `diff` and `show`.
+- **`log -- <path>`.** kit applies git's default history simplification
+  and no other mode: it has no `--full-history`, `--simplify-merges`,
+  `--dense` or `--sparse`. A path is a file or a directory; globs and
+  pathspec magic are usage errors. `--follow` finds a rename by
+  similarity, with the default 50%.
 - **`log --all`.** The walk starts at `HEAD`, the local branches, the
   remote-tracking refs and the tags. Git also starts at `refs/stash` and at
   other refs. kit leaves out a ref with unreadable content and a ref that ends
@@ -457,7 +570,10 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `HEAD` detached.
 - **`reflog`.** `reflog` lists the first-parent chain of a branch. It does not
   record operations, and it omits commits that `commit --amend` or `reset`
-  replaced.
+  replaced. `reflog --recovery` lists those replaced commits, and
+  `recovery@{N}` names them, where Git uses `HEAD@{N}` from the reflog of
+  `HEAD`. The recovery log records only the commits that a rewrite replaced,
+  not every move of `HEAD`.
 - **`blame` output.** The default line is `<short id>\t<line>\t<text>`.
   `--porcelain` follows the Git header fields. The author fields hold the kit
   identity, and kit prints no `previous` line.
@@ -470,17 +586,16 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `-n`.
 - **`config`.** kit accepts a fixed set of keys. `user.name`, `user.email` and
   `core.*` are unknown keys. An unknown key is an error.
+- **Aliases.** `alias.<name>` lives in the user config only; a repository
+  config or a `-c` override that sets one is ignored with a warning. An alias
+  expands to kit arguments. The `!<shell command>` form is refused, an alias
+  that names another alias is an error, and a built-in command name always
+  wins over an alias.
 
 ## Deferred flags
 
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
-  file of a paused rebase holds a closed list of keywords, and a new keyword
-  would change that state format.
-- `stash push -a` / `--all` &mdash; ignored files are not included.
-- `switch @{-N}` with N greater than 1 &mdash; kit retains only the previous
-  HEAD. `switch -`, `checkout -`, and `@{-1}` are supported.
 - `stash push` pathspec glob and magic syntax &mdash; kit accepts file and
   directory prefixes only. `-u` / `--include-untracked` is supported.

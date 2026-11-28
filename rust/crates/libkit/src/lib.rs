@@ -22,6 +22,10 @@
 #[cfg(feature = "sync")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod add;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod apply;
+pub mod archive;
 pub mod attest_signer;
 pub mod attestation;
 pub mod blame;
@@ -40,6 +44,7 @@ mod error;
 #[cfg_attr(docsrs, doc(cfg(feature = "git-bridge")))]
 pub mod git;
 pub mod grants;
+pub mod grep;
 pub mod head;
 pub mod identity;
 pub mod keys;
@@ -65,6 +70,9 @@ pub mod rebase;
 #[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
 pub mod remote;
 pub mod repo;
+#[cfg(feature = "sync")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sync")))]
+pub mod rerere;
 pub mod revspec;
 pub mod signer;
 pub mod signing;

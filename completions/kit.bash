@@ -24,7 +24,7 @@ _kit_complete() {
         fi
     fi
 
-    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
+    local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect rerere gc grep shortlog range-diff archive describe apply am worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.
     local top_flags="--help -h --version -V"
 
@@ -64,7 +64,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run -f --force -d -x -X --help" -- "$cur") )
             ;;
         diff)
-            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -w --ignore-all-space -b --ignore-space-change -U --unified -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--staged --cached --name-only --name-status --stat --merge-base --exit-code --quiet --color --no-color -w --ignore-all-space -b --ignore-space-change -U --unified -z -M --find-renames --no-renames -l --help" -- "$cur") )
             ;;
         cat-file)
             COMPREPLY=( $(compgen -W "-t -s -p --batch --help" -- "$cur") )
@@ -94,22 +94,43 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "list cat --pattern --help" -- "$cur") )
             ;;
         status)
-            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--porcelain -s --short -z --find-renames --no-renames --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend --fixup --squash -m --message -F --file --author -q --quiet --help" -- "$cur") )
+            ;;
+        apply)
+            COMPREPLY=( $(compgen -W "--index --cached -R --reverse --check --stat --help" -- "$cur") )
+            ;;
+        am)
+            COMPREPLY=( $(compgen -W "--continue --skip --abort --help" -- "$cur") )
+            ;;
+        shortlog)
+            COMPREPLY=( $(compgen -W "-s --summary -n --numbered -e --email --format --help" -- "$cur") )
+            ;;
+        archive)
+            COMPREPLY=( $(compgen -W "--format --prefix -o --output --help" -- "$cur") )
+            ;;
+        range-diff)
+            COMPREPLY=( $(compgen -W "--creation-factor --no-dual-color --help" -- "$cur") )
+            ;;
+        describe)
+            COMPREPLY=( $(compgen -W "--tags --always --abbrev --long --dirty --match --exclude --help" -- "$cur") )
+            ;;
+        grep)
+            COMPREPLY=( $(compgen -W "-i --ignore-case -w --word-regexp -v --invert-match -n --line-number -l --files-with-matches -c --count -q --quiet -F --fixed-strings -E --extended-regexp -G --basic-regexp -e --cached --help" -- "$cur") )
             ;;
         blame)
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
             ;;
         log)
-            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--oneline --abbrev-commit --abbrev --format --author --grep -F --fixed-strings -i --regexp-ignore-case -E --extended-regexp --all-match --invert-grep --since --until --no-merges --first-parent -p --patch --stat --decorate --graph --all --follow -L -n --help" -- "$cur") )
             ;;
         reflog)
-            COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--format -n --recovery --help" -- "$cur") )
             ;;
         pull)
-            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all --rebase --no-ff -X --strategy-option --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         fetch)
             COMPREPLY=( $(compgen -W "--all -p --prune --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
@@ -127,22 +148,25 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--stat --help" -- "$cur") )
             ;;
         merge)
-            COMPREPLY=( $(compgen -W "--continue --abort --no-commit -m --message --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort --no-commit -m --message -s --strategy -X --strategy-option --help" -- "$cur") )
             ;;
         cherry-pick)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline -X --strategy-option --help" -- "$cur") )
             ;;
         tag)
             COMPREPLY=( $(compgen -W "-a --annotate -s --sign -m --message -d --delete -l --list --author --help" -- "$cur") )
             ;;
         rebase)
-            COMPREPLY=( $(compgen -W "-i --interactive --onto --continue --skip --abort --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-i --interactive --autosquash --no-autosquash --update-refs --no-update-refs --onto -X --strategy-option -x --exec --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline -X --strategy-option --format --help" -- "$cur") )
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )
+            ;;
+        rerere)
+            COMPREPLY=( $(compgen -W "status diff forget clear gc" -- "$cur") )
             ;;
         self)
             if [[ $cword -eq 2 ]]; then
@@ -178,7 +202,7 @@ _kit_complete() {
             fi
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show -u --include-untracked -m --message" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show branch -u --include-untracked -a --all -m --message" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
@@ -201,7 +225,7 @@ _kit_complete() {
             else
                 case "${words[2]}" in
                     export)
-                        COMPREPLY=( $(compgen -W "--history -o --output --force --format --help" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--history --branch --since -o --output --force --format --help" -- "$cur") )
                         ;;
                     verify)
                         COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )

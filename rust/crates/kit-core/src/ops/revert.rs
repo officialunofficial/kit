@@ -15,7 +15,7 @@ use crate::hash::{self, Hash};
 use crate::object::Object;
 use crate::store::{ObjectSink, ObjectSource, StoreError};
 
-use super::merge::{self, Conflict};
+use super::merge::{self, Conflict, Favor};
 
 /// Errors specific to revert on top of [`StoreError`].
 #[derive(Debug, thiserror::Error)]
@@ -63,7 +63,8 @@ impl RevertResult {
 ///    `mainline`, the 1-based parent number. A root commit (no parents) reverts against the empty tree, removing
 ///    everything it introduced.
 /// 3. 3-way merge `(base = target.tree, ours = ours_tree, theirs =
-///    parent.tree)` — the inverse of cherry-pick.
+///    parent.tree)` — the inverse of cherry-pick — resolving content
+///    conflicts to the `favor` side.
 /// 4. Return the merged tree, any conflicts, and a `Revert "..."` message.
 ///
 /// The source/sink visibility and resource-budget contract is the same as
@@ -80,6 +81,7 @@ pub fn revert<S: ObjectSource + ObjectSink + ?Sized>(
     target_hash: Hash,
     ours_tree: Hash,
     mainline: Option<usize>,
+    favor: Favor,
 ) -> Result<RevertResult, RevertError> {
     let Object::Commit(target_commit) = store.read_object(&target_hash)? else {
         return Err(RevertError::NotACommit);
@@ -114,11 +116,12 @@ pub fn revert<S: ObjectSource + ObjectSink + ?Sized>(
     };
 
     // Inverse of cherry-pick: base = target's tree, theirs = parent's tree.
-    let merge_result = merge::merge_trees(
+    let merge_result = merge::merge_trees_favoring(
         store,
         Some(target_commit.tree_hash),
         Some(ours_tree),
         parent_tree,
+        favor,
     )?;
 
     Ok(RevertResult {
@@ -160,7 +163,7 @@ mod tests {
         ours: Hash,
         mainline: Option<usize>,
     ) -> Result<RevertResult, RevertError> {
-        s.compare(|backend| super::revert(backend, target, ours, mainline))
+        s.compare(|backend| super::revert(backend, target, ours, mainline, super::Favor::None))
     }
 
     fn store() -> (TempDir, CorpusStore) {

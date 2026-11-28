@@ -1,12 +1,12 @@
 {
-  "bin": "neg_manifest_version_2.manifest.bin",
-  "blake3": "d9aac56cf584152a472d8301cb43dde991b480a265fde284dcc9129fe6f9fd74",
-  "description": "Manifest version byte is 2.",
+  "bin": "neg_manifest_version_3.manifest.bin",
+  "blake3": "a40b4dee1bfeab526109b4e9cd38f87a03d138c3eb414076a943069e4ef21920",
+  "description": "Manifest version byte is 3.",
   "expect": "reject",
   "ids": [],
   "mode": "snapshot",
   "n_packs": 1,
-  "name": "neg_manifest_version_2",
+  "name": "neg_manifest_version_3",
   "pack_hashes": [
     "2c43a4576127fab33d72ca8bf548b4864403f4be55431e1ab9fd52263fa1269d"
   ],

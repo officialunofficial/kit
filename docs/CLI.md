@@ -119,7 +119,7 @@ Working-tree commands:
     delete untracked ones &mdash; git won't clobber a directory with `mv` either),
     rejects **overlapping sources** up front (`mv dir dir/file <dest>`), and
     refuses moving a directory into itself.
-- `kit status [--porcelain[=v1|v2]] [-s|--short] [-z]` &mdash; show staged and
+- `kit status [--porcelain[=v1|v2]] [-s|--short] [-z] [--find-renames[=<n>]|--no-renames]` &mdash; show staged and
   unstaged changes. Default-mode prose (banner plus section headers plus per-file
   lines) goes to **stderr**; stdout is reserved for machine output.
   `-s`/`--short` is an alias for `--porcelain=v1`; both select the same
@@ -128,13 +128,16 @@ Working-tree commands:
   non-git extension). `--porcelain=v2` selects git's richer per-path
   format &mdash; `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` for tracked
   changes (octal modes; full 64-hex BLAKE3 object ids; `<sub>` always
-  `N...`) and `? <path>` for untracked &mdash; with no rename (`2`) records and
-  no `--branch` header lines. Paths with special bytes are **C-style quoted**
+  `N...`), `2 <XY> ... R<score> <path>\t<orig>` for a staged rename and
+  `? <path>` for untracked &mdash; with no `--branch` header lines. Paths with special bytes are **C-style quoted**
   (matching git's default `core.quotePath`). `-z` (which implies
   porcelain) NUL-terminates records and emits **raw, unquoted** paths &mdash;
   the round-trip-safe form for paths containing newlines or other special
-  bytes. Empty stdout means clean.
-- `kit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
+  bytes. Empty stdout means clean. A staged deletion and a staged addition
+  pair into a rename with the same similarity detection as `kit diff`
+  (default 50%); `--find-renames=<n>` sets the threshold and `--no-renames`
+  turns it off.
+- `kit diff [--staged|--cached] [--name-only|--name-status|--stat] [--merge-base] [-w|-b] [-U<n>] [-z] [-M[<n>]|--find-renames[=<n>]|--no-renames] [-l<n>] [<rev> [<rev>] | <a>..<b> | <a>...<b>] [<path>...]`
   &mdash; show changes as a unified patch. With no arguments, compares the HEAD
   tree to a fresh worktree snapshot. `--staged` (alias `--cached`) compares
   the HEAD tree to the staged index tree &mdash; the change `kit commit`
@@ -196,6 +199,30 @@ Working-tree commands:
   real (unmodified) bytes &mdash; only line *comparison* changes. `-U<n>` /
   `--unified=<n>` sets the number of unchanged context lines around each
   hunk (default 3, matching git's `-U3`).
+  Rename detection is on by default, like git's `diff.renames`. A deleted
+  file and an added file pair into one rename when their contents are at
+  least 50% similar. The score is git's: content splits into lines (at most
+  64 bytes each), and the score is the share of bytes in matching lines
+  against the larger file. A text file's CR before LF does not count. The
+  score depends only on the bytes, never on how either blob is chunked.
+  Identical content pairs first, at 100%. Then a deleted file and an added
+  file that are the only ones with their basename pair if they are at least
+  halfway between the threshold and 100% similar. The rest pair best score
+  first, and each file takes part in at most one rename. Only regular and
+  executable files pair by similarity; a symlink pairs only when it is
+  identical. `-M[<n>]` / `--find-renames[=<n>]` sets the threshold with
+  git's grammar: `-M90%` is 90%, while digits without `%` are a decimal
+  fraction, so `--find-renames=9` is 90% and `-M100` is 10%. `-M100%` keeps only
+  identical content. `--no-renames` turns detection off. A rename prints
+  `R<score>` in `--name-status` (`R090`), `old => new` in `--stat`
+  (shortened to `dir/{a => b}` around a shared prefix or suffix), and
+  `similarity index <n>%`, `rename from`, `rename to` and the hunks in the
+  patch. When more than `-l<n>` (default 1000) squared pairs would need a
+  score, kit keeps the identical-content renames, skips the similarity
+  pass, and prints git's `exhaustive rename detection was skipped` warning
+  on stderr; `-l0` removes the limit. Pathspecs filter the entries after
+  detection, so a rename whose destination matches a pathspec still shows
+  its source.
 - `kit worktree add <path> [<commit-ish>]` / `list [--porcelain]` /
   `remove [--force] <path>` / `prune [--dry-run]` /
   `move [--force] <path> <new-path>` / `lock [--reason <text>] <path>` /
@@ -228,11 +255,20 @@ Working-tree commands:
   each tree's `HEAD`, index, stash and in-progress operation state as roots,
   together with the shared refs. If a tree's state cannot be read, gc stops
   before it removes anything and names the linked tree.
-- `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
+- `kit stash [save|push|list|pop|apply|drop|clear|show|branch] [--format=json]` &mdash;
   save/restore WIP
   changes. `push` is another name for `save`. `push -u` and
   `push --include-untracked` explicitly include non-ignored untracked files
-  (kit also includes them by default). `-a`/`--all` is not supported.
+  (kit also includes them by default). `push -a`/`--all` also saves the
+  files the ignore rules match, such as build output, and removes them from
+  the worktree; `pop` puts them back. `.kit/` and `.git/` are never saved.
+  `-a` does not combine with paths (exit 64).
+  `branch <name> [<stash>]` creates `<name>` at the commit the stash was
+  made on, switches to it, then restores the entry with its staged state
+  (as `pop --index` does) and drops it. It refuses an existing branch, an
+  invalid name (exit 64) and a stash made before the first commit. The
+  entry is dropped only after the restore succeeds; if the restore fails,
+  the branch stays checked out and the entry stays on the stack.
   `push [--] <path>...` saves only the named files or directory prefixes,
   relative to the current directory, and leaves other worktree and index
   entries alone. Globs, pathspec magic, and paths containing `..` are not supported. Pop and apply
@@ -264,8 +300,8 @@ Working-tree commands:
 
 History / commits:
 
-- `kit commit [-a|--all] [--allow-empty] [--amend] [--author <spec>] [-m <msg> | -F <file>]
-  [--format=json]`
+- `kit commit [-a|--all] [--allow-empty] [--amend | --fixup <rev> | --squash <rev>] [--author <spec>]
+  [-m <msg> | -F <file>] [--format=json]`
   &mdash; create
   a signed commit from the staging index. The index is built by `kit
   add` / `kit rm`; `commit` with an empty index is an error, except a first
@@ -295,6 +331,15 @@ History / commits:
   commit's message is reused (no editor is launched). The superseded
   commit is recorded in the recovery log so it stays recoverable, and is
   reclaimed by `kit gc` once it falls out of the retention window.
+  `--fixup <rev>` makes a commit whose subject is `fixup! ` followed by
+  the subject of `<rev>`, for `kit rebase --autosquash` to fold into
+  `<rev>`. It opens no editor; text from `-m` or `-F` goes in the body,
+  after a blank line. `--squash <rev>` makes the subject `squash! ` and
+  the subject of `<rev>`. Its body comes from `-m` or `-F`, and without
+  them `$EDITOR` opens on the subject. Both resolve `<rev>` through the
+  revspec resolver and refuse a revision that is not a commit. They do
+  not combine with each other or with `--amend`. Git's `--fixup=amend:`
+  and `--fixup=reword:` forms are not supported.
   After `kit merge --no-commit` (or a merge you have just resolved),
   `commit` notices the recorded `MERGE_HEAD` and records a **two-parent
   merge commit** rather than an ordinary single-parent one.
@@ -309,7 +354,7 @@ History / commits:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
   "is_merge":<bool>,"is_root":<bool>}`.
-- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>] [--grep <pattern>] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--all | <rev> | <A>..<B> | <A>...<B>]` &mdash; show
+- `kit log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author <pattern>]... [--grep <pattern>]... [-F] [-i] [--all-match] [--invert-grep] [--since <date>] [--until <date>] [--no-merges] [--first-parent] [-p | --stat] [--decorate] [--graph] [-n N] [--follow] [-L <start>,<end>:<file>]... [--all | <rev> | <A>..<B> | <A>...<B>] [[--] <path>...]` &mdash; show
   commit history. With no argument the walk starts at `HEAD`; an optional
   `<rev>` starts it there instead, a range `<A>..<B>` shows commits
   reachable from `B` but not from `A` (an empty side means `HEAD`, so `A..`
@@ -360,13 +405,46 @@ History / commits:
   or a filter leaves no open line. A history with more than 1024 open
   branches is an error (exit `65`). `--graph` with `-p`, `--stat` or
   `--format=json` is a usage error (exit `64`).
-  `--author <pattern>` and `--grep <pattern>` filter the walk by a plain
-  **substring** match &mdash; `--author` against both the short display form
-  (the `Author:` line) and the full `kind:hex`/`mid:N` form
-  (`--format=json`'s `author` field); `--grep` against the full commit
-  message (title plus body). This is intentionally not a regex: unlike git,
-  kit identities are opaque (Ed25519 keys, `mid:N` numbers, DID keys),
-  not free-text `Name <email>`. `--since <date>`/`--until <date>` bound
+  `-L <start>,<end>:<file>` follows the history of a range of lines, as
+  git does. The range takes the forms of `kit blame -L` and is read in the
+  file at the starting revision; `<file>` is relative to the current
+  directory. kit lists each commit that changes a line of the range, newest
+  first, and follows the range back through each edit: the lines a commit
+  adds leave the range, the lines they replaced join it in the parent, and
+  an insertion or a deletion outside the range only shifts it. After a
+  blank line, each commit shows a diff for each file of the range:
+  `diff --git a/<file> b/<file>`, `--- a/<file>` (`--- /dev/null` when the
+  commit creates the file), `+++ b/<file>`, then one hunk per range,
+  `@@ -<p>,<n> +<t>,<m> @@`, with each line of the range as context, `-`
+  or `+`. As in git, a change that spans two ranges of one file prints
+  under the first one only. At a merge, if one parent leaves every range
+  unchanged, kit follows that parent alone and hides the merge; otherwise
+  it follows each parent and shows the merge without a diff. `-L` may
+  repeat, for more ranges or more files; ranges that overlap or touch
+  merge into one. It combines with `-n`, `--oneline`, `--abbrev`,
+  `--decorate`, `--first-parent` and `--format=json`, where each record
+  gains `hunks`, a list of
+  `{"path","old_start","old_lines","new_start","new_lines","lines"}` with
+  each line prefixed by ` `, `-` or `+`. `-p` changes nothing. `-L` takes
+  at most one revision; with a range, `--all`, paths, `--follow`,
+  `--stat`, `--graph`, `--author`, `--grep`, `--since`, `--until` or
+  `--no-merges` it is a usage error (exit `64`). A file that does not
+  exist at the revision, a range that starts past its end, and an argument
+  without `:<file>` exit `64`.
+  `--author <pattern>` and `--grep <pattern>` filter the walk by a regular
+  expression, as git does, in the syntax of the Rust `regex` crate
+  (`-E`/`--extended-regexp` is accepted and changes nothing). `--author`
+  matches either the short display form (the `Author:` line) or the full
+  `kind:hex`/`mid:N` form (`--format=json`'s `author` field); `--grep`
+  matches the commit message (title plus body), with `^` and `$` at each
+  line. Both repeat, and a commit passes when any of its patterns match;
+  with `--all-match`, a commit must match every `--grep`. `--invert-grep`
+  keeps the commits whose message does not pass the `--grep` patterns.
+  `-F`/`--fixed-strings` takes every pattern literally, and
+  `-i`/`--regexp-ignore-case` ignores case in both. An invalid pattern, or
+  `--all-match` or `--invert-grep` without `--grep`, is a usage error
+  (exit `64`). A pattern with no regex metacharacters matches as the
+  substring it spells. `--since <date>`/`--until <date>` bound
   the commit timestamp; accepted forms are `@<unix-seconds>`,
   `now`/`today`/`yesterday`, `<N> <unit> ago`
   (second/minute/hour/day/week/month/year), `YYYY-MM-DD` (midnight UTC),
@@ -391,6 +469,28 @@ History / commits:
   At a merge, it sorts the region above a shared unread frontier before
   continuing below that frontier. Separate roots or exclusion boundaries
   can require the full remaining graph to preserve the topological order.
+  Paths after the revision limit the output to the commits that change
+  them. A path is relative to the current directory and names a file or a
+  directory. `.` at the top names the whole tree. A glob or pathspec magic
+  (`*`, `?`, `[`, a leading `:`) is a usage error (exit `64`). Without `--`,
+  each path must exist in the worktree and must not also name a revision; an
+  argument that is both is an ambiguity error (exit `64`), as in git. After
+  `--`, any path is accepted. kit compares each commit with its parents at
+  the paths only, by tree entry id, so a subtree outside the paths is never
+  read. A commit without parents shows when its tree holds one of the paths.
+  A commit with one parent shows when an entry at one of the paths differs.
+  A merge that matches one parent at the paths does not show, and the walk
+  follows only that parent (the first such parent), as git's default
+  history simplification does. A merge that matches no parent shows, and
+  the walk follows every parent. With `--first-parent` only the first
+  parent counts. `-p` and `--stat` show only the files at the paths.
+  `--follow` takes exactly one file path and continues the walk under the
+  old name when a commit renames the file. Rename detection is the
+  similarity detection of `diff`, with the default 50%. The name changes
+  when the walk prints the renaming commit, so on a history with merges the
+  walk may follow the old name into a branch that never held the rename.
+  `--follow` with no path or with more than one path is a usage error
+  (exit `64`).
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each
@@ -400,6 +500,141 @@ History / commits:
   `--format=json` emits JSONL with keys `ref`, `selector`, `index`, `hash`,
   `title`, `ancestry_verified` (`true`/`false`/`null`). Superseded commits after
   amend/reset are outside this reachable chain; recovery records are separate.
+- `kit reflog --recovery [<branch>] [--format=json] [-n N]` &mdash; **read-only**
+  list of the recovery log: the commits that `commit --amend`, `reset`,
+  `rebase` and `stash pop` replaced, newest record first. Each line is
+  `<short id> recovery@{N}: <op> (<branch>): <subject>`, where `<op>` is
+  `amend`, `reset`, `rebase` or `stash-pop`. A record without a branch, such
+  as a detached `HEAD` or a stash, has no `(<branch>)`. A record whose commit
+  is no longer in the store prints `(pruned)` in place of the subject. With
+  `<branch>`, only that branch's records print, and each keeps its number in
+  the full list. `-n` caps the lines. `--format=json` emits JSONL with keys
+  `index`, `selector`, `hash`, `op`, `branch`, `time` (Unix seconds),
+  `title` and `pruned`. A last line that a crash cut short is ignored, and any
+  other malformed line is an error (exit `65`). The command writes nothing.
+  `recovery@{N}` names the commit of the N-th record, counted from 0, in
+  every revision argument, so `kit reset --hard recovery@{0}` undoes the last
+  amend, reset or rebase (with the data-loss guard of `reset --hard`), and
+  `kit switch -c rescue recovery@{1}` keeps an older one on a new branch.
+  Suffix steps work after it, as in `recovery@{0}~1`. A number past the end
+  of the log, a pruned record and a malformed number are errors. `kit gc`
+  keeps every listed commit until its record expires (SPEC-GC, "Recovery
+  log").
+- `kit shortlog [-s] [-n] [-e] [--format=json] [<rev> | <range>] [[--] <path>...]`
+  &mdash; group the commits that `kit log` would show by author, as
+  `<author> (<count>):` followed by each subject, indented six spaces and
+  oldest first, then a blank line. The groups sort by author, or with `-n`
+  by count, largest first, then author. `-s` prints only
+  `<count>\t<author>`, the count right-aligned in six columns. The author
+  is the name that `kit log` prints, without a trailing `<email>`; `-e`
+  keeps the email, and for a key adds the key id, as
+  `<name> <ed25519:<hex>>`. Revisions and paths read as in `kit log`.
+  `--format=json` prints one object per group,
+  `{"author":...,"count":...,"subjects":[...]}`. With no revision and
+  standard input that is not a terminal, kit reads `kit log` output from
+  it, as git does.
+- `kit archive [--format=tar|tar.gz] [--prefix=<dir>/] [-o <file>] <tree-ish>
+  [<path>...]` &mdash; write the tree of `<tree-ish>` as a tar archive, for
+  release builds. Only the tree is read, never the worktree. The format is
+  `tar` unless `--format` names `tar.gz` (or `tgz`) or `-o` names a file
+  ending in `.tar.gz` or `.tgz`; any other `--format`, or an `-o` file with
+  another extension than `.tar`, is a usage error (exit `64`). Without
+  `-o` the archive goes to standard output, which must not be a terminal.
+  The output depends only on the tree: entries follow the order of the
+  tree, each directory before what it holds; every entry has uid and gid
+  0, user and group `root`, and the commit's time as its mtime (0 for a
+  tree); files have mode 0644 or 0755, directories 0755, and symlinks are
+  symlinks. When `<tree-ish>` names a commit, the archive starts with a pax
+  global header whose `comment` is the full commit id, as git writes it.
+  Paths longer than the ustar fields take a pax header. The archive ends
+  with two zero blocks and fills whole records of 10,240 bytes. The gzip
+  stream has mtime 0 and no file name. `--prefix` is put before every
+  path; it must be relative and must not hold `..`. Each `<path>`, relative
+  to the current directory, keeps only that file or directory and the
+  directories above it; a path that matches nothing is a usage error. A
+  chunked file is streamed one chunk at a time.
+- `kit range-diff [--creation-factor=<n>] [--no-dual-color] <old-base>..<old-tip>
+  <new-base>..<new-tip>` &mdash; show how each commit of a series changed
+  between two versions of it, such as a branch before and after a rebase.
+  `<old-tip>...<new-tip>` takes the merge base as both bases, and
+  `<base> <old-tip> <new-tip>` takes one base for both. Each range lists
+  its commits oldest first, without merges. kit pairs the commits by the
+  assignment of least total cost, as git does. The cost of a pair is the
+  number of lines of the diff, with three lines of context, between the
+  diff parts of their patches; the messages do not count. Leaving a commit
+  unpaired costs `<n>`% (default 60) of the number of lines of its own diff
+  part. Each line reads
+  `<n>:  <id> <s> <m>:  <id> <subject>`, with the old commit's subject
+  when there is one, where `<s>` is `=` for the same
+  patch, `!` for a changed one, `<` for an old commit with no partner and
+  `>` for a new one; `-:  -------` stands for the missing side. A `!` line
+  is followed by the diff of the two patches, indented four spaces. A
+  patch is the author and the commit message followed by the diff part:
+  the diff of the commit, with
+  each file named on a `## <path> ##` line and no line numbers in the
+  hunk headers. A side over 1,000 commits is an error that names the
+  limit. kit never prints color, so `--no-dual-color` changes nothing.
+- `kit describe [--tags] [--always] [--abbrev=<n>] [--long] [--dirty[=<mark>]]
+  [--match <glob>]... [--exclude <glob>]... [<rev>]` &mdash; name `<rev>`
+  (default `HEAD`) after the nearest tag that reaches it, as
+  `<tag>-<n>-k<short id>`. `<n>` is the number of commits that `<rev>`
+  reaches and the tag does not, as `rev-list <tag>..<rev>` counts them. The
+  tag with the smallest `<n>` wins, and between equals the newest: the date
+  of an annotated tag, or of the commit a lightweight tag names. Only
+  annotated tags count, unless `--tags`. kit writes `k` where git writes
+  `g`, so a kit name is never mistaken for a git one. A tag on `<rev>`
+  itself prints alone, unless `--long`. `--abbrev=<n>` sets the length of
+  the id (default 7), and `--abbrev=0` prints the tag alone. `--match` and
+  `--exclude` keep or drop tags whose names match a glob, as `branch
+  --list` reads it. With no tag, `--always` prints the short id, and
+  otherwise kit prints `no names found` and exits 1. `--dirty` appends
+  `-dirty`, or `<mark>`, when a tracked file differs from `HEAD` in the
+  index or the worktree; it takes no `<rev>`.
+- `kit grep [-i] [-w] [-v] [-n] [-l] [-c] [-q] [-F | -E | -G] [-e <pattern>]...
+  [<pattern>] [--cached | <rev>...] [[--] <path>...]` &mdash; print the lines
+  of tracked files that match a pattern, as `<path>:<line>`, with `-n` as
+  `<path>:<number>:<line>`. By default kit searches the tracked files in the
+  worktree, with their unstaged edits; untracked and ignored files are never
+  searched. `--cached` searches the staged content, and each `<rev>` searches
+  that revision's tree with `<rev>:` before each path, reading neither the
+  worktree nor the index. A path limits the search to that file or the files
+  below that directory. `-i` ignores case, `-w` keeps matches that are whole
+  words, `-v` selects the lines that do not match, `-l` prints only the
+  paths, `-c` prints `<path>:<count>` for each file with a selected line, and
+  `-q` prints nothing. Patterns use the syntax of Rust's `regex` crate, which
+  runs in linear time and has no backreferences; `-E` is the default, `-G` is
+  read the same way, and `-F` takes the pattern literally. Several `-e`
+  patterns select a line that matches any of them. A file with a NUL byte in
+  its first 8 KiB prints `Binary file <path> matches`. Large files are read a
+  chunk at a time. Exit status 0 means a line was selected, 1 none, and 64 a
+  usage error, an invalid pattern, an argument that is neither a revision nor
+  a path, or `--cached` with a revision.
+- `kit apply [--index | --cached] [-R] [--check | --stat] <patch>...` &mdash;
+  apply unified diffs, such as `kit diff`, `git diff` or `git format-patch`
+  write, to the worktree. `--cached` applies to the index alone, and
+  `--index` to both, which needs the worktree file to equal its index entry
+  for every path the patch names. A hunk applies where its old lines match
+  exactly, at the line its header names or the nearest line that matches;
+  kit never applies with fuzz. Creations, deletions, renames and
+  `old mode`/`new mode` lines apply. `-R` applies the patch in reverse,
+  `--check` reports whether it applies and writes nothing, and `--stat`
+  prints a diffstat and writes nothing. Either every file patch applies or
+  nothing changes: a patch that does not apply exits 1 and names the file.
+  A malformed patch, a binary patch, a copy, a symlink and a path that
+  leaves the worktree exit 65 (SPEC-PATCH).
+- `kit am <mbox>... | --continue | --skip | --abort` &mdash; apply each mail
+  of a mailbox, as `git format-patch` writes it, as a commit on the current
+  branch. The author is the mail's `From:` as an opaque identity, the
+  message is its subject without the `[PATCH ...]` prefix followed by its
+  body up to `---`, and the applier signs the commit. When a patch does not
+  apply, kit changes nothing, keeps the mails in `.kit/am/` and
+  exits 1. `--continue` commits the staged result with the stopped mail's
+  message and author, and refuses when nothing is staged. `--skip` drops the
+  stopped mail. `--abort` moves the branch, the index and the worktree back
+  to where `am` started, and refuses when a tracked file holds a change that
+  is not committed. While `am` is paused, merge, cherry-pick, revert, rebase
+  and another `am` refuse to start. A mail with a `Content-Transfer-Encoding`
+  other than `7bit` or `8bit`, or without a patch, exits 65 (SPEC-PATCH).
 - `kit blame [--format=json | --porcelain | --line-porcelain] [-w] [-M] [-C]
   [--ignore-rev <rev>] [--ignore-revs-file <file>] [--ignore-rev-precise]
   [--first-parent] [--reverse] [-L <start>,<end>] [<rev>] <file>` &mdash;
@@ -601,7 +836,8 @@ Read-only plumbing (object/ref inspection, for scripts and agents):
   followed by the unified diff against its first parent; that diff body is
   produced by the same code as `kit diff`, so `show <commit>` is
   byte-identical to `diff <parent> <commit>` (modulo abbreviated `index`
-  ids). `--stat` shows a diffstat instead of the full patch for
+  ids). Renames are detected as in `kit diff`, at the default 50%
+  threshold; `kit log -p` and `kit log --stat` do the same. `--stat` shows a diffstat instead of the full patch for
   commit/remix objects (like `git show --stat`); non-commit objects are
   shown as usual. A **tag** prints its header then the peeled target object; a **tree**
   is listed as `<mode> <type> <hash>\t<name>` lines; a **blob** prints its raw
@@ -904,12 +1140,16 @@ Branches / refs:
   clobber guard and output. `-c` creates (refuses to clobber), `-C`
   create-or-resets, then switches. `switch -`, `switch @{-1}`, and
   `checkout -` return to the previous HEAD, detached when it was detached.
-  A successful HEAD change atomically saves one previous HEAD in the local
-  per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
-  `no previous branch`. Running an older kit's gc on a repository a newer kit
-  uses can prune the previous HEAD; `switch -` then reports `previous HEAD
-  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
-  for N greater than 1 is not supported.
+  `switch @{-N}` and `checkout @{-N}` return to the N-th previous HEAD, and
+  `@{-N}` names its commit in any revision argument, such as
+  `kit log @{-2}`. Each tree records its last 16 previous HEADs, so N runs
+  from 1 to 16; N past the record is an error. A successful HEAD change
+  atomically updates the local per-worktree `HEAD_HISTORY` and
+  `PREVIOUS_HEAD` files (SPEC-WORKTREE). A missing or unreadable record
+  reports `no previous branch`. Running an older kit's gc on a repository a
+  newer kit uses can prune a previous HEAD; switching to it then reports
+  `previous HEAD <id> was pruned; nothing to switch back to` and changes
+  nothing.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -946,7 +1186,7 @@ Branches / refs:
   - `--format=json` &mdash; on the list form, JSONL with keys `name`, `hash`,
     `annotated`, `signed` (mirroring `branch --format=json`); on
     create/delete, one `{"ok":true,"kind":"…",...}` outcome object.
-- `kit merge [--no-commit] [-m <msg>] [--format=json] <branch> | --continue | --abort` &mdash;
+- `kit merge [--no-commit] [-m <msg>] [-s <strategy>] [-X <option>] [--format=json] <branch> | --continue | --abort` &mdash;
   three-way merge into
   HEAD. Fast-forwards and clean merges refuse to overwrite staged
   changes, dirty tracked files, or untracked path collisions. On
@@ -961,12 +1201,32 @@ Branches / refs:
   every commit of both histories. One that is missing, corrupt or not a
   commit fails the merge with exit `65` and an error that names it, before
   it touches the files, the index or a ref.
+  The merge follows renames. It pairs the files that each side removed and
+  added with the similarity detection of `kit diff` (50% by default). When
+  one side renames a file and the other side edits it, the edit goes to
+  the new path. A rename on one side against a delete on the other is a
+  rename/delete conflict at the new path. Two renames of one file to
+  different names are a rename/rename conflict at both new paths. Both
+  keep the renamed files in the working tree: `kit add` keeps a file and
+  `kit rm` drops it. `cherry-pick`, `revert` and `rebase` follow renames
+  the same way.
+  `-X ours` and `-X theirs` (`--strategy-option=<option>`, also `-Xours`)
+  resolve each conflict in a text file to that side's lines, and a conflict
+  in a binary or large file to that side's whole file. Changes that do not
+  conflict still merge from both sides, and the merge does not stop. An
+  add/add conflict between two files takes that side's file. A
+  modify/delete conflict, a file against a directory and two different
+  modes still stop the merge. `-s ours` records a merge commit whose tree
+  is the tree of `HEAD`: the other branch's changes are discarded. It
+  never fast-forwards. `-s ort` and `-s recursive` name the default merge.
+  Another strategy, another `-X` option and `-s ours` with `-X` are usage
+  errors (exit 64).
   `--format=json` emits one JSON object to stdout for every outcome:
   `{"ok":true,"kind":"up-to-date"|"fast-forward"|"no-commit"|"merge-commit"|"aborted",...}`
   on success, or `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
   "error":"..."}` on a conflict pause (and `{"ok":false,"error":"..."}` for
   any other error).
-- `kit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] [--format=json] <hash> | --continue | --abort`
+- `kit cherry-pick [-n|--no-commit] [-m|--mainline <parent-number>] [-X <option>] [--format=json] <hash> | --continue | --abort`
   &mdash; apply a commit to
   the current branch. Refuses to overwrite staged changes, dirty tracked
   files, or untracked path collisions. On conflict, records resumable
@@ -981,11 +1241,12 @@ Branches / refs:
   when replaying a merge (kit refuses to guess which side to diff
   against) and rejected for a non-merge commit. Note this differs from
   `git commit -m` &mdash; git's `cherry-pick -m` is mainline selection, not a
-  message override.
+  message override. `-X ours` and `-X theirs` resolve conflicts as in
+  `merge`; `ours` is the current branch and `theirs` the picked commit.
   `--format=json` emits one JSON object to stdout, same shape as `merge`
   (`"kind":"commit"|"no-commit"|"aborted"` on success, `"kind":"conflict"`
   with a `conflicts` array on a pause).
-- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [-m|--mainline <parent-number>] [--format=json]` &mdash;
+- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [-m|--mainline <parent-number>] [-X <option>] [--format=json]` &mdash;
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
   `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
@@ -999,9 +1260,11 @@ Branches / refs:
   relative to that parent, counted from 1, as `cherry-pick -m` picks one. A
   merge without `-m`, a number out of range and `-m` on a commit that is not
   a merge are errors, and `-m` does not combine with `--continue` or
-  `--abort`. `--format=json` emits the same outcome-object shape as
+  `--abort`. `-X ours` and `-X theirs` resolve conflicts as in `merge`;
+  `ours` is the current branch and `theirs` the text before the reverted
+  commit. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
-- `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
+- `kit rebase [-i|--interactive] [--autosquash|--no-autosquash] [--update-refs|--no-update-refs] [-X <option>] [-x|--exec <cmd>]... [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
   the shared revspec resolver (branch, tag, `HEAD~n`, full/short hash).
   `--onto <newbase> <upstream> [<branch>]` replays the commits of
@@ -1016,6 +1279,10 @@ Branches / refs:
   missing, corrupt or not a commit fails the rebase before any change. So
   does a branch with more than 10,000 commits to replay, or a base with
   more than 1,000,000 ancestors, with an error that names the limit.
+  `-X ours` and `-X theirs` resolve the conflicts of every replayed commit
+  as in `merge`. As in git, `ours` is the base being rebased onto and
+  `theirs` the commit being replayed. A paused rebase keeps the option for
+  the commits that `--continue` and `--skip` replay.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
   (top is applied first). Reorder lines to reorder commits; delete a line
@@ -1026,13 +1293,87 @@ Branches / refs:
   the first line (nothing to fold into) and is rejected before any
   mutation. Removing every line resets the branch to the base. A
   `reword`/`squash` whose replay hits a conflict still reopens the editor
-  on `--continue`. `edit` (stop-to-amend) is not yet supported.
+  on `--continue`. `edit`/`e` replays the commit, then stops with clean
+  files and index and exits 0. Amend the commit with `kit commit --amend`,
+  add commits, or leave it, then run `kit rebase --continue`; staged or
+  changed files that the next commit would overwrite stop the continue,
+  so commit them first. After a conflict on an `edit` line, `--continue`
+  commits the resolution and goes on without a second stop. `exec`/`x
+  <command>` runs the rest of the line with `sh -c` in the worktree root,
+  with its output on standard error.
+  A command that exits non-zero, or that cannot start, stops the rebase
+  after its line with exit 1; `--continue` goes on with the next line.
+  `--skip` at an `edit` or `exec` stop is an error, since no commit is
+  paused. `-x <cmd>`/`--exec <cmd>` adds an `exec <cmd>` line after each
+  commit of the plan, or after the last commit of a squash or fixup
+  chain; with several, the lines go in the order given, and with `-i`
+  they show in the todo list. A command is one line and not empty.
+  `--autosquash` moves each commit whose subject starts with `fixup! ` or
+  `squash! ` (as `kit commit --fixup` and `--squash` write them) to just
+  after the commit it names, and marks it `fixup` or `squash`. Repeated
+  prefixes, as in `fixup! fixup! x`, name `x`. The target is an earlier
+  commit of the range that is not itself moved: first one whose subject
+  equals the rest of the subject, then, for a word of 4 or more hex
+  digits, the one whose id starts with it, then the first one whose
+  subject starts with it. Several commits for one target keep their
+  order after it. A commit whose target is not in the range stays a
+  `pick` where it is. With `-i` the todo list opens already arranged;
+  without it the rebase runs the arranged plan without a todo list, as
+  git 2.44 and later do. A `squash` still opens `$EDITOR` to combine the
+  messages. `rebase.autosquash = true` in repo or user config turns
+  `--autosquash` on for `-i`, and `--no-autosquash` turns it off.
+  `--autosquash` does not combine with `--continue`, `--skip` or
+  `--abort`.
+  `--update-refs` keeps a stack of branches stacked: every other local
+  branch that points at a commit being replayed moves to that commit's
+  replacement, or to the folded commit when a squash or fixup folds into
+  it. With `-i` the todo list holds an `update-ref refs/heads/<branch>`
+  line (`u`) after that commit. Delete the line to leave the branch, move
+  it, or type one for another local branch; the branch moves to the
+  commit before the line. The rebased branch is never listed, and a
+  branch checked out in another worktree is left out with a warning.
+  Branches move only when the rebase finishes, just before the rebased
+  branch, and each one moves only if it still points where it pointed
+  when the rebase started. If one has moved, no branch moves: the rebase
+  stops with exit 1 and stays in progress, so `--abort` restores
+  everything, or put the branch back and run `--continue`. The same
+  happens, with exit 75, when another command is changing the worktrees
+  at that moment; `--continue` tries again. `--abort` moves no branch. The old tip of each moved branch goes to the recovery
+  log, as the rebased branch's does. `rebase.updateRefs = true` in repo
+  or user config turns it on, and `--no-update-refs` turns it off. The
+  text output lists the moved branches on standard error, and
+  `--format=json` adds `"updated_refs":[<branch>,...]` to the `rebased`
+  outcome.
   `--format=json` emits one JSON object to stdout on the top-level
   outcomes: `{"ok":true,"kind":"up-to-date"|"rebased"|"aborted",...}` on
-  success, `{"ok":false,"kind":"conflict","conflicts":[<path>,...],
-  "error":"..."}` on a conflict pause. Best-effort on the interactive
+  success, `{"ok":true,"kind":"stopped","commit":"<hex>"}` at an `edit`
+  stop, `{"ok":false,"kind":"exec-failed","command":"...","status":<n>|null,
+  "error":"..."}` at a failed `exec`, and `{"ok":false,"kind":"conflict",
+  "conflicts":[<path>,...],"error":"..."}` on a conflict pause. Best-effort on the interactive
   (`-i`) editing path and a handful of deep internal errors (for example, signer
   setup), which stay stderr-only.
+- `kit rerere [status | diff | forget <path> | clear | gc]` &mdash; reuse
+  recorded conflict resolutions. With `rerere.enabled = true` in repo or
+  user config, `merge`, `cherry-pick`, `revert` and `rebase` record how
+  each text conflict was resolved when the operation continues or its
+  merge is committed (`Recorded resolution for '<path>'.`), and write the
+  recorded resolution into the file the next time the same conflict
+  appears (`Resolved '<path>' using previous resolution.`). A conflict
+  and the same conflict with its sides swapped match. The resolution is
+  left unstaged, so the operation continues only after `kit add`, unless
+  `rerere.autoUpdate = true` stages it. Binary, delete/modify,
+  file/directory, symlink and executable conflicts are not recorded.
+  `status` lists the paths of the current conflicts that have an entry,
+  and `diff` shows, for each, the change from the conflict with markers
+  to the file now. `forget <path>` drops the recorded resolution of the
+  current conflict at `<path>`. `clear` deletes every entry. `gc` deletes
+  entries resolved `gc.rerereResolved` or more days ago (default 60) and
+  unresolved entries `gc.rerereUnresolved` or more days old (default
+  15). With no subcommand, `rerere` does nothing: kit records and replays
+  as part of each operation. The cache lives in `.kit/rr-cache/`, shared by
+  linked worktrees; [SPEC-RERERE](specs/SPEC-RERERE.md) gives its format.
+  An entry that does not match the format is ignored with a warning and
+  never applied.
 - `kit bisect start | good | bad | skip | reset | run <cmd> [args…]` &mdash;
   binary search for a bug. `run` drives the loop automatically: it checks
   out each candidate, runs `<cmd>`, and classifies from the exit status
@@ -1153,7 +1494,9 @@ area &mdash; there are no unmerged index stages (SPEC-INDEX is unchanged).
 | `ORIG_HEAD`                   | HEAD before the operation, used by `--abort`         |
 | `MERGE_MSG` / `CHERRY_PICK_MSG` | pending commit message                             |
 | `kit-conflicts`              | kit sidecar: one line per conflicting path with the conflict kind and base/ours/theirs blob hashes |
-| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` is parallel to `todo` (`pick`/`reword`/`squash`/`fixup`, from `rebase -i`) |
+| `rr-cache/`                   | recorded conflict resolutions, shared by linked worktrees: a `version` file and one directory per conflict id holding `side1`, `side2` and, once recorded, `postimage` (see SPEC-RERERE) |
+| `am/`                         | paused `kit am` state (`orig-head`, `next`, `last`, and the mails `0001`...) |
+| `rebase-apply/`               | rebase state (`head-name`, `orig-head`, `onto`, `todo`, `actions`, `done`) plus a `kit-conflicts` sidecar when paused. `actions` lists the steps that remain, one per line: `pick`, `reword`, `squash`, `fixup` and `edit` take the next commit of `todo` in turn, and `exec <command>` takes none. A plan with no `edit` or `exec` step writes only the keywords, one per commit of `todo`; any other plan starts the file with the line `kit-rebase-actions 2`, which a reader without `edit` and `exec` refuses as malformed state. `strategy-option` holds `ours` or `theirs` when the rebase runs with `-X`. An `update-ref <branch>` step in `actions` also takes no commit and needs the version line. `update-refs` holds one line per branch that `--update-refs` moves, `<old> <new> <branch>`, with `-` as `<new>` until its step runs |
 
 Remote / sync:
 
@@ -1214,6 +1557,12 @@ attestation support warn once per command and skip the log.
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
+  - **From a closure export.** `<url>` may be `kit+closure://<dir>` or a
+    plain path to a `MANIFEST.mkcl` written by `kit closure export
+    --history --branch <name>`. The clone checks the manifest, every pack
+    against its key, the closure of the root and every signature, as any
+    clone does, and lands on the recorded branch. A plain path is saved
+    as the `kit+closure://` URL of its directory.
 - `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
   [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
@@ -1253,7 +1602,18 @@ attestation support warn once per command and skip the log.
   "tag_listing_failed":"..."|null}` on success, with `"ok":false` when a tag
   was refused or the listing failed, or `{"ok":false,"error":"..."}` on
   failure.
-- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--tags | --no-tags]
+
+  `<remote>` may also be `kit+closure://<dir>` or a path to a
+  `MANIFEST.mkcl`. Such a fetch has no configured remote, so its tracking
+  ref is `refs/remotes/closure/<branch>`. To pick the name, add the export
+  as a remote first: `kit remote add usb kit+closure:///media/usb/x.closure`,
+  then `kit fetch usb`. An export is read-only: a push to it fails. A
+  manifest with no branch (written without `--branch`, or by kit 0.11) is
+  refused with exit 65, because nothing names the tracking ref; re-export
+  it with `--branch`. An incremental export (`--since`) fetches only into a
+  repository that already holds its bases; elsewhere the fetch fails on the
+  missing objects and publishes nothing.
+- `kit pull [<remote>] [--all] [--rebase | --no-ff] [-X <option>] [--tags | --no-tags]
   [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
   fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
@@ -1275,7 +1635,9 @@ attestation support warn once per command and skip the log.
   then merges the fetched branch into the current branch and always writes a
   merge commit, even when a fast-forward is possible. A conflict pauses the
   merge with the state of `kit merge`; finish it with `kit merge --continue`
-  or `--abort`. `--no-ff` does not combine with `--all` or `--rebase`. The
+  or `--abort`. `--no-ff` does not combine with `--all` or `--rebase`.
+  `-X ours` and `-X theirs` resolve the conflicts of the `--no-ff` merge or
+  the `--rebase` replay as in `merge` and `rebase`; a fast-forward has none. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from
@@ -1532,8 +1894,9 @@ attestation support warn once per command and skip the log.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.
-- `kit closure export <revision> [--history] [-o DIR] [--force]
-  [--format=json]` &mdash; write a full-disclosure closure of `<revision>`
+- `kit closure export <revision> [--history] [--branch <name>]
+  [--since <rev>]... [-o DIR] [--force] [--format=json]` &mdash; write a
+  full-disclosure closure of `<revision>`
   as `DIR/MANIFEST.mkcl` plus `DIR/<pack_key hex>.pack` files (raw-only
   v1 packs). Default mode is snapshot (the commit and its tree
   closure; parents referenced but not included); `--history` exports
@@ -1543,7 +1906,17 @@ attestation support warn once per command and skip the log.
   export` is kit's native object-set disclosure (nearest git relative:
   `git bundle`). Status line: `closure: <mode>, <n> objects in <k>
   pack(s), <total> B -> DIR`. JSON: `{root, mode, packs: [{file,
-  blake3, bytes}], objects, manifest}`.
+  blake3, bytes}], objects, manifest}`, plus `branch` and `since` (an
+  array of ids) when given.
+
+  `--branch <name>` records the branch the root belongs to, so `kit
+  clone` and `kit fetch` can read the export as a remote with that branch
+  (see `kit fetch`). The root must be a commit. `--since <rev>` (history
+  mode only, repeatable) writes an incremental export: only the objects
+  that `<revision>` reaches and no `--since` commit reaches. A base must be
+  a commit. Either flag writes manifest version 2 (SPEC-DISCLOSURE §7.3),
+  which kit 0.11 cannot read; without them the manifest stays version 1.
+  `--since` without `--history`, or an invalid branch name, exits 64.
 - `kit closure verify <commit-id> [--from DIR] [--history]
   [--show-unreferenced] [--format=json]` &mdash; verify a closure. With
   `--from DIR`, reads `MANIFEST.mkcl` and every pack it names and
@@ -1565,6 +1938,10 @@ attestation support warn once per command and skip the log.
   mode unless `--show-unreferenced` is passed, and the unchecked streaming
   mode prints a note explaining how to opt in. Incomplete closures exit `65`
   (`DATAERR`).
+
+  With `--from`, an incremental export lists the objects its bases reach
+  as missing, unless the command runs in a repository that holds them; then
+  those objects complete the walk and the export verifies.
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
 - `kit closure repair-indexes` &mdash; rebuild damaged or missing local pack
@@ -1833,6 +2210,21 @@ Config / keys / version:
   are mutually exclusive; neither is needed for the common case, where
   scope is chosen automatically by whether the key is in
   `REPO_FORBIDDEN_KEYS`.
+- `kit config --get-regexp <regex>` &mdash; print `<key> <value>` for every
+  key with a value whose name matches `<regex>`, such as
+  `kit config --get-regexp alias.`. It exits `1` when nothing matches, as
+  git does.
+- `kit config alias.<name> <args>` &mdash; define an alias: typing
+  `kit <name> [<more>...]` runs `kit <args> [<more>...]`. Aliases live in
+  the user config only, so the set goes there automatically; a repository
+  config or a `-c alias.<name>=...` override that sets one is ignored with a
+  warning, and `--local` is refused. `<args>` splits at spaces, and a
+  `"..."` or `'...'` quoted part stays one argument (inside double quotes,
+  `\"` and `\\` stand for `"` and `\`). A value that starts with `!` is
+  refused: kit aliases never run a shell. An alias whose name is a built-in
+  command is ignored, with a warning when you set it, and an alias whose
+  expansion starts with another alias is an error (exit `64`). Names are
+  letters, digits and `-`, and match without regard to case.
 - `kit config <key> <value>` &mdash; set a configuration value. Config
   **section** and **variable** names are matched **case-insensitively**
   (canonicalized to lowercase), like git &mdash; so `user.Name`, `USER.EMAIL`,
@@ -1951,8 +2343,9 @@ These are documented behaviors, not bugs:
   `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS[Z]` (UTC). git's fuzzier
   natural-language forms (`last Tuesday`, `3am`, `noon`) are not accepted.
 - **`kit status --porcelain=v2`** matches git's format except that object
-  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). Exact renames emit a
-  `2` record (`R100`); `--branch` header lines are not emitted.
+  ids are full 64-hex BLAKE3 (git's are 40-hex SHA-1). A staged rename
+  emits a `2` record with git's score (`R100`, `R90`); `--branch` header
+  lines are not emitted.
 - **`kit clone --depth N` is not supported.** `clone` rejects it with a
   `--depth is not supported` usage error rather than silently producing a
   full clone. A clone holds the full history, so every commit verifies with its
@@ -1990,9 +2383,8 @@ porcelain-completion work: `kit revert`, `kit mv`, `kit clean`, and
 `kit reset --hard` are all available and documented above. Each keeps a
 kit data-loss guard &mdash; for example, `clean` and `reset --hard` refuse to delete or
 discard without an explicit `-f` &mdash; rather than adopting git's silent
-destructive default. Rename *detection* in diff/log output remains a
-separate, unscheduled follow-up: `kit mv` stages the move
-but `status` shows it as a delete plus add, not `R`.
+destructive default. `status`, `diff`, `show` and `log -p`/`--stat`
+detect renames by similarity, like git; merge does not apply renames yet.
 
 Note: object garbage collection (`kit gc`) **is shipped**.
 History-rewriting commands (`commit --amend`, `reset`, `rebase`) record
@@ -2010,8 +2402,8 @@ Security-sensitive keys are **user-scoped only**. Kit warns and ignores them
 if a repo's `.kit/config` sets them (a hostile repo must not be able to
 redirect signing or trust).
 Those keys &mdash; `user.identity`, `signing_key`, `signer`, `key.*`, `attest.*`,
-`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`, and
-`remote.<name>.admission_headers` &mdash; live in the user config
+`ssh.*`, `trusted_remote_endpoint`, `admission_helper`, `grant.webauthn_rp`,
+`alias.<name>` and `remote.<name>.admission_headers` &mdash; live in the user config
 (`$XDG_CONFIG_HOME/kit/config`); set them with `kit config <key> <value>`,
 which routes them to the user scope automatically.
 
@@ -2030,6 +2422,13 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `alias.<name>` | kit arguments | unset | User-scoped only. See `kit config alias.<name>` above. |
+| `rebase.updateRefs` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase` move the branches stacked on the rebased commits, as `--update-refs` does; `--no-update-refs` overrides it |
+| `rebase.autosquash` | `true` / `false` | `false` | Repo or user config. `true` makes `kit rebase -i` arrange `fixup!` and `squash!` commits as `--autosquash` does; `--no-autosquash` overrides it. It does not apply to a rebase without `-i`, as in git 2.44 and later |
+| `rerere.enabled` | `true` / `false` | `false` | Repo or user config. `true` records conflict resolutions and replays them; see `kit rerere` |
+| `rerere.autoUpdate` | `true` / `false` | `false` | Repo or user config. `true` stages a replayed resolution as well as writing it |
+| `gc.rerereResolved` | days | `60` | Repo or user config. `kit rerere gc` deletes entries whose resolution is older |
+| `gc.rerereUnresolved` | days | `15` | Repo or user config. `kit rerere gc` deletes unresolved entries that are older |
 | `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
@@ -2117,7 +2516,7 @@ only. Anything else is hard-rejected:
 
 ```
 error: invalid remote URL '<input>': must start with 'kit+<scheme>://'
-hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://)
+hint: URL must start with kit+<scheme>:// (e.g. kit+https://, kit+ssh://, kit+file://, kit+s3://, kit+closure://)
 ```
 
 Accepted schemes:
@@ -2129,6 +2528,7 @@ Accepted schemes:
 | `kit+s3` | `kit+s3://endpoint/bucket[/prefix]` | S3-compatible object store |
 | `kit+ssh` | `kit+ssh://user@host[:port]/path` | SSH with the kit shell |
 | `kit+memory` | `kit+memory://` | in-memory (testing only) |
+| `kit+closure` | `kit+closure:///abs/dir` | a `kit closure export --branch` directory, read-only (fetch and clone) |
 
 `kit+https` (and loopback-only `kit+http`) speaks
 `kit.transport.v1.TransportService` over ConnectRPC &mdash; see

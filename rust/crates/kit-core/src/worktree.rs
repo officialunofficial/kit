@@ -228,7 +228,44 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     skip_restore_temps: bool,
     listings: Option<&mut DirListings>,
 ) -> WorktreeResult<Hash> {
-    let ignores = ignore::load(dir).map_err(|e| match e {
+    let ignores = load_ignores(dir)?;
+    snapshot_with_ignores(
+        sink,
+        source,
+        dir,
+        index,
+        observations,
+        skip_restore_temps,
+        listings,
+        &ignores,
+    )
+}
+
+/// Like [`build_tree_filtered`], but untracked files that the ignore rules
+/// match are kept too. Only `.kit` and `.git` are left out, at any depth, and
+/// no ignore file is read. This is the snapshot of `stash push --all`.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn build_tree_including_ignored<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    dir: &Path,
+    index: Option<&Index>,
+) -> WorktreeResult<Hash> {
+    snapshot_with_ignores(
+        sink,
+        None,
+        dir,
+        index,
+        &mut Vec::new(),
+        false,
+        None,
+        &IgnoreList::new(),
+    )
+}
+
+fn load_ignores(dir: &Path) -> WorktreeResult<IgnoreList> {
+    ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
         crate::ignore::IgnoreError::FileTooLarge => {
             WorktreeError::Io(io::Error::other("ignore file exceeds 1 MiB"))
@@ -237,7 +274,20 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
         | crate::ignore::IgnoreError::PatternTooLong) => {
             WorktreeError::Io(io::Error::other(limit.to_string()))
         }
-    })?;
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn snapshot_with_ignores<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
+    dir: &Path,
+    index: Option<&Index>,
+    observations: &mut Vec<StatObservation>,
+    skip_restore_temps: bool,
+    listings: Option<&mut DirListings>,
+    ignores: &IgnoreList,
+) -> WorktreeResult<Hash> {
     // Tracked set for ignore exemption: the caller's index if given, else the
     // on-disk index (missing/unreadable = empty = nothing tracked).
     let loaded;
@@ -262,7 +312,7 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
         sink,
         dir,
         "",
-        &ignores,
+        ignores,
         index,
         &by_path,
         &stats,

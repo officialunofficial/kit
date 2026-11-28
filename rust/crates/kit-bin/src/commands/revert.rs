@@ -65,6 +65,11 @@ struct RevertOpts {
     /// `git revert -m`. Required for a merge; rejected for a non-merge.
     #[arg(short = 'm', long = "mainline", value_name = "PARENT-NUMBER", conflicts_with_all = ["cont", "abort"])]
     mainline: Option<usize>,
+    /// Resolve every content conflict to one side: `ours` (the current
+    /// branch) or `theirs` (the text before the reverted commit).
+    #[arg(short = 'X', long = "strategy-option",
+          conflicts_with_all = ["cont", "abort"])]
+    strategy_option: Option<String>,
     /// Commit to revert: a ref, full/short hash, or `HEAD~n` revspec.
     commit: Option<String>,
 }
@@ -88,6 +93,10 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, RevertFormat::Json);
+    let favor = match super::strategy_option(opts.strategy_option.as_deref()) {
+        Ok(favor) => favor,
+        Err(code) => return code,
+    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -110,7 +119,15 @@ pub fn run(args: &[String]) -> u8 {
     } else if opts.cont {
         cont(&layout, &store, json)
     } else if let Some(hex) = opts.commit.as_deref() {
-        start(&layout, &store, hex, opts.no_commit, opts.mainline, json)
+        start(
+            &layout,
+            &store,
+            hex,
+            opts.no_commit,
+            opts.mainline,
+            favor,
+            json,
+        )
     } else {
         super::usage_error("usage: kit revert <commit> | --continue | --abort")
     }
@@ -123,6 +140,7 @@ fn start(
     hex: &str,
     no_commit: bool,
     mainline: Option<usize>,
+    favor: libkit::merge::Favor,
     json: bool,
 ) -> u8 {
     let emit_err = |msg: &str, code: u8| emit_err_json(msg, code, json);
@@ -151,7 +169,7 @@ fn start(
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
     };
 
-    let result = match revert_tree(store, target, ours_tree, mainline) {
+    let result = match revert_tree(store, target, ours_tree, mainline, favor) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("revert: {e}"), exit::GENERAL_ERROR),
     };
@@ -194,6 +212,13 @@ fn start(
         if let Err(e) = conflict_state::write_conflicts(layout.worktree_state_dir(), &records) {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
+        libkit::rerere::replay(
+            layout,
+            store,
+            super::conflict::rerere(layout),
+            &records,
+            &super::conflict::Notes,
+        );
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
             stderr,
@@ -359,6 +384,13 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
     if let Err(e) = libkit::conflict::ensure_staged(layout, store, &records) {
         return super::fail(e);
     }
+    libkit::rerere::record(
+        layout,
+        store,
+        super::conflict::rerere(layout),
+        &records,
+        &super::conflict::Notes,
+    );
 
     let idx = match super::read_or_seed_index_from_head(layout, store) {
         Ok(i) => i,

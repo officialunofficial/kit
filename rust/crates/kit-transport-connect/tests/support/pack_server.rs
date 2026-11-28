@@ -80,7 +80,12 @@ struct Ticket {
     expires: i64,
 }
 
+/// A canned `DownloadWindow` reply: each pack with its key, then the
+/// boundary.
+pub type CannedWindow = (Vec<(Hash, Vec<u8>)>, Vec<Hash>);
+
 struct Modes {
+    window: Option<CannedWindow>,
     location: Location,
     one_frame: bool,
     threshold: u64,
@@ -135,6 +140,7 @@ impl PackServer {
             dir: dir.to_owned(),
             location_port,
             modes: Mutex::new(Modes {
+                window: None,
                 location: Location::Off,
                 one_frame: false,
                 threshold: 0,
@@ -187,6 +193,11 @@ impl PackServer {
     /// The file remote, for seeding and checking.
     pub fn remote(&self) -> &FileTransport {
         &self.shared.remote
+    }
+
+    /// Advertise `DownloadWindow` and answer every request with `window`.
+    pub fn set_window(&self, window: CannedWindow) {
+        self.shared.modes.lock().unwrap().window = Some(window);
     }
 
     pub fn set_location(&self, location: Location) {
@@ -454,6 +465,59 @@ struct Service(Arc<Shared>);
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for Service {
+    async fn download_window(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::DownloadWindowRequest>,
+    ) -> ServiceResult<ServiceStream<generated::DownloadWindowResponse>> {
+        let Some((packs, boundary)) = self.0.modes.lock().unwrap().window.clone() else {
+            return Err(ConnectError::unimplemented("no window"));
+        };
+        let mut frames = Vec::new();
+        for (key, bytes) in packs {
+            frames.push(generated::DownloadWindowResponse {
+                body: Some(
+                    generated::DownloadWindowPack {
+                        pack_id: Some(key.to_vec()),
+                        total_bytes: Some(bytes.len() as u64),
+                        ..Default::default()
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            });
+            let mut offset = 0;
+            for data in bytes.chunks(1000) {
+                let end = offset + data.len();
+                frames.push(generated::DownloadWindowResponse {
+                    body: Some(
+                        generated::PackChunk {
+                            pack_id: Some(key.to_vec()),
+                            offset: Some(offset as u64),
+                            data: Some(data.to_vec()),
+                            last: Some(end == bytes.len()),
+                            ..Default::default()
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                });
+                offset = end;
+            }
+        }
+        frames.push(generated::DownloadWindowResponse {
+            body: Some(
+                generated::DownloadWindowBoundary {
+                    commits: boundary.iter().map(|h| h.to_vec()).collect(),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        });
+        Response::stream_ok(futures::stream::iter(frames.into_iter().map(Ok)))
+    }
+
     async fn list_repos(
         &self,
         _ctx: RequestContext,
@@ -488,6 +552,7 @@ impl generated::TransportService for Service {
             atomic_advance: Some(true),
             supports_pack_locations: Some(locations),
             max_pack_location_lifetime_ms: locations.then_some(60_000),
+            supports_download_window: Some(modes.window.is_some()),
             ..Default::default()
         }))
     }

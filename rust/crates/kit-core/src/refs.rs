@@ -1,8 +1,8 @@
 //! Refs subsystem.
 //!
 //! Implements the local-disk side of `docs/specs/SPEC-REFS.md`: ref names,
-//! the 65-byte wire encoding, the symbolic-or-detached `HEAD` file, and
-//! shallow-boundary persistence at `.kit/shallow`.
+//! the 65-byte wire encoding, and the symbolic-or-detached `HEAD` file.
+//! The shallow record at `.kit/shallow` is [`crate::shallow`].
 //!
 //! Wire format (per SPEC-REFS §1): exactly 64 lowercase-hex characters
 //! plus a trailing `0x0A` newline = 65 bytes. Uppercase hex is rejected
@@ -66,8 +66,6 @@ const HEAD_MAX_BYTES: u64 = 4 * 1024;
 /// file picked up extra whitespace, but anything pathological is
 /// rejected.
 pub const REF_FILE_MAX_BYTES: u64 = 128;
-/// Hard cap on `.kit/shallow` (1 MiB).
-const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -664,12 +662,145 @@ pub fn fuzz_parse_previous_head(raw: &[u8]) -> Option<Head> {
     parse_previous_head(raw).ok()
 }
 
-/// Atomically save one previous HEAD. The caller holds the worktree lock.
-pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
-    let body = match head {
+/// The most previous HEADs that `HEAD_HISTORY` holds, so the largest N of
+/// `@{-N}` (SPEC-WORKTREE).
+pub const HEAD_HISTORY_MAX: usize = 16;
+
+/// The largest `HEAD_HISTORY` file a reader accepts.
+const HEAD_HISTORY_MAX_BYTES: u64 = 64 * 1024;
+
+/// One previous HEAD in the HEAD encoding, newline included.
+fn encode_previous_head(head: &Head) -> String {
+    match head {
         Head::Branch(branch) => format!("{HEAD_REF_PREFIX}{branch}\n"),
         Head::Detached(h) => format!("{}\n", crate::hash::to_hex(h)),
+    }
+}
+
+/// Parse a `HEAD_HISTORY` body, oldest first. A last line with no newline
+/// is a torn write and is ignored. More than [`HEAD_HISTORY_MAX`] complete
+/// lines, or a line that is not in the HEAD encoding, is an error.
+fn parse_head_history(raw: &[u8]) -> RefResult<Vec<Head>> {
+    let mut out = Vec::new();
+    for line in raw.split_inclusive(|&b| b == b'\n') {
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        if out.len() == HEAD_HISTORY_MAX {
+            return Err(RefError::InvalidHead);
+        }
+        out.push(parse_previous_head(line)?);
+    }
+    Ok(out)
+}
+
+/// Exercise the `HEAD_HISTORY` parser without filesystem I/O.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_parse_head_history(raw: &[u8]) -> Option<Vec<Head>> {
+    parse_head_history(raw).ok()
+}
+
+/// Encode a record as `HEAD_HISTORY` bytes, for the fuzz round trip.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_encode_head_history(record: &[Head]) -> Vec<u8> {
+    record
+        .iter()
+        .map(encode_previous_head)
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// The previous HEADs of this worktree, oldest first (SPEC-WORKTREE). A
+/// missing record reads as the one entry in `PREVIOUS_HEAD`, and so does a
+/// record whose last entry is not `PREVIOUS_HEAD`, which an older kit left
+/// stale.
+///
+/// # Errors
+/// [`RefError::InvalidHead`] for a malformed record or `PREVIOUS_HEAD`;
+/// [`RefError::Io`] when a file cannot be read.
+pub fn read_head_history(layout: &RepoLayout) -> RefResult<Vec<Head>> {
+    let previous = match read_previous_head(layout) {
+        Ok(head) => head,
+        Err(RefError::NoHead) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
+    let raw = match bounded_read::read_capped(
+        &layout.worktree_state_dir().join("HEAD_HISTORY"),
+        HEAD_HISTORY_MAX_BYTES,
+    ) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![previous]),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(RefError::InvalidHead),
+        Err(e) => return Err(RefError::Io(e)),
+    };
+    let record = parse_head_history(&raw)?;
+    if record.last() == Some(&previous) {
+        Ok(record)
+    } else {
+        Ok(vec![previous])
+    }
+}
+
+/// The N-th previous HEAD of this worktree, counted from 1, or `None` when
+/// the record holds fewer.
+///
+/// # Errors
+/// As [`read_head_history`].
+pub fn nth_previous_head(layout: &RepoLayout, n: usize) -> RefResult<Option<Head>> {
+    if n == 0 {
+        return Ok(None);
+    }
+    let record = read_head_history(layout)?;
+    Ok(record.len().checked_sub(n).map(|i| record[i].clone()))
+}
+
+/// The N of a `@{-N}` revision: a positive decimal number of at most two
+/// digits with no leading zero. Anything else is `None`.
+#[must_use]
+pub fn parse_previous_spec(spec: &str) -> Option<usize> {
+    let digits = spec.strip_prefix("@{-")?.strip_suffix('}')?;
+    if digits.is_empty()
+        || digits.len() > 2
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Record `old` as the newest previous HEAD: write `PREVIOUS_HEAD`, then
+/// append to `HEAD_HISTORY` and keep its last [`HEAD_HISTORY_MAX`] entries.
+/// A malformed record is replaced. The caller holds the worktree lock.
+///
+/// # Errors
+/// [`RefError::Io`] when a file cannot be read or written.
+pub fn record_previous_head(layout: &RepoLayout, old: &Head) -> RefResult<()> {
+    let mut record = match read_head_history(layout) {
+        Ok(record) => record,
+        Err(RefError::InvalidHead) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    // `PREVIOUS_HEAD` first: a crash before the record is written leaves a
+    // stale record, which reads as `PREVIOUS_HEAD` alone.
+    write_previous_head(layout, old)?;
+    record.push(old.clone());
+    let excess = record.len().saturating_sub(HEAD_HISTORY_MAX);
+    record.drain(..excess);
+    let body: String = record.iter().map(encode_previous_head).collect();
+    crate::durable::write_pointer(
+        &layout.worktree_state_dir().join("HEAD_HISTORY"),
+        body.as_bytes(),
+        Parents::Existing,
+    )?;
+    Ok(())
+}
+
+/// Atomically save one previous HEAD. The caller holds the worktree lock.
+pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
+    let body = encode_previous_head(head);
     crate::durable::write_pointer(
         &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
         body.as_bytes(),
@@ -916,6 +1047,14 @@ pub fn update_ref_with_ancestry(
 ) -> RefResult<()> {
     check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let (_history, mutation) = acquire_history_mutation(layout, branch)?;
+    // A shallow repository cannot hold the chain from the root, so it
+    // publishes no ancestry (SPEC-SHALLOW). The plain write still checks
+    // the condition and invalidates the snapshot of the old tip.
+    let shallow = crate::shallow::read(layout)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: shallow record: {e}")))?;
+    if !shallow.is_empty() {
+        return mutation.write(&encode_ref_wire(target), condition);
+    }
     crate::history::ancestry::advance(layout, branch, &mutation, condition, *target, store).map_err(
         |e| match e {
             crate::history::HistoryError::Ref(e) => e,
@@ -1290,62 +1429,6 @@ pub fn list_tags_with(
     read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
 ) -> RefResult<Vec<Ref>> {
     list_refs_under_with(layout.common_dir(), TAGS_DIR, read_batch)
-}
-
-// -----------------------------------------------------------------------------
-// Shallow boundaries (.kit/shallow)
-// -----------------------------------------------------------------------------
-
-/// Load shallow-boundary hashes from `.kit/shallow`. Returns `Ok(None)`
-/// if the file does not exist or is empty.
-pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash>>> {
-    let path = layout.shallow_file();
-    let bytes = match bounded_read::read_capped(&path, SHALLOW_MAX_BYTES) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-            return Err(RefError::InvalidRef("shallow file too large".to_string()));
-        }
-        Err(e) => return Err(RefError::Io(e)),
-    };
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let s = core::str::from_utf8(&bytes).map_err(|_| RefError::InvalidHead)?;
-    let mut out = Vec::new();
-    for line in s.split('\n') {
-        let trimmed = line.trim_end_matches(['\r', ' ', '\t']);
-        if trimmed.len() != HEX_LEN {
-            continue;
-        }
-        if let Some(h) = parse_lowercase_hash(trimmed.as_bytes()) {
-            out.push(h);
-        }
-    }
-    if out.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(out))
-}
-
-/// Write shallow-boundary hashes to `.kit/shallow`. Passing an empty
-/// slice removes the file.
-pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> RefResult<()> {
-    let path = layout.shallow_file();
-    if boundaries.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(RefError::Io(e)),
-        }
-    } else {
-        let mut out = Vec::with_capacity(boundaries.len() * 65);
-        for h in boundaries {
-            out.extend_from_slice(&encode_ref_wire(h));
-        }
-        crate::durable::write_pointer(&path, &out, Parents::Create)?;
-        Ok(())
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1745,6 +1828,96 @@ mod tests {
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
+    }
+
+    // --- previous HEADs --------------------------------------------------
+
+    #[test]
+    fn previous_spec_accepts_one_or_two_digits_without_a_leading_zero() {
+        assert_eq!(parse_previous_spec("@{-1}"), Some(1));
+        assert_eq!(parse_previous_spec("@{-16}"), Some(16));
+        assert_eq!(parse_previous_spec("@{-99}"), Some(99));
+        for bad in [
+            "@{-0}", "@{-01}", "@{-100}", "@{-}", "@{1}", "@{-1", "@{-x}", "@{--1}",
+        ] {
+            assert_eq!(parse_previous_spec(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn head_history_is_bounded_and_keeps_the_newest() {
+        let (_d, layout) = fresh_repo();
+        for i in 0..20 {
+            record_previous_head(&layout, &Head::Branch(format!("b{i}"))).unwrap();
+        }
+        let record = read_head_history(&layout).unwrap();
+        assert_eq!(record.len(), HEAD_HISTORY_MAX);
+        assert_eq!(record.first(), Some(&Head::Branch("b4".into())));
+        assert_eq!(
+            nth_previous_head(&layout, 1).unwrap(),
+            Some(Head::Branch("b19".into()))
+        );
+        assert_eq!(
+            nth_previous_head(&layout, 16).unwrap(),
+            Some(Head::Branch("b4".into()))
+        );
+        assert_eq!(nth_previous_head(&layout, 17).unwrap(), None);
+        assert_eq!(nth_previous_head(&layout, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn head_history_parser_rules() {
+        let line = |b: &str| format!("ref: refs/heads/{b}\n");
+        let hex = format!("{}\n", hash::to_hex(&h("x")));
+        let two = format!("{}{hex}", line("a"));
+        assert_eq!(
+            parse_head_history(two.as_bytes()).unwrap(),
+            vec![Head::Branch("a".into()), Head::Detached(h("x"))]
+        );
+        // A torn tail is ignored.
+        let torn = format!("{two}ref: refs/he");
+        assert_eq!(parse_head_history(torn.as_bytes()).unwrap().len(), 2);
+        // Seventeen complete lines, or a bad line, are refused.
+        let long: String = (0..17).map(|i| line(&format!("b{i}"))).collect();
+        assert!(parse_head_history(long.as_bytes()).is_err());
+        assert!(parse_head_history(b"junk\n").is_err());
+        assert!(parse_head_history(hex.to_uppercase().as_bytes()).is_err());
+        assert_eq!(parse_head_history(b"").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_missing_record_falls_back_to_previous_head() {
+        let (_d, layout) = fresh_repo();
+        assert!(read_head_history(&layout).unwrap().is_empty());
+        write_previous_head(&layout, &Head::Branch("old".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("old".into())]
+        );
+        record_previous_head(&layout, &Head::Branch("new".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("old".into()), Head::Branch("new".into())]
+        );
+        // An older kit moves PREVIOUS_HEAD alone; the record is then stale.
+        write_previous_head(&layout, &Head::Branch("other".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("other".into())]
+        );
+    }
+
+    #[test]
+    fn a_malformed_record_is_replaced_on_the_next_switch() {
+        let (_d, layout) = fresh_repo();
+        write_previous_head(&layout, &Head::Branch("a".into())).unwrap();
+        fs::write(layout.worktree_state_dir().join("HEAD_HISTORY"), b"junk\n").unwrap();
+        assert!(read_head_history(&layout).is_err());
+        record_previous_head(&layout, &Head::Branch("b".into())).unwrap();
+        assert_eq!(
+            read_head_history(&layout).unwrap(),
+            vec![Head::Branch("b".into())]
+        );
     }
 
     // --- name grammar ---------------------------------------------------
@@ -3054,67 +3227,6 @@ mod tests {
         let (_dir, kit) = fresh_repo();
         let err = delete_tag(&kit, "missing").unwrap_err();
         assert!(matches!(err, RefError::NotFound(_)));
-    }
-
-    // --- shallow boundaries --------------------------------------------
-
-    #[test]
-    fn load_shallow_returns_none_when_missing() {
-        let (_dir, kit) = fresh_repo();
-        assert_eq!(load_shallow_boundaries(&kit).unwrap(), None);
-    }
-
-    #[test]
-    fn write_and_load_shallow_round_trip() {
-        let (_dir, kit) = fresh_repo();
-        let bs = vec![h("b1"), h("b2"), h("b3")];
-        write_shallow_boundaries(&kit, &bs).unwrap();
-        let loaded = load_shallow_boundaries(&kit).unwrap().unwrap();
-        assert_eq!(loaded.len(), 3);
-        for b in &bs {
-            assert!(loaded.contains(b));
-        }
-    }
-
-    #[test]
-    fn write_empty_shallow_removes_file() {
-        let (_dir, kit) = fresh_repo();
-        write_shallow_boundaries(&kit, &[h("x")]).unwrap();
-        assert!(load_shallow_boundaries(&kit).unwrap().is_some());
-        write_shallow_boundaries(&kit, &[]).unwrap();
-        assert_eq!(load_shallow_boundaries(&kit).unwrap(), None);
-    }
-
-    #[test]
-    fn load_shallow_rejects_oversize_file() {
-        // SPEC-REFS §6: the shallow file is capped at 1 MiB.
-        let (_dir, kit) = fresh_repo();
-        let path = kit.shallow_file();
-        fs::write(
-            &path,
-            vec![b'a'; usize::try_from(SHALLOW_MAX_BYTES).unwrap() + 1],
-        )
-        .unwrap();
-        let err = load_shallow_boundaries(&kit).unwrap_err();
-        assert!(matches!(err, RefError::InvalidRef(_)));
-    }
-
-    #[test]
-    fn load_shallow_skips_invalid_lines() {
-        let (_dir, kit) = fresh_repo();
-        let path = kit.shallow_file();
-        let valid = h("ok");
-        let valid_hex = to_hex(&valid);
-        let mut content = String::new();
-        content.push_str("short\n");
-        content.push_str(&valid_hex);
-        content.push('\n');
-        content.push_str(&"z".repeat(64));
-        content.push('\n');
-        std::fs::write(&path, content).unwrap();
-        let loaded = load_shallow_boundaries(&kit).unwrap().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0], valid);
     }
 
     // --- remote-ref batching --------------------------------------

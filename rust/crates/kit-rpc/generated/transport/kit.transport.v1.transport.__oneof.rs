@@ -165,6 +165,72 @@ pub mod download_pack_response {
         }
     }
 }
+pub mod download_window_response {
+    #[allow(unused_imports)]
+    use super::*;
+    #[derive(Clone, PartialEq, Debug)]
+    pub enum Body {
+        Pack(::buffa::alloc::boxed::Box<super::super::super::DownloadWindowPack>),
+        Chunk(::buffa::alloc::boxed::Box<super::super::super::PackChunk>),
+        Boundary(
+            ::buffa::alloc::boxed::Box<super::super::super::DownloadWindowBoundary>,
+        ),
+    }
+    impl ::buffa::Oneof for Body {}
+    impl From<super::super::super::DownloadWindowPack> for Body {
+        fn from(v: super::super::super::DownloadWindowPack) -> Self {
+            Self::Pack(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowPack> for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadWindowPack) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::PackChunk> for Body {
+        fn from(v: super::super::super::PackChunk) -> Self {
+            Self::Chunk(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::PackChunk> for ::core::option::Option<Body> {
+        fn from(v: super::super::super::PackChunk) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowBoundary> for Body {
+        fn from(v: super::super::super::DownloadWindowBoundary) -> Self {
+            Self::Boundary(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowBoundary>
+    for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadWindowBoundary) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    #[cfg(feature = "json")]
+    impl ::serde::Serialize for Body {
+        fn serialize<S: ::serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            use ::serde::ser::SerializeMap;
+            let mut map = s.serialize_map(Some(1))?;
+            match self {
+                Self::Pack(v) => {
+                    map.serialize_entry("pack", &**v)?;
+                }
+                Self::Chunk(v) => {
+                    map.serialize_entry("chunk", &**v)?;
+                }
+                Self::Boundary(v) => {
+                    map.serialize_entry("boundary", &**v)?;
+                }
+            }
+            map.end()
+        }
+    }
+}
 pub mod begin_upload_response {
     #[allow(unused_imports)]
     use super::*;

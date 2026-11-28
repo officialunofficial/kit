@@ -25,7 +25,8 @@ use kit_core::ops::conflict_state::{
     self, ConflictRecord, ConflictStateError, MergeState, in_progress_op_name, is_merge_in_progress,
 };
 use kit_core::ops::graph::AncestorError;
-use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
+pub use kit_core::ops::merge::Favor;
+use kit_core::ops::merge::{MergeResult, find_merge_base_within, merge_trees_favoring};
 use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
@@ -61,6 +62,9 @@ pub enum Error {
     /// commit. The error names it. Nothing was changed.
     #[error("find merge base: {0}")]
     History(AncestorError),
+    /// The shallow boundary record cannot be read or is not canonical.
+    #[error("{0}")]
+    Shallow(kit_core::shallow::ShallowError),
     /// An object that must be a commit is another kind of object.
     #[error("object is not a commit")]
     NotACommit,
@@ -133,6 +137,27 @@ pub struct Request<'a> {
     /// `Merge branch '<target>'`, or `Merge remote-tracking branch
     /// '<remote>/<branch>'` for a remote-tracking ref.
     pub message: Option<&'a str>,
+    /// How the trees merge.
+    pub strategy: Strategy,
+    /// Whether recorded conflict resolutions are reused and recorded.
+    pub rerere: crate::rerere::Settings,
+}
+
+/// How [`start`] merges the trees, as git's `-s` and `-X`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// The three-way merge. A [`Favor`] side resolves content conflicts to
+    /// that side, as `-X ours` and `-X theirs` do.
+    ThreeWay(Favor),
+    /// Keep the tree of `HEAD` and record the target as the second parent,
+    /// as `-s ours` does. It never fast-forwards.
+    Ours,
+}
+
+impl Default for Strategy {
+    fn default() -> Self {
+        Strategy::ThreeWay(Favor::None)
+    }
 }
 
 /// A merge commit.
@@ -225,12 +250,19 @@ pub fn start(
 
     // A base found in part of the history would merge the wrong changes, so
     // the walk reads every commit and fails before anything changes.
-    let base = find_merge_base_strict(store, ours, theirs).map_err(|e| match e {
+    // In a shallow repository a base that can lie beyond the boundary is an
+    // error too.
+    let boundary = kit_core::shallow::read(layout).map_err(Error::Shallow)?;
+    let base = find_merge_base_within(store, &boundary, ours, theirs).map_err(|e| match e {
         AncestorError::Limit(limit) => Error::MergeBase(limit),
         other => Error::History(other),
     })?;
 
-    if base == Some(ours) && !request.no_ff {
+    let favor = match request.strategy {
+        Strategy::ThreeWay(favor) => Some(favor),
+        Strategy::Ours => None,
+    };
+    if base == Some(ours) && !request.no_ff && favor.is_some() {
         let theirs_tree = commit_tree(store, theirs)?;
         let ours_tree = commit_tree(store, ours)?;
         ensure_restore_safe_from(
@@ -254,8 +286,16 @@ pub fn start(
     let theirs_tree = commit_tree(store, theirs)?;
     let base_tree = base.map(|b| commit_tree(store, b)).transpose()?;
 
-    let result =
-        merge_trees(store, base_tree, Some(ours_tree), Some(theirs_tree)).map_err(Error::Merge)?;
+    let result = match favor {
+        Some(favor) => {
+            merge_trees_favoring(store, base_tree, Some(ours_tree), Some(theirs_tree), favor)
+                .map_err(Error::Merge)?
+        }
+        None => MergeResult {
+            tree_hash: ours_tree,
+            conflicts: Vec::new(),
+        },
+    };
 
     let message = match request.message {
         Some(m) => m.to_owned(),
@@ -293,6 +333,7 @@ pub fn start(
         conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
         conflict_state::write_conflicts(layout.worktree_state_dir(), &records)
             .map_err(Error::WriteState)?;
+        crate::rerere::replay(layout, store, request.rerere, &records, observer);
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
@@ -360,6 +401,8 @@ pub fn resume(
     layout: &RepoLayout,
     store: &ObjectStore,
     signing: &dyn Signing,
+    rerere: crate::rerere::Settings,
+    observer: &dyn Observer<conflict::Event>,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
     // A stop after the merge commit and before the state was cleared leaves
@@ -380,6 +423,7 @@ pub fn resume(
         return Err(Error::UnresolvedMarkers(path));
     }
     conflict::ensure_staged(layout, store, &records)?;
+    crate::rerere::record(layout, store, rerere, &records, observer);
 
     let idx = read_or_seed_index_from_head(layout, store).map_err(Error::Worktree)?;
     let tree = worktree::build_tree_from_index(store, &idx).map_err(Error::BuildTree)?;

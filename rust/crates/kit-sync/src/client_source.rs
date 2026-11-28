@@ -215,6 +215,24 @@ impl<
         self.download_into(key, None, kit_core::protocol::PACK_BODY_LIMIT, sink)
     }
 
+    /// `DownloadWindow` (SPEC-SHALLOW §8.2): the packs go to `sink` and the
+    /// reply is the boundary the server listed. A retried call restarts the
+    /// open pack; the caller checks the window.
+    ///
+    /// # Errors
+    /// Transport, remote, limit or order failures, or the sink's failure.
+    pub fn download_window(
+        &self,
+        request: &kit_core::protocol::WindowRequest,
+        sink: &mut dyn kit_core::protocol::WindowSink,
+    ) -> Result<Vec<Hash>, SourceError> {
+        self.write_call("DownloadWindow", false, None, |identity| {
+            self.executor
+                .block_on(self.client.download_window(request, &mut *sink, identity))
+        })
+        .map(|reply| reply.value)
+    }
+
     /// Stream a pack into `sink`. The client holds one bounded frame and no
     /// pack bytes, and the sink's owner checks the key. A sink that has
     /// failed ends the download: [`ClientSource::write_call`] never retries

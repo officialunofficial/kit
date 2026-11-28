@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 use kit_core::hash::{Hash, from_hex, to_hex};
+use kit_core::object::Object;
 use kit_core::pack_key;
 use kit_core::protocol::PACK_BODY_LIMIT;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::verify::{
-    ClosureReport, export_closure, verify_closure, verify_closure_manifest, verify_closure_store,
+    ClosureReport, ExportOptions, VerifyError, export_closure_with, valid_branch, verify_closure,
+    verify_closure_manifest, verify_closure_store, verify_shallow_closure_store,
 };
 use kit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 
@@ -46,6 +48,14 @@ struct ExportArgs {
     /// Export the full ancestry (history mode). Default is snapshot.
     #[arg(long)]
     history: bool,
+    /// Record the branch the root came from, so `kit clone` and `kit
+    /// fetch` can read the export as a remote with that branch.
+    #[arg(long, value_name = "NAME")]
+    branch: Option<String>,
+    /// Leave out everything this commit reaches: an incremental export
+    /// for a receiver that holds it. History mode only; repeatable.
+    #[arg(long, value_name = "REV")]
+    since: Vec<String>,
     /// Output directory (default: `./<short-id>.closure/`).
     #[arg(short = 'o', long = "output", value_name = "DIR")]
     output: Option<PathBuf>,
@@ -105,17 +115,36 @@ fn run_export(opts: &ExportArgs) -> u8 {
         Ok(s) => s,
         Err(e) => return emit_err(&format!("not a kit repo: {e}"), exit::GENERAL_ERROR),
     };
+    if !opts.since.is_empty() && !opts.history {
+        return super::usage_error("--since needs --history: a snapshot has no history to cut");
+    }
+    if let Some(branch) = &opts.branch
+        && !valid_branch(branch)
+    {
+        return super::usage_error(&format!("invalid branch name '{branch}'"));
+    }
     let root = match revspec::resolve_revision(&store, &layout, &opts.revision) {
         Ok(h) => h,
         Err(e) => return emit_err(&format!("{e}"), exit::DATAERR),
+    };
+    let bases = match resolve_all(&store, &layout, &opts.since) {
+        Ok(bases) => bases,
+        Err((rev, e)) => return emit_err(&format!("{rev}: {e}"), exit::DATAERR),
     };
     let mode = if opts.history {
         ClosureMode::History
     } else {
         ClosureMode::Snapshot
     };
-    let export = match export_closure(&store, &root, mode) {
+    let options = ExportOptions {
+        branch: opts.branch.clone(),
+        bases: bases.clone(),
+    };
+    let export = match export_closure_with(&store, &root, mode, &options) {
         Ok(e) => e,
+        Err(e @ VerifyError::ClosureExportOptions(_)) => {
+            return emit_err(&e.to_string(), exit::DATAERR);
+        }
         Err(e) => return emit_err(&e.to_string(), super::prove::map_prove_error(&e)),
     };
     let dir = opts.output.clone().unwrap_or_else(|| {
@@ -149,13 +178,18 @@ fn run_export(opts: &ExportArgs) -> u8 {
         total += pack.len() as u64;
         pack_infos.push((file, key, pack.len() as u64));
     }
-    let n_objects = match object_count(&store, &root, mode) {
+    let n_objects = match object_count(&store, &root, mode, &bases) {
         Ok(n) => n,
         Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
     };
     let mode_str = mode_name(mode);
     if json {
-        emit_export_json(&root, mode_str, &pack_infos, n_objects, manifest_name);
+        let manifest = ManifestInfo {
+            name: manifest_name,
+            branch: opts.branch.as_deref(),
+            since: &bases,
+        };
+        emit_export_json(&root, mode_str, &pack_infos, n_objects, &manifest);
     } else {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(
@@ -166,6 +200,17 @@ fn run_export(opts: &ExportArgs) -> u8 {
         );
     }
     exit::OK
+}
+
+/// Resolve each revision, or name the first that does not resolve.
+fn resolve_all<'a>(
+    store: &ObjectStore,
+    layout: &kit_core::layout::RepoLayout,
+    revs: &'a [String],
+) -> Result<Vec<Hash>, (&'a str, revspec::Error)> {
+    revs.iter()
+        .map(|rev| revspec::resolve_revision(store, layout, rev).map_err(|e| (rev.as_str(), e)))
+        .collect()
 }
 
 fn run_repair_indexes() -> u8 {
@@ -252,11 +297,31 @@ fn run_verify_from(opts: &VerifyArgs, dir: &Path, json: bool) -> u8 {
         Err(msg) => return emit_err(&msg, exit::NOINPUT),
     };
     let refs: Vec<&[u8]> = packs.iter().map(Vec::as_slice).collect();
-    let report = match verify_closure_manifest(&root, &manifest, &refs) {
+    let mut report = match verify_closure_manifest(&root, &manifest, &refs) {
         Ok(r) => r,
         Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
     };
+    if !decoded.bases.is_empty() {
+        complete_from_local_store(&mut report);
+    }
     emit_report(&report, json, true)
+}
+
+/// An incremental export leaves out what its bases reach. Inside a
+/// repository that holds those objects, they complete the walk: drop each
+/// missing id the local store holds. Outside one, or for an object the
+/// store lacks, the id stays missing.
+fn complete_from_local_store(report: &mut ClosureReport) {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Ok(layout) = kit_core::layout::discover(&cwd) else {
+        return;
+    };
+    let Ok(store) = ObjectStore::open(&layout) else {
+        return;
+    };
+    report.missing.retain(|id| !store.contains(id));
 }
 
 fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
@@ -294,6 +359,10 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     } else {
         ClosureMode::Snapshot
     };
+    let boundary = match kit_core::shallow::read(&layout) {
+        Ok(b) => b,
+        Err(e) => return emit_err(&format!("shallow record: {e}"), exit::DATAERR),
+    };
     let report = if opts.show_unreferenced {
         let hashes = match store.iter_object_hashes() {
             Ok(h) => h,
@@ -324,6 +393,23 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
         }
         report.corrupt.sort_by_key(|(id, _)| *id);
         report
+    } else if mode == ClosureMode::History && !boundary.is_empty() {
+        // The history stops at the shallow record: check the record names
+        // exactly the commits whose parents are absent, then the window.
+        let tip = revspec::peel_tags(&store, root);
+        if let Err(v) =
+            kit_core::shallow::check(&[tip], &boundary, |id| match store.read_object(id) {
+                Ok(Object::Commit(c)) => Some(c.parents),
+                Ok(Object::Remix(r)) => Some(r.parents),
+                _ => None,
+            })
+        {
+            return emit_err(&format!("shallow record: {v}"), exit::DATAERR);
+        }
+        match verify_shallow_closure_store(&store, &root, &boundary) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        }
     } else {
         match verify_closure_store(&store, &root, mode) {
             Ok(r) => r,
@@ -424,12 +510,19 @@ fn emit_report_json(report: &ClosureReport, show_unreferenced: bool) {
     let _ = writeln!(stdout, "{}", top.finish());
 }
 
+/// What the export JSON says of the manifest.
+struct ManifestInfo<'a> {
+    name: &'a str,
+    branch: Option<&'a str>,
+    since: &'a [Hash],
+}
+
 fn emit_export_json(
     root: &Hash,
     mode: &str,
     packs: &[(String, Hash, u64)],
     objects: usize,
-    manifest: &str,
+    manifest: &ManifestInfo<'_>,
 ) {
     let mut pack_items = Vec::new();
     for (file, key, bytes) in packs {
@@ -444,7 +537,14 @@ fn emit_export_json(
         .field_str("mode", mode)
         .field_raw("packs", &format!("[{}]", pack_items.join(",")))
         .field_u64("objects", objects as u64)
-        .field_str("manifest", manifest);
+        .field_str("manifest", manifest.name);
+    if let Some(branch) = manifest.branch {
+        top.field_str("branch", branch);
+    }
+    if !manifest.since.is_empty() {
+        let since: Vec<String> = manifest.since.iter().map(to_hex).collect();
+        top.field_raw("since", &format::json_string_array(&since));
+    }
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
 }
@@ -474,12 +574,22 @@ fn prepare_dir(dir: &Path, force: bool) -> Result<(), (String, u8)> {
     Ok(())
 }
 
-fn object_count(store: &ObjectStore, root: &Hash, mode: ClosureMode) -> Result<usize, String> {
-    let set = match mode {
+fn object_count(
+    store: &ObjectStore,
+    root: &Hash,
+    mode: ClosureMode,
+    bases: &[Hash],
+) -> Result<usize, String> {
+    let mut set = match mode {
         ClosureMode::Snapshot => reachable_snapshot(store, root),
         ClosureMode::History => reachable_objects(store, root),
     }
     .map_err(|e| format!("count objects: {e}"))?;
+    for base in bases {
+        for held in reachable_objects(store, base).map_err(|e| format!("count objects: {e}"))? {
+            set.remove(&held);
+        }
+    }
     Ok(set.len())
 }
 

@@ -40,6 +40,13 @@ pub mod ssh_frame {
             ::buffa::alloc::boxed::Box<super::super::super::DownloadPackHeader>,
         ),
         PackChunk(::buffa::alloc::boxed::Box<super::super::super::PackChunk>),
+        DownloadWindow(::buffa::alloc::boxed::Box<super::super::super::DownloadWindow>),
+        DownloadWindowPack(
+            ::buffa::alloc::boxed::Box<super::super::super::DownloadWindowPack>,
+        ),
+        DownloadWindowBoundary(
+            ::buffa::alloc::boxed::Box<super::super::super::DownloadWindowBoundary>,
+        ),
     }
     impl ::buffa::Oneof for Body {}
     impl From<super::super::super::Hello> for Body {
@@ -230,6 +237,37 @@ pub mod ssh_frame {
     }
     impl From<super::super::super::PackChunk> for ::core::option::Option<Body> {
         fn from(v: super::super::super::PackChunk) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindow> for Body {
+        fn from(v: super::super::super::DownloadWindow) -> Self {
+            Self::DownloadWindow(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindow> for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadWindow) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowPack> for Body {
+        fn from(v: super::super::super::DownloadWindowPack) -> Self {
+            Self::DownloadWindowPack(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowPack> for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadWindowPack) -> Self {
+            Self::Some(Body::from(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowBoundary> for Body {
+        fn from(v: super::super::super::DownloadWindowBoundary) -> Self {
+            Self::DownloadWindowBoundary(::buffa::alloc::boxed::Box::new(v))
+        }
+    }
+    impl From<super::super::super::DownloadWindowBoundary>
+    for ::core::option::Option<Body> {
+        fn from(v: super::super::super::DownloadWindowBoundary) -> Self {
             Self::Some(Body::from(v))
         }
     }

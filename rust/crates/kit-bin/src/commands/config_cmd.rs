@@ -44,6 +44,10 @@ struct ConfigOpts {
     /// otherwise be repo-safe.
     #[arg(long, conflicts_with = "local")]
     global: bool,
+    /// Print `<key> <value>` for every key with a value whose name matches
+    /// this regular expression, such as `alias.`.
+    #[arg(long = "get-regexp", value_name = "REGEX", conflicts_with = "unset")]
+    get_regexp: Option<String>,
     /// Optional `<key>` to show, or `<key> <value>` pair to set.
     args: Vec<String>,
 }
@@ -72,6 +76,13 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
     };
     let json = matches!(opts.format, ConfigFormat::Json);
+
+    if let Some(pattern) = opts.get_regexp.as_deref() {
+        if !opts.args.is_empty() {
+            return super::usage_error("kit config --get-regexp takes no positional arguments");
+        }
+        return get_regexp(&layered.merged, pattern);
+    }
 
     if let Some(raw_key) = opts.unset.as_deref() {
         if !opts.args.is_empty() {
@@ -126,18 +137,52 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
+    if let Some(name) = key.strip_prefix(config::ALIAS_PREFIX) {
+        if !config::valid_alias_name(name) {
+            return emit_err(
+                &format!("invalid alias name `{name}`: use letters, digits and `-`"),
+                exit::CONFIG_ERROR,
+            );
+        }
+        if let Err(e) = config::split_alias(value) {
+            return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
+        }
+        if crate::is_builtin(name) {
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "warning: `{name}` is a built-in command, which always wins; the alias is ignored"
+            );
+        }
+    }
     if key == "grant.webauthn_rp"
         && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
     {
         return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
-    let normalized_value = if matches!(key, "fetch.attestations" | "gc.auto" | "push.attestations")
-    {
+    let normalized_value = if matches!(
+        key,
+        "fetch.attestations"
+            | "gc.auto"
+            | "push.attestations"
+            | "rebase.autosquash"
+            | "rebase.updaterefs"
+            | "rerere.autoupdate"
+            | "rerere.enabled"
+    ) {
         let value = value.to_ascii_lowercase();
         if !matches!(value.as_str(), "true" | "false") {
             return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
         }
         value
+    } else if matches!(key, "gc.rerereresolved" | "gc.rerereunresolved") {
+        if value.parse::<u64>().is_err() {
+            return emit_err(
+                &format!("{key} must be a whole number of days"),
+                exit::CONFIG_ERROR,
+            );
+        }
+        value.to_owned()
     } else if key == "user.identity" {
         match config::expand_user_identity(value) {
             Ok(v) => v,
@@ -278,6 +323,12 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "fetch.attestations" => Ok(take_nonempty(&mut cfg.fetch_attestations)),
         "gc.auto" => Ok(take_nonempty(&mut cfg.gc_auto)),
         "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
+        "rebase.autosquash" => Ok(take_nonempty(&mut cfg.rebase_autosquash)),
+        "rebase.updaterefs" => Ok(take_nonempty(&mut cfg.rebase_update_refs)),
+        "rerere.enabled" => Ok(take_nonempty(&mut cfg.rerere_enabled)),
+        "rerere.autoupdate" => Ok(take_nonempty(&mut cfg.rerere_auto_update)),
+        "gc.rerereresolved" => Ok(take_nonempty(&mut cfg.gc_rerere_resolved)),
+        "gc.rerereunresolved" => Ok(take_nonempty(&mut cfg.gc_rerere_unresolved)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -341,6 +392,12 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
         "fetch.attestations" => value.clone_into(&mut cfg.fetch_attestations),
         "gc.auto" => value.clone_into(&mut cfg.gc_auto),
         "push.attestations" => value.clone_into(&mut cfg.push_attestations),
+        "rebase.autosquash" => value.clone_into(&mut cfg.rebase_autosquash),
+        "rebase.updaterefs" => value.clone_into(&mut cfg.rebase_update_refs),
+        "rerere.enabled" => value.clone_into(&mut cfg.rerere_enabled),
+        "rerere.autoupdate" => value.clone_into(&mut cfg.rerere_auto_update),
+        "gc.rerereresolved" => value.clone_into(&mut cfg.gc_rerere_resolved),
+        "gc.rerereunresolved" => value.clone_into(&mut cfg.gc_rerere_unresolved),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -402,8 +459,12 @@ const CONFIG_KEYS: &[&str] = &[
     "durability.objects",
     "fetch.attestations",
     "gc.auto",
+    "gc.rerereresolved",
+    "gc.rerereunresolved",
     "push.attestations",
     "grant.webauthn_rp",
+    "rebase.autosquash",
+    "rebase.updaterefs",
     "http.sslcainfo",
     "key.backend",
     "key.default_ref",
@@ -413,6 +474,8 @@ const CONFIG_KEYS: &[&str] = &[
     "remote_bucket",
     "remote_endpoint",
     "remote_type",
+    "rerere.autoupdate",
+    "rerere.enabled",
     "signer",
     "signing_key",
     "ssh.identity_file",
@@ -423,7 +486,39 @@ const CONFIG_KEYS: &[&str] = &[
     "user.identity",
 ];
 
+/// `kit config --get-regexp <regex>`: each key with a value whose name
+/// matches, as `<key> <value>`. Nothing matching exits 1, as in git.
+fn get_regexp(cfg: &Config, pattern: &str) -> u8 {
+    let matcher = match libkit::grep::Matcher::new(&[pattern], libkit::grep::Options::default()) {
+        Ok(m) => m,
+        Err(e) => return super::usage_error(&format!("invalid --get-regexp pattern: {e}")),
+    };
+    let mut rows: Vec<(String, String)> = CONFIG_KEYS
+        .iter()
+        .filter_map(|k| lookup(cfg, k).map(|v| ((*k).to_owned(), v.into_owned())))
+        .chain(
+            cfg.aliases
+                .iter()
+                .map(|(name, v)| (format!("{}{name}", config::ALIAS_PREFIX), v.clone())),
+        )
+        .filter(|(k, v)| !v.is_empty() && matcher.selects(k.as_bytes()))
+        .collect();
+    rows.sort();
+    if rows.is_empty() {
+        return exit::GENERAL_ERROR;
+    }
+    let mut stdout = std::io::stdout().lock();
+    for (k, v) in rows {
+        let _ = writeln!(stdout, "{k} {}", format::safe_text(&v));
+    }
+    exit::OK
+}
+
 fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
+    if let Some(name) = key.strip_prefix(config::ALIAS_PREFIX) {
+        return config::valid_alias_name(name)
+            .then(|| Cow::Borrowed(cfg.aliases.get(name).map_or("", String::as_str)));
+    }
     if let Some(name) = remote_admission_name(key) {
         return Some(Cow::Borrowed(
             cfg.remote_admission_headers
@@ -445,6 +540,28 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
         "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
         "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),
+        "rebase.autosquash" => Some(Cow::Borrowed(if cfg.rebase_autosquash_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "rebase.updaterefs" => Some(Cow::Borrowed(if cfg.rebase_update_refs_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "rerere.enabled" => Some(Cow::Borrowed(if cfg.rerere_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "rerere.autoupdate" => Some(Cow::Borrowed(if cfg.rerere_auto_update_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
+        "gc.rerereresolved" => Some(Cow::Owned(cfg.gc_rerere_resolved_days().to_string())),
+        "gc.rerereunresolved" => Some(Cow::Owned(cfg.gc_rerere_unresolved_days().to_string())),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

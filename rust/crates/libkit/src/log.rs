@@ -22,20 +22,31 @@
 //! A query with [`Query::all`] set walks from `HEAD`, every local branch,
 //! every remote-tracking ref and every tag instead. [`ref_tips`] lists those
 //! refs.
+//!
+//! A query with [`Query::paths`] keeps only the commits that change an entry
+//! at one of the paths, with the default history simplification of git: a
+//! merge that matches one parent at the paths is left out, and the walk
+//! follows only that parent. [`Query::follow`] continues under the old name
+//! of a renamed file.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::{Commit, Object};
+use kit_core::object::{Commit, EntryMode, Object};
 use kit_core::ops::graph::AncestorError;
-use kit_core::ops::merge::find_merge_base_strict;
+use kit_core::ops::merge::find_merge_base_within;
+use kit_core::ops::similarity::{RenameOptions, detect_renames};
+use kit_core::ops::{DiffKind, diff_trees};
 use kit_core::refs;
+use kit_core::shallow::{self, Boundary, ShallowError};
 use kit_core::store::{ObjectStore, StoreError};
 
 use crate::{Repo, identity, revspec};
 
 pub mod date;
+pub mod lines;
 
 /// The most commits that one walk reads. A walk that would read more fails
 /// with [`Error::TooManyCommits`]. It never returns part of the history.
@@ -82,18 +93,108 @@ pub enum Error {
         /// Why it failed.
         source: StoreError,
     },
+    /// A tree on a limiting path could not be read.
+    #[error("read tree {}: {source}", hash::to_hex(.hash))]
+    ReadTree {
+        /// The tree that failed to read.
+        hash: Hash,
+        /// Why it failed.
+        source: StoreError,
+    },
+    /// The rename of a followed file could not be detected.
+    #[error("rename detection: {0}")]
+    RenameDetection(StoreError),
+    /// The shallow record cannot be read.
+    #[error(transparent)]
+    Shallow(ShallowError),
+    /// The merge base of a symmetric range is beyond the shallow boundary.
+    #[error("the merge base is beyond the shallow boundary; run kit fetch --deepen")]
+    BeyondBoundary,
 }
+
+/// How the patterns of a [`Patterns`] are read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PatternOptions {
+    /// `-F`: take each pattern literally.
+    pub fixed: bool,
+    /// `-i`: ignore case.
+    pub ignore_case: bool,
+}
+
+/// Regular expressions for `--author` or `--grep`, with `^` and `$` at
+/// each line. Two sets are equal when their sources and options are.
+#[derive(Debug, Clone)]
+pub struct Patterns {
+    sources: Vec<String>,
+    options: PatternOptions,
+    compiled: Vec<regex::Regex>,
+}
+
+impl Patterns {
+    /// Compile `sources`.
+    ///
+    /// # Errors
+    /// [`regex::Error`] when a pattern is not valid, or there is none.
+    pub fn new(sources: Vec<String>, options: PatternOptions) -> Result<Self, regex::Error> {
+        if sources.is_empty() {
+            return Err(regex::Error::Syntax("no pattern".to_owned()));
+        }
+        let compiled = sources
+            .iter()
+            .map(|p| {
+                let p = if options.fixed {
+                    regex::escape(p)
+                } else {
+                    p.clone()
+                };
+                regex::RegexBuilder::new(&p)
+                    .case_insensitive(options.ignore_case)
+                    .multi_line(true)
+                    .build()
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            sources,
+            options,
+            compiled,
+        })
+    }
+
+    /// Does any pattern match `text`?
+    #[must_use]
+    pub fn any(&self, text: &str) -> bool {
+        self.compiled.iter().any(|re| re.is_match(text))
+    }
+
+    /// Does every pattern match `text`?
+    #[must_use]
+    pub fn all(&self, text: &str) -> bool {
+        self.compiled.iter().all(|re| re.is_match(text))
+    }
+}
+
+impl PartialEq for Patterns {
+    fn eq(&self, other: &Self) -> bool {
+        self.sources == other.sources && self.options == other.options
+    }
+}
+
+impl Eq for Patterns {}
 
 /// Which commits pass. A commit has to pass every set condition.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // one flag each, as git has them
 pub struct Filter {
-    /// Keep a commit when its author, in the short form or the full form of
-    /// [`identity`], contains this text. The match is a plain substring
-    /// match.
-    pub author: Option<String>,
-    /// Keep a commit when its message contains this text. The match is a
-    /// plain, case-sensitive substring match.
-    pub grep: Option<String>,
+    /// Keep a commit when any pattern matches its author, in the short form
+    /// or the full form of [`identity`].
+    pub author: Option<Patterns>,
+    /// Keep a commit when any pattern matches its message, or every pattern
+    /// with [`Filter::all_match`].
+    pub grep: Option<Patterns>,
+    /// `--all-match`: every `grep` pattern has to match.
+    pub all_match: bool,
+    /// `--invert-grep`: keep the commits that the `grep` patterns reject.
+    pub invert_grep: bool,
     /// Keep a commit made at or after this time, in Unix seconds.
     pub since: Option<u64>,
     /// Keep a commit made at or before this time, in Unix seconds.
@@ -115,16 +216,22 @@ impl Filter {
         if self.until.is_some_and(|until| commit.timestamp > until) {
             return false;
         }
-        if let Some(pattern) = &self.author
-            && !(identity::short(&commit.author).contains(pattern.as_str())
-                || identity::full(&commit.author).contains(pattern.as_str()))
+        if let Some(patterns) = &self.author
+            && !(patterns.any(&identity::short(&commit.author))
+                || patterns.any(&identity::full(&commit.author)))
         {
             return false;
         }
-        if let Some(pattern) = &self.grep
-            && !String::from_utf8_lossy(&commit.message).contains(pattern.as_str())
-        {
-            return false;
+        if let Some(patterns) = &self.grep {
+            let message = String::from_utf8_lossy(&commit.message);
+            let hit = if self.all_match {
+                patterns.all(&message)
+            } else {
+                patterns.any(&message)
+            };
+            if hit == self.invert_grep {
+                return false;
+            }
         }
         true
     }
@@ -146,6 +253,14 @@ pub struct Query {
     pub filter: Filter,
     /// Keep at most this many commits after the filter.
     pub limit: Option<usize>,
+    /// Keep only the commits that change an entry at one of these paths. A
+    /// path has the form of the index: relative to the root, joined with
+    /// `/`. The empty path names the whole tree. An empty list keeps every
+    /// commit.
+    pub paths: Vec<String>,
+    /// Continue under the old name when a commit renames the one path of
+    /// [`Query::paths`]. The caller checks that there is exactly one path.
+    pub follow: bool,
 }
 
 /// One commit of the history.
@@ -155,6 +270,10 @@ pub struct Entry {
     pub hash: Hash,
     /// The commit.
     pub commit: Commit,
+    /// The paths that kept the commit, under the names that it has at this
+    /// commit. A commit that renames a followed file lists the new name and
+    /// the old one. The list is empty when the query has no paths.
+    pub paths: Vec<String>,
 }
 
 /// Walk the history that `query` selects.
@@ -171,7 +290,8 @@ pub struct Entry {
 /// 1,000,000 commits, and [`Error::MergeBase`] when the merge base walk of
 /// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
-    let store = repo.store();
+    let boundary = shallow::read(repo.layout()).map_err(Error::Shallow)?;
+    let store = &Walker::new(repo.store(), &boundary);
     if !query.all
         && let Selection::Range { exclude, include } = parse_selection(query.start.as_deref())
     {
@@ -199,7 +319,7 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
         all_tips(repo)?
     } else {
         let selection = parse_selection(query.start.as_deref());
-        resolve_selection(repo, &selection, MAX_LOG_COMMITS)?
+        resolve_selection(repo, store, &selection, MAX_LOG_COMMITS)?
     };
     let Some((tips, excluded)) = resolved else {
         return Ok(None);
@@ -212,7 +332,7 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
 /// An independent root needs the general exclusion walk instead. Timestamps
 /// are deliberately unused: imported commits may have arbitrarily skewed clocks.
 fn range_is_closed(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tip: Hash,
     base: Hash,
     cap: usize,
@@ -246,7 +366,7 @@ fn range_is_closed(
 /// that frontier is excluded because it is reachable from the excluded tip.
 /// Keep every merge-base path rather than choosing one merge base.
 fn range_cut(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tip: Hash,
     base: Hash,
     cap: usize,
@@ -381,16 +501,33 @@ fn all_tips(repo: &Repo) -> Result<Option<WalkSet>, Error> {
 /// is not a commit or cannot be read. [`Error::TooManyCommits`] when the
 /// history is larger than one walk may read.
 pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Vec<Entry>, Error> {
+    walk_within(
+        &Walker::new(store, &Boundary::default()),
+        tips,
+        first_parent,
+    )
+}
+
+/// [`walk`] over a store that stops at a shallow boundary.
+pub(crate) fn walk_within(
+    store: &Walker<'_>,
+    tips: &[Hash],
+    first_parent: bool,
+) -> Result<Vec<Entry>, Error> {
     let mut entries = Vec::new();
+    let rule = Rule {
+        first_parent,
+        paths: None,
+    };
     walk_ordered(
         store,
         tips,
         &HashSet::new(),
-        first_parent,
+        &rule,
         (0, MAX_LOG_COMMITS),
         |entry| {
             entries.push(entry);
-            true
+            Ok(true)
         },
     )?;
     Ok(entries)
@@ -401,7 +538,7 @@ pub fn walk(store: &ObjectStore, tips: &[Hash], first_parent: bool) -> Result<Ve
 /// of `excluded` count against `max_commits`, so both sides of a range share
 /// one budget.
 fn select(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
     query: &Query,
@@ -412,17 +549,28 @@ fn select(
     if limit == 0 {
         return Ok(entries);
     }
+    let paths = (!query.paths.is_empty()).then(|| PathLimit::new(store, query));
+    let rule = Rule {
+        first_parent: query.first_parent,
+        paths: paths.as_ref(),
+    };
     walk_ordered(
         store,
         tips,
         excluded,
-        query.first_parent,
+        &rule,
         (excluded.len(), max_commits),
-        |entry| {
+        |mut entry| {
+            if let Some(paths) = &paths {
+                if !paths.shows(&entry.commit, query.first_parent)? {
+                    return Ok(true);
+                }
+                entry.paths = paths.after_shown(&entry.commit)?;
+            }
             if query.filter.matches(&entry.commit) {
                 entries.push(entry);
             }
-            entries.len() < limit
+            Ok(entries.len() < limit)
         },
     )?;
     Ok(entries)
@@ -490,6 +638,7 @@ fn parse_selection(text: Option<&str>) -> Selection {
 /// `max_commits` commits.
 fn resolve_selection(
     repo: &Repo,
+    store: &Walker<'_>,
     selection: &Selection,
     max_commits: usize,
 ) -> Result<Option<WalkSet>, Error> {
@@ -508,7 +657,7 @@ fn resolve_selection(
                 return Ok(None);
             };
             if let Some(base) = resolve_tip(repo, Some(exclude))? {
-                collect_excluded(repo.store(), base, &mut excluded, max_commits)?;
+                collect_excluded(store, base, &mut excluded, max_commits)?;
             }
             vec![include]
         }
@@ -518,9 +667,9 @@ fn resolve_selection(
             // Leave out the common ancestors, which are the ancestors of the
             // merge base.
             if let (Some(a), Some(b)) = (a, b)
-                && let Some(base) = merge_base(repo.store(), a, b)?
+                && let Some(base) = merge_base(store, a, b)?
             {
-                collect_excluded(repo.store(), base, &mut excluded, max_commits)?;
+                collect_excluded(store, base, &mut excluded, max_commits)?;
             }
             let tips: Vec<Hash> = a.into_iter().chain(b).collect();
             if tips.is_empty() {
@@ -538,8 +687,9 @@ fn resolve_selection(
 /// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of either
 /// history cannot be read or is another kind of object, and
 /// [`Error::MergeBase`] when the walk reaches its limit.
-fn merge_base(store: &ObjectStore, a: Hash, b: Hash) -> Result<Option<Hash>, Error> {
-    find_merge_base_strict(store, a, b).map_err(|e| match e {
+fn merge_base(store: &Walker<'_>, a: Hash, b: Hash) -> Result<Option<Hash>, Error> {
+    find_merge_base_within(store.objects, store.boundary, a, b).map_err(|e| match e {
+        AncestorError::BeyondShallowBoundary => Error::BeyondBoundary,
         AncestorError::Unreadable { hash, source } => Error::ReadCommit { hash, source },
         AncestorError::NotACommit(hash) => Error::NotACommit(hash),
         AncestorError::Limit(limit) => Error::MergeBase(limit),
@@ -604,7 +754,7 @@ impl Eq for HeapItem {}
 /// when `excluded` would hold more than `max_commits` commits, because a
 /// part of the set would let excluded commits through.
 fn collect_excluded(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     base: Hash,
     excluded: &mut HashSet<Hash>,
     max_commits: usize,
@@ -623,8 +773,45 @@ fn collect_excluded(
     Ok(())
 }
 
-/// Read the commit `hash`.
-fn read_commit(store: &ObjectStore, hash: Hash) -> Result<Commit, Error> {
+/// The object store as a history walk sees it: a commit in the shallow
+/// record has no parents (SPEC-SHALLOW §6). Everything else reads through
+/// to the store.
+pub(crate) struct Walker<'a> {
+    objects: &'a ObjectStore,
+    boundary: &'a Boundary,
+}
+
+impl<'a> Walker<'a> {
+    /// The walk over `objects` that stops at `boundary`.
+    pub(crate) fn new(objects: &'a ObjectStore, boundary: &'a Boundary) -> Self {
+        Self { objects, boundary }
+    }
+
+    /// Whether `commit` is in the shallow record.
+    pub(crate) fn at_boundary(&self, commit: &Hash) -> bool {
+        self.boundary.contains(commit)
+    }
+}
+
+impl std::ops::Deref for Walker<'_> {
+    type Target = ObjectStore;
+
+    fn deref(&self) -> &ObjectStore {
+        self.objects
+    }
+}
+
+/// Read the commit `hash`, with no parents when it is in the shallow record.
+fn read_commit(store: &Walker<'_>, hash: Hash) -> Result<Commit, Error> {
+    let mut commit = read_commit_raw(store, hash)?;
+    if store.at_boundary(&hash) {
+        commit.parents.clear();
+    }
+    Ok(commit)
+}
+
+/// Read the commit `hash` as stored.
+fn read_commit_raw(store: &ObjectStore, hash: Hash) -> Result<Commit, Error> {
     match store.read_object(&hash) {
         Ok(Object::Commit(commit)) => Ok(commit),
         Ok(_) => Err(Error::NotACommit(hash)),
@@ -632,21 +819,198 @@ fn read_commit(store: &ObjectStore, hash: Hash) -> Result<Commit, Error> {
     }
 }
 
-/// The parents of `commit` that the walk follows.
-fn walked_parents<'a>(
-    commit: &'a Commit,
-    excluded: &'a HashSet<Hash>,
+/// How the walk picks the parents of a commit.
+struct Rule<'a> {
+    /// Follow only the first parent.
     first_parent: bool,
-) -> impl Iterator<Item = Hash> + 'a {
-    let parents: &[Hash] = if first_parent {
+    /// Simplify the history at the paths of a query.
+    paths: Option<&'a PathLimit<'a>>,
+}
+
+/// The parents that count for `commit`: all of them, or the first one alone.
+fn counted_parents(commit: &Commit, first_parent: bool) -> &[Hash] {
+    if first_parent {
         commit.parents.get(..1).unwrap_or(&[])
     } else {
         &commit.parents
-    };
-    parents
+    }
+}
+
+/// The parents of `commit` that the walk follows. With paths, a merge that
+/// matches a parent at the paths is followed through that parent alone.
+fn walked_parents(
+    commit: &Commit,
+    excluded: &HashSet<Hash>,
+    rule: &Rule<'_>,
+) -> Result<Vec<Hash>, Error> {
+    let parents = counted_parents(commit, rule.first_parent);
+    if let Some(paths) = rule.paths
+        && parents.len() > 1
+        && let Some(same) = paths.same_parent(commit, parents)?
+    {
+        return Ok(if excluded.contains(&same) {
+            Vec::new()
+        } else {
+            vec![same]
+        });
+    }
+    Ok(parents
         .iter()
         .copied()
         .filter(|parent| !excluded.contains(parent))
+        .collect())
+}
+
+/// The mode and id of a tree entry, or `None` where a tree holds nothing.
+type Found = Option<(EntryMode, Hash)>;
+
+/// The paths of a query, with the trees and entries read so far.
+///
+/// Each cache grows by at most one entry per commit, tree and path that the
+/// walk reads, and the walk reads at most `MAX_LOG_COMMITS` commits.
+struct PathLimit<'s> {
+    store: &'s ObjectStore,
+    /// The paths under the names that the walk reached. `--follow` replaces
+    /// the one path with the old name at a rename.
+    paths: RefCell<Vec<String>>,
+    follow: bool,
+    trees: RefCell<HashMap<Hash, Hash>>,
+    entries: RefCell<HashMap<(Hash, String), Found>>,
+}
+
+impl<'s> PathLimit<'s> {
+    fn new(store: &'s ObjectStore, query: &Query) -> Self {
+        Self {
+            store,
+            paths: RefCell::new(query.paths.clone()),
+            follow: query.follow,
+            trees: RefCell::new(HashMap::new()),
+            entries: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The tree of the commit `hash`.
+    fn tree(&self, hash: Hash) -> Result<Hash, Error> {
+        if let Some(tree) = self.trees.borrow().get(&hash) {
+            return Ok(*tree);
+        }
+        let tree = read_commit_raw(self.store, hash)?.tree_hash;
+        self.trees.borrow_mut().insert(hash, tree);
+        Ok(tree)
+    }
+
+    /// Read the tree `hash`.
+    fn read_tree(&self, hash: Hash) -> Result<Option<kit_core::object::Tree>, Error> {
+        match self.store.read_object(&hash) {
+            Ok(Object::Tree(tree)) => Ok(Some(tree)),
+            Ok(_) => Ok(None),
+            Err(source) => Err(Error::ReadTree { hash, source }),
+        }
+    }
+
+    /// The mode and id of the entry at `path` in the tree `root`. The empty
+    /// path names the root itself, and an empty root holds nothing.
+    fn entry(&self, root: Hash, path: &str) -> Result<Found, Error> {
+        let key = (root, path.to_owned());
+        if let Some(found) = self.entries.borrow().get(&key) {
+            return Ok(*found);
+        }
+        let found = if path.is_empty() {
+            self.read_tree(root)?
+                .filter(|tree| !tree.entries.is_empty())
+                .map(|_| (EntryMode::Tree, root))
+        } else {
+            let mut current = Some((EntryMode::Tree, root));
+            for part in path.split('/') {
+                current = match current {
+                    Some((EntryMode::Tree, hash)) => self.read_tree(hash)?.and_then(|tree| {
+                        tree.entries
+                            .iter()
+                            .find(|e| e.name == part.as_bytes())
+                            .map(|e| (e.mode, e.object_hash))
+                    }),
+                    _ => None,
+                };
+            }
+            current
+        };
+        self.entries.borrow_mut().insert(key, found);
+        Ok(found)
+    }
+
+    /// Do the trees `a` and `b` hold the same entry at every path? A missing
+    /// tree holds nothing.
+    fn same(&self, a: Hash, b: Option<Hash>) -> Result<bool, Error> {
+        if Some(a) == b {
+            return Ok(true);
+        }
+        let paths = self.paths.borrow().clone();
+        for path in &paths {
+            let other = match b {
+                Some(b) => self.entry(b, path)?,
+                None => None,
+            };
+            if self.entry(a, path)? != other {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The first of `parents` that matches `commit` at the paths.
+    fn same_parent(&self, commit: &Commit, parents: &[Hash]) -> Result<Option<Hash>, Error> {
+        for parent in parents {
+            if self.same(commit.tree_hash, Some(self.tree(*parent)?))? {
+                return Ok(Some(*parent));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Does `commit` change an entry at the paths? A commit without parents
+    /// changes the entries that it holds. A merge changes them when it
+    /// matches none of its parents.
+    fn shows(&self, commit: &Commit, first_parent: bool) -> Result<bool, Error> {
+        let parents = counted_parents(commit, first_parent);
+        if parents.is_empty() {
+            return Ok(!self.same(commit.tree_hash, None)?);
+        }
+        Ok(self.same_parent(commit, parents)?.is_none())
+    }
+
+    /// The paths that kept a shown commit. With `--follow`, a commit that
+    /// adds the followed file by renaming it switches the walk to the old
+    /// name, and keeps both names.
+    fn after_shown(&self, commit: &Commit) -> Result<Vec<String>, Error> {
+        let paths = self.paths.borrow().clone();
+        let [path] = paths.as_slice() else {
+            return Ok(paths);
+        };
+        let Some(parent) = commit.parents.first() else {
+            return Ok(paths);
+        };
+        let parent_tree = self.tree(*parent)?;
+        if !self.follow
+            || self.entry(commit.tree_hash, path)?.is_none()
+            || self.entry(parent_tree, path)?.is_some()
+        {
+            return Ok(paths);
+        }
+        let mut changes = diff_trees(self.store, Some(parent_tree), Some(commit.tree_hash))
+            .map_err(Error::RenameDetection)?
+            .entries;
+        detect_renames(self.store, &mut changes, &RenameOptions::default())
+            .map_err(Error::RenameDetection)?;
+        let old = changes
+            .into_iter()
+            .find(|change| change.kind == DiffKind::Renamed && change.path == *path)
+            .and_then(|change| change.old_path);
+        let Some(old) = old else {
+            return Ok(paths);
+        };
+        *self.paths.borrow_mut() = vec![old.clone()];
+        Ok(vec![path.clone(), old])
+    }
 }
 
 /// Pass the commits reachable from `tips` and not in `excluded` to `emit`,
@@ -672,12 +1036,12 @@ fn walked_parents<'a>(
 /// [`Error::TooManyCommits`] when the walk would read more commits than the
 /// budget allows. Otherwise a read error of a commit.
 fn walk_ordered(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (mut spent, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<(), Error> {
     let mut tips = tips.to_vec();
     loop {
@@ -685,7 +1049,7 @@ fn walk_ordered(
             store,
             &tips,
             excluded,
-            first_parent,
+            rule,
             (spent, max_commits),
             &mut emit,
         )? {
@@ -700,22 +1064,15 @@ fn walk_ordered(
 
 /// Stream a chain, then return the next proven frontier after a merge region.
 fn walk_segment(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (spent, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<Option<(Hash, usize)>, Error> {
     let [tip] = *tips else {
-        return emit_sorted(
-            store,
-            tips,
-            excluded,
-            first_parent,
-            (spent, max_commits),
-            emit,
-        );
+        return emit_sorted(store, tips, excluded, rule, (spent, max_commits), emit);
     };
     let mut streamed = spent;
     let mut next = Some(tip);
@@ -724,21 +1081,19 @@ fn walk_segment(
             return Ok(None);
         }
         let commit = read_commit(store, hash)?;
-        let (parent, merge) = {
-            let mut parents = walked_parents(&commit, excluded, first_parent);
-            (parents.next(), parents.next().is_some())
-        };
+        let walked = walked_parents(&commit, excluded, rule)?;
+        let (parent, merge) = (walked.first().copied(), walked.len() > 1);
         if streamed >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
-        let parents: Vec<_> = if merge {
-            walked_parents(&commit, excluded, first_parent).collect()
-        } else {
-            Vec::new()
-        };
+        let parents = if merge { walked } else { Vec::new() };
         next = parent;
-        if !emit(Entry { hash, commit }) {
+        if !emit(Entry {
+            hash,
+            commit,
+            paths: Vec::new(),
+        })? {
             return Ok(None);
         }
         if merge {
@@ -746,7 +1101,7 @@ fn walk_segment(
                 store,
                 &parents,
                 excluded,
-                first_parent,
+                rule,
                 (streamed, max_commits),
                 emit,
             );
@@ -764,12 +1119,12 @@ fn walk_segment(
 /// [`Error::TooManyCommits`] when the walk reaches more commits than the
 /// cap allows. Otherwise a read error of a commit.
 fn emit_sorted(
-    store: &ObjectStore,
+    store: &Walker<'_>,
     tips: &[Hash],
     excluded: &HashSet<Hash>,
-    first_parent: bool,
+    rule: &Rule<'_>,
     (streamed, max_commits): (usize, usize),
-    mut emit: impl FnMut(Entry) -> bool,
+    mut emit: impl FnMut(Entry) -> Result<bool, Error>,
 ) -> Result<Option<(Hash, usize)>, Error> {
     // Discover the region in parent order, deduplicating queued candidates.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
@@ -795,7 +1150,7 @@ fn emit_sorted(
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         let commit = read_commit(store, hash)?;
-        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
+        let parents = walked_parents(&commit, excluded, rule)?;
         closed &= !parents.is_empty();
         for parent in parents {
             if queued.insert(parent) {
@@ -847,7 +1202,8 @@ fn emit_sorted(
         if !emit(Entry {
             hash: item.hash,
             commit,
-        }) {
+            paths: Vec::new(),
+        })? {
             return Ok(None);
         }
     }
@@ -857,6 +1213,12 @@ fn emit_sorted(
 #[cfg(test)]
 mod tests {
     use kit_core::object::Identity;
+
+    /// A walk over `store` with no shallow boundary.
+    fn walker(store: &ObjectStore) -> Walker<'_> {
+        static EMPTY: Boundary = Boundary::EMPTY;
+        Walker::new(store, &EMPTY)
+    }
 
     use super::*;
 
@@ -880,6 +1242,14 @@ mod tests {
         Filter::default()
     }
 
+    fn patterns(sources: &[&str]) -> Patterns {
+        Patterns::new(
+            sources.iter().map(|s| (*s).to_owned()).collect(),
+            PatternOptions::default(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn an_empty_filter_passes_every_commit() {
         let c = commit_for(vec![], alice(), "m", 100);
@@ -887,10 +1257,10 @@ mod tests {
     }
 
     #[test]
-    fn author_is_a_substring_of_the_short_or_the_full_form() {
+    fn author_matches_the_short_or_the_full_form() {
         let c = commit_for(vec![], alice(), "m", 100);
         let by = |pattern: &str| Filter {
-            author: Some(pattern.to_owned()),
+            author: Some(patterns(&[pattern])),
             ..filter()
         };
         assert!(by("alice").matches(&c));
@@ -905,12 +1275,65 @@ mod tests {
     fn grep_checks_the_message() {
         let c = commit_for(vec![], alice(), "fix: widget overflow", 100);
         let by = |pattern: &str| Filter {
-            grep: Some(pattern.to_owned()),
+            grep: Some(patterns(&[pattern])),
             ..filter()
         };
         assert!(by("widget").matches(&c));
         assert!(!by("gadget").matches(&c));
         assert!(!by("WIDGET").matches(&c));
+        assert!(by("^fix:").matches(&c));
+        assert!(!by("^widget").matches(&c));
+    }
+
+    #[test]
+    fn grep_anchors_per_line_and_honors_the_flags() {
+        let c = commit_for(vec![], alice(), "title\n\nbody line v1.2", 100);
+        let with = |sources: &[&str], options: PatternOptions, all_match, invert_grep| Filter {
+            grep: Some(
+                Patterns::new(sources.iter().map(|s| (*s).to_owned()).collect(), options).unwrap(),
+            ),
+            all_match,
+            invert_grep,
+            ..filter()
+        };
+        let plain = PatternOptions::default();
+        assert!(with(&["^body"], plain, false, false).matches(&c));
+        assert!(with(&["v1.2$"], plain, false, false).matches(&c));
+        let fixed = PatternOptions {
+            fixed: true,
+            ..plain
+        };
+        assert!(!with(&["v1x2"], fixed, false, false).matches(&c));
+        assert!(with(&["v1.2"], plain, false, false).matches(&c));
+        assert!(with(&["v1.2"], fixed, false, false).matches(&c));
+        let icase = PatternOptions {
+            ignore_case: true,
+            ..plain
+        };
+        assert!(with(&["^TITLE"], icase, false, false).matches(&c));
+        assert!(with(&["title", "nope"], plain, false, false).matches(&c));
+        assert!(!with(&["title", "nope"], plain, true, false).matches(&c));
+        assert!(!with(&["title"], plain, false, true).matches(&c));
+        assert!(with(&["nope"], plain, false, true).matches(&c));
+    }
+
+    #[test]
+    fn patterns_compare_by_source_and_refuse_bad_input() {
+        let a = patterns(&["x"]);
+        assert_eq!(a, patterns(&["x"]));
+        assert_ne!(a, patterns(&["y"]));
+        assert!(Patterns::new(vec!["(".to_owned()], PatternOptions::default()).is_err());
+        assert!(Patterns::new(Vec::new(), PatternOptions::default()).is_err());
+        assert!(
+            Patterns::new(
+                vec!["(".to_owned()],
+                PatternOptions {
+                    fixed: true,
+                    ..PatternOptions::default()
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1004,7 +1427,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let tip = put(&store, vec![[1; 32], [2; 32]], 0, 0);
         let got = select(
-            &store,
+            &walker(&store),
             &[tip],
             &HashSet::new(),
             &query_with(Some(1), false),
@@ -1022,7 +1445,7 @@ mod tests {
         let b = put(&store, vec![missing], 2, 1);
         let tip = put(&store, vec![a, b], 0, 2);
         let got = select(
-            &store,
+            &walker(&store),
             &[tip],
             &HashSet::new(),
             &query_with(Some(3), false),
@@ -1042,19 +1465,19 @@ mod tests {
         let y = put(&store, vec![b, a], 2, 4);
         let tip = put(&store, vec![x, y], 1, 5);
         for tip in [a, x, tip] {
-            assert!(range_is_closed(&store, tip, base, 10, false).unwrap());
+            assert!(range_is_closed(&walker(&store), tip, base, 10, false).unwrap());
             for first_parent in [false, true] {
                 for limit in [None, Some(0), Some(1), Some(3)] {
                     let query = query_with(limit, first_parent);
                     let cut = HashSet::from([base]);
-                    let got = select(&store, &[tip], &cut, &query, 10).unwrap();
+                    let got = select(&walker(&store), &[tip], &cut, &query, 10).unwrap();
                     assert_eq!(ids(&got), reference(&store, &[tip], &cut, &query));
                 }
             }
         }
         let root = put(&store, vec![], 0, 6);
         let open = put(&store, vec![a, root], 0, 7);
-        assert!(!range_is_closed(&store, open, base, 10, false).unwrap());
+        assert!(!range_is_closed(&walker(&store), open, base, 10, false).unwrap());
     }
 
     #[test]
@@ -1065,14 +1488,17 @@ mod tests {
         let none = HashSet::new();
         for first_parent in [false, true] {
             let all = query_with(None, first_parent);
-            let err = select(&store, &tip, &none, &all, 4).unwrap_err();
+            let err = select(&walker(&store), &tip, &none, &all, 4).unwrap_err();
             assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
             assert!(err.to_string().contains("more than 4 commits"));
-            assert_eq!(select(&store, &tip, &none, &all, 5).unwrap().len(), 5);
+            assert_eq!(
+                select(&walker(&store), &tip, &none, &all, 5).unwrap().len(),
+                5
+            );
             // A limit that the walk reaches before the cap is a complete
             // answer.
             let two = query_with(Some(2), first_parent);
-            let first = select(&store, &tip, &none, &two, 4).unwrap();
+            let first = select(&walker(&store), &tip, &none, &two, 4).unwrap();
             assert_eq!(ids(&first), [hashes[4], hashes[3]]);
         }
     }
@@ -1089,12 +1515,12 @@ mod tests {
         let none = HashSet::new();
         let all = query_with(None, false);
         for cap in 0..5 {
-            let err = select(&store, &[tip], &none, &all, cap).unwrap_err();
+            let err = select(&walker(&store), &[tip], &none, &all, cap).unwrap_err();
             assert!(matches!(err, Error::TooManyCommits { limit } if limit == cap));
         }
-        let walked = select(&store, &[tip], &none, &all, 5).unwrap();
+        let walked = select(&walker(&store), &[tip], &none, &all, 5).unwrap();
         assert_eq!(ids(&walked), [tip, merge, side, a, root]);
-        let two_tips = select(&store, &[a, side], &none, &all, 2).unwrap_err();
+        let two_tips = select(&walker(&store), &[a, side], &none, &all, 2).unwrap_err();
         assert!(matches!(two_tips, Error::TooManyCommits { limit: 2 }));
     }
 
@@ -1103,10 +1529,10 @@ mod tests {
         let (_dir, store) = temp_store();
         let hashes = chain(&store, 5);
         let mut excluded = HashSet::new();
-        let err = collect_excluded(&store, hashes[4], &mut excluded, 4).unwrap_err();
+        let err = collect_excluded(&walker(&store), hashes[4], &mut excluded, 4).unwrap_err();
         assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
         let mut excluded = HashSet::new();
-        assert!(collect_excluded(&store, hashes[4], &mut excluded, 5).is_ok());
+        assert!(collect_excluded(&walker(&store), hashes[4], &mut excluded, 5).is_ok());
         assert_eq!(excluded.len(), 5);
     }
 
@@ -1124,8 +1550,8 @@ mod tests {
             // Each side alone fits a cap of 5: three excluded commits, and at
             // most three included ones.
             let mut excluded = HashSet::new();
-            collect_excluded(&store, hashes[2], &mut excluded, cap).unwrap();
-            let result = select(&store, &[tip], &excluded, &all, cap);
+            collect_excluded(&walker(&store), hashes[2], &mut excluded, cap).unwrap();
+            let result = select(&walker(&store), &[tip], &excluded, &all, cap);
             if fits {
                 assert!(result.is_ok(), "{result:?}");
             } else {
@@ -1135,10 +1561,10 @@ mod tests {
         }
         // The sorted walk of two tips counts the excluded side too.
         let mut excluded = HashSet::new();
-        collect_excluded(&store, hashes[1], &mut excluded, 4).unwrap();
-        let err = select(&store, &[hashes[5], hashes[4]], &excluded, &all, 4).unwrap_err();
+        collect_excluded(&walker(&store), hashes[1], &mut excluded, 4).unwrap();
+        let err = select(&walker(&store), &[hashes[5], hashes[4]], &excluded, &all, 4).unwrap_err();
         assert!(matches!(err, Error::TooManyCommits { limit: 4 }), "{err:?}");
-        assert!(select(&store, &[hashes[5], hashes[4]], &excluded, &all, 6).is_ok());
+        assert!(select(&walker(&store), &[hashes[5], hashes[4]], &excluded, &all, 6).is_ok());
     }
 
     /// root - fork - mid - good, and fork - side; tip = merge(side, good).
@@ -1167,16 +1593,16 @@ mod tests {
     fn an_excluded_side_with_an_unreadable_commit_fails() {
         let (_dir, store, [.., good, side, tip]) = range_fixture();
         let mut excluded = HashSet::new();
-        assert!(collect_excluded(&store, good, &mut excluded, 100).is_ok());
+        assert!(collect_excluded(&walker(&store), good, &mut excluded, 100).is_ok());
         let all = query_with(None, false);
-        let range = select(&store, &[tip], &excluded, &all, 100).unwrap();
+        let range = select(&walker(&store), &[tip], &excluded, &all, 100).unwrap();
         assert_eq!(ids(&range), [tip, side]);
 
         // Without mid the excluded side would lack fork and root, and
         // `good..tip` would print them.
         let (dir, store, [_, _, mid, good, ..]) = range_fixture();
         std::fs::remove_file(object_path(&dir, &mid)).unwrap();
-        let err = collect_excluded(&store, good, &mut HashSet::new(), 100).unwrap_err();
+        let err = collect_excluded(&walker(&store), good, &mut HashSet::new(), 100).unwrap_err();
         assert!(
             matches!(err, Error::ReadCommit { hash, .. } if hash == mid),
             "{err:?}"
@@ -1189,7 +1615,7 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;
         std::fs::write(&path, &bytes).unwrap();
-        let err = collect_excluded(&store, good, &mut HashSet::new(), 100).unwrap_err();
+        let err = collect_excluded(&walker(&store), good, &mut HashSet::new(), 100).unwrap_err();
         assert!(
             matches!(err, Error::ReadCommit { hash, .. } if hash == mid),
             "{err:?}"
@@ -1206,7 +1632,7 @@ mod tests {
             )
             .unwrap();
         let above = put(&store, vec![root, not_a_commit], 7, 6);
-        let err = collect_excluded(&store, above, &mut HashSet::new(), 100).unwrap_err();
+        let err = collect_excluded(&walker(&store), above, &mut HashSet::new(), 100).unwrap_err();
         assert!(
             matches!(err, Error::NotACommit(hash) if hash == not_a_commit),
             "{err:?}"
@@ -1355,6 +1781,7 @@ mod tests {
             let (_dir, store) = temp_store();
             let n = 1 + rng.below(40);
             let hashes = random_history(&store, &mut rng, n);
+            let walk = walker(&store);
             let tip = if rng.chance(50) {
                 hashes[n - 1]
             } else {
@@ -1362,12 +1789,12 @@ mod tests {
             };
             let other = hashes[rng.below(n)];
             let mut base = HashSet::new();
-            collect_excluded(&store, other, &mut base, usize::MAX).unwrap();
+            collect_excluded(&walk, other, &mut base, usize::MAX).unwrap();
             assert_eq!(base, lenient_excluded(&store, other), "seed {seed}");
-            if let Some(cut) = range_cut(&store, tip, other, 100).unwrap() {
+            if let Some(cut) = range_cut(&walk, tip, other, 100).unwrap() {
                 for first_parent in [false, true] {
                     let q = query_with(None, first_parent);
-                    let got = select(&store, &[tip], &cut, &q, usize::MAX).unwrap();
+                    let got = select(&walk, &[tip], &cut, &q, usize::MAX).unwrap();
                     assert_eq!(
                         ids(&got),
                         reference(&store, &[tip], &base, &q),
@@ -1376,10 +1803,10 @@ mod tests {
                 }
             }
             for first_parent in [false, true] {
-                if range_is_closed(&store, tip, other, usize::MAX, first_parent).unwrap() {
+                if range_is_closed(&walk, tip, other, usize::MAX, first_parent).unwrap() {
                     let q = query_with(None, first_parent);
                     let cut =
-                        select(&store, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
+                        select(&walk, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
                     assert_eq!(
                         ids(&cut),
                         reference(&store, &[tip], &base, &q),
@@ -1424,9 +1851,10 @@ mod tests {
                                 first_parent,
                                 filter: filter.clone(),
                                 limit,
+                                ..Query::default()
                             };
                             let expected = reference(&store, tips, excluded, &query);
-                            let got = select(&store, tips, excluded, &query, usize::MAX).unwrap();
+                            let got = select(&walk, tips, excluded, &query, usize::MAX).unwrap();
                             assert_eq!(ids(&got), expected, "seed {seed}");
                             compared += 1;
                         }
@@ -1436,9 +1864,9 @@ mod tests {
                     // exactly when it would read more.
                     let all = query_with(None, first_parent);
                     let size = reference(&store, tips, excluded, &all).len() + excluded.len();
-                    assert!(select(&store, tips, excluded, &all, size).is_ok());
+                    assert!(select(&walk, tips, excluded, &all, size).is_ok());
                     if size > excluded.len() {
-                        let err = select(&store, tips, excluded, &all, size - 1).unwrap_err();
+                        let err = select(&walk, tips, excluded, &all, size - 1).unwrap_err();
                         assert!(
                             matches!(err, Error::TooManyCommits { limit } if limit == size - 1),
                             "seed {seed}"

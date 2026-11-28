@@ -38,11 +38,11 @@ from recurring.
 | `fuzz_targets/verify_span.rs` | `verify::span::{encode_span,verify_disclosure_span}` (a newly encoded committed span verifies; its mutated commit id rejects; arbitrary input never panics) |
 | `fuzz_targets/ed25519_batch.rs` | `sign::verify_ed25519_batch` / `sign::verify_ed25519` (raw, honest and bit-flipped entries; the batch accepts exactly when every entry passes the single check) |
 | `fuzz_targets/pack_entries.rs` | `pack::PackEntries` (never panics on adversarial pack bytes; a pack `PackReader::read` accepts also parses as `PackEntries` with the same entry count) |
-| `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent) |
+| `fuzz_targets/verify_closure.rs` | `verify::verify_closure` / `verify::verify_closure_packs` / `verify::verify_closure_manifest` / `verify::export_closure` (never panics; a freshly exported snapshot closure verifies; a mutated manifest rejects cleanly; raw adversarial bytes fed directly as pack buffers — whole and split into two — to `verify_closure_packs`/`verify_closure_manifest` never panic and any `Ok` report is internally consistent; raw bytes that decode as a manifest, version 1 or 2, re-encode to the same bytes; a version 2 manifest with a flipped byte never decodes) |
 | `fuzz_targets/envelope_decode.rs` | `kit_attest::envelope::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/name_rules.rs` | `TreeEntry::validate_name`, `index::validate_index_path`, `refs::validate_ref_name`, `refs::validate_ref_name_grammar`, `refs::check_new_ref_name` (never panic; a name that breaks a stated rule is refused; an index path holds only valid entry names; a new ref name is accepted exactly when `validate_ref_name` accepts it) |
 | `fuzz_targets/fetch_cursor_record.rs` | `kit_sync::cursor::parse` (an accepted record survives a write and a parse) |
-| `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
+| `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip), the `PREVIOUS_HEAD` and `HEAD_HISTORY` parsers (an accepted record holds at most 16 entries and its complete lines re-encode to the input, less a torn tail with no newline) |
 | `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
 | `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/conflict_state_decode.rs` | `ops::conflict_state::deserialize_conflicts` (an accepted list survives a serialize and deserialize round trip) |
@@ -53,7 +53,7 @@ from recurring.
 | `fuzz_targets/ignore_parse.rs` | `ignore::parse` / `ignore::parse_checked` / `ops::restore::parse_sparse_patterns` (never panics on any text; the checked parse agrees with the plain parse and refuses only past the pattern count or length limit) |
 | `fuzz_targets/grant_parse.rs` | `Grant::parse` / `SignedHeader::parse` (an accepted input re-encodes to exactly itself) |
 | `fuzz_targets/epoch_visibility_parse.rs` | `EpochStatement::parse` / `VisibilityStatement::parse` / `UrlTokenStatement::parse` / `TokenTarget::parse`, the URL token verifier, the stateless grant verifiers and the `webauthn-p256` blob and client data parsers |
-| `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key) |
+| `fuzz_targets/config_parse.rs` | `libkit::config::apply_text` (a repository config never sets a user-scoped key, aliases included) and `libkit::config::split_alias` (an accepted value's arguments, each quoted, split back to the same arguments) |
 | `fuzz_targets/stash_list.rs` | `ops::stash::deserialize_list` (an accepted list re-encodes to exactly itself) |
 | `fuzz_targets/bridge_map.rs` | The `kit-git-bridge` map and ref-state loaders (never panic on any file content) |
 | `fuzz_targets/pack_cursor_decode.rs` | `pack::window::WindowCursor::from_bytes` (an accepted cursor re-encodes to exactly itself) |
@@ -70,12 +70,18 @@ from recurring.
 | `fuzz_targets/revspec_parse.rs` | `libkit::revspec::resolve_revision` (never panics on any text; a resolved hash names a stored object; `HEAD`, `main~2` and `v1^0` keep their answers) |
 | `fuzz_targets/log_parse.rs` | `libkit::log::date::parse` and `libkit::log::history` (a date parses the same twice, and `@<n>` reads as `n`; a walked history has no repeated commit, names only stored commits and never shows a parent before a child) |
 | `fuzz_targets/diff_args.rs` | `libkit::diff::compute` (never panics on any revisions or paths with any flags; the patch body and the change counts of every entry never panic; `HEAD~1 HEAD` keeps its answer) |
+| `fuzz_targets/rename_score.rs` | `kit_core::ops::parse_rename_score` and `detect_renames` (a threshold parses the same twice and stays at most `MAX_SCORE`, and `<n>%` reads as `n`; one deleted and one added blob make at most one pair, at most 100%, identical content at 100%, the same score with the sides swapped and with the blob in two chunks; none panics) |
 | `fuzz_targets/blame_line_range.rs` | `libkit::blame::line_range::parse` and `libkit::blame::blame` (a range parses the same twice and sits inside the file; a blame never panics on any range, revision or revision to skip, with or without the reverse walk; `-L 2` on `a.txt` keeps its answer) |
 | `fuzz_targets/branch_glob.rs` | `libkit::branch::glob_match` (never panics on any pattern or name; a match gives the same answer twice; `*` matches every name; a name with no metacharacter matches itself) |
 | `fuzz_targets/push_refspec.rs` | `libkit::push::parse_refspec` (never panics on any text; a refspec gives the same answer twice; an accepted refspec has two pushable branch names, no wildcard and no leading `+`, and its names joined by `:` parse back to it) |
 | `fuzz_targets/index_path_arg.rs` | `libkit::pathspec::index_path_for_arg` (never panics on a relative argument; an argument gives the same answer twice; an answer is a valid index path with no empty, `.` or `..` component; a plain name gives itself) |
 | `fuzz_targets/identity_parse.rs` | `libkit::identity::parse_author` and `libkit::identity::decode_config` (never panic on any text; a text gives the same answer twice; a key that parses has 32 bytes; a DID key that parses is valid; the full form of a key or a DID key parses back to itself) |
-| `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one action for each commit, names only listed commits and never starts with a squash or a fixup; a full hash names its commit) |
+| `fuzz_targets/rebase_todo_parse.rs` | `libkit::rebase::parse_todo` (never panics on any text; a todo list reads the same twice; a result has one commit for each step but `exec` and one command for each `exec` and one valid branch for each `update-ref`, names only listed commits, never folds its first commit and holds only one-line commands; a full hash names its commit) |
+| `fuzz_targets/shallow_record.rs` | `kit_core::shallow::parse` (never panics on any bytes; an accepted record is not empty and encodes back to its input, so only the canonical form is accepted) |
+| `fuzz_targets/rebase_autosquash.rs` | `kit_core::ops::rebase::autosquash` (never panics on any subjects; arranges every commit once, starts with a pick, keeps the picks in order, makes every plain subject a pick, and gives the same order when it arranges its own result) |
+| `fuzz_targets/patch_parse.rs` | `kit_core::ops::patch::parse` (never panics on any text; a parsed patch names a file, every path is a valid index path, every hunk keeps its counts, reversing twice gives the patch back, and a one-hunk file patch turns its old side into its new side) |
+| `fuzz_targets/mailbox_parse.rs` | `kit_core::ops::mailbox::split` and `parse` (never panic on any text; the mails are slices of the text, and a mail that parses has an author and a patch that parses) |
+| `fuzz_targets/rerere_entry.rs` | `kit_core::ops::rerere::entry_is_valid` (never panics on any name and sides; a valid entry is named by the id of its sorted sides, and the sides of any conflict make a valid entry under their id) |
 | `fuzz_targets/signer_spec_parse.rs` | `libkit::attestation::SignerSpec` (never panics on any text; a spec parses the same twice; an accepted spec names an algorithm and a signer; a refusal names the flag) |
 | `fuzz_targets/secret_hex_parse.rs` | `libkit::keys::parse_secret_hex` (never panics on any text; exactly 64 hex digits in either case are accepted; the secret equals the digits; a refusal never shows the text) |
 | `fuzz_targets/git_patch_text.rs` | `libkit::git::patch::slug`, `split_range`, `is_mbox_from_line` and `rfc2822` (a subject gives a name of at most 52 letters, digits and dashes, and the same name twice; a range always has an end; a date always ends with `+0000`; none panics) |
@@ -114,7 +120,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_core::transfer::decode_packlist` | `merkle_packlist` |
 | `kit_core::sparse::decode_sparse_response`, `decode_sparse_cache` | `sparse_wire_decode` |
 | `kit_core::verify` closure manifest `decode` | `verify_closure` |
-| `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash` | `ref_wire_decode` |
+| `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash`, the `PREVIOUS_HEAD` and `HEAD_HISTORY` parsers | `ref_wire_decode` |
 | `kit_sync::cursor::parse` | `fetch_cursor_record` |
 | `kit_core::index::deserialize` | `index_decode` |
 | `kit_core::history_order` `TimestampDiscovery::decode` | `history_order_decode` |
@@ -128,7 +134,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_git_bridge::gitparse` `parse_commit`, `parse_tag`, `parse_tree`, `parse_person` | `git_commit_parse`, `git_tag_parse`, `git_tree_parse`, `git_object_parse` |
 | `kit_git_bridge::gitobj::GitObject::parse_raw`, `author::parse_timestamp`, `headers` `parse_identity`, `parse_hash`, `parse_signature` | `git_object_parse` |
 | `kit_keystore` encrypted key record `decode` | `software_key_record` |
-| `libkit::config` text parsing (`apply_text`) | `config_parse` |
+| `libkit::config` text parsing (`apply_text`), `split_alias` | `config_parse` |
 | `libkit::config::parse_pipe_list` | None. It splits a user-written config value on `\|`. It does no other parsing. Unit tests cover it. |
 | `kit_bin::grants::parse_relying_parties`, `grants::spec::parse_ttl`, `grants::cli::parse_timeout`, `grants::cli::parse_namespace` | None. They read command-line text that the user types, not bytes from a peer or a repository. Unit tests cover them. |
 | `libkit::attest_signer::parse_algorithm`, `libkit::attest_signer::Kind::from_str` | None. They match a command-line word against a fixed list. Unit tests cover them. |
@@ -141,7 +147,9 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::revspec::resolve_revision` | `revspec_parse` |
 | `libkit::log::date::parse`, the selection text of `libkit::log::history` | `log_parse` |
 | The revision and path arguments of `libkit::diff::compute` | `diff_args` |
+| `kit_core::ops::parse_rename_score`, the span signature of `kit_core::ops::detect_renames` | `rename_score` |
 | `libkit::blame::line_range::parse`, the revision range of `libkit::blame::blame` | `blame_line_range` |
+| The patterns of `libkit::grep::Matcher` | None. The user types them, the `regex` crate parses them in linear time and refuses an invalid one, and the searched files are read through the existing blob readers. Unit tests and a property test cover the line scanner. |
 | `libkit::branch::glob_match` | `branch_glob` |
 | `libkit::push::parse_refspec` | `push_refspec` |
 | `libkit::pathspec::index_path_for_arg` | `index_path_arg` |
@@ -149,6 +157,17 @@ Each one has a fuzz target, or a written reason why it has none.
 | The branch name and the id that `libkit::linked::add` derives from a path | None. It builds a name from a local path, and then `refs::validate_ref_name` or `layout::validate_worktree_id` must accept the name. Unit tests cover the derivation. |
 | The path arguments of `libkit::add::stage` | None. A named path is checked against the file system, not parsed. Integration tests cover a path outside the repository and a path through a symlink. |
 | `libkit::rebase::parse_todo` | `rebase_todo_parse` |
+| `kit_core::shallow::parse`, the shallow boundary record `.kit/shallow` | `shallow_record` |
+| The `fixup!` and `squash!` subjects that `kit_core::ops::rebase::autosquash` reads | `rebase_autosquash` |
+| The `actions` and `update-refs` files that `kit_core::ops::rebase::read_state` reads | None. kit writes them under `.kit/rebase-apply/` for its own paused rebase, and they never come from a peer. They are size-capped, and unit tests cover malformed text, which reads as invalid state. |
+| The `kit log` text that `kit shortlog` reads on standard input | None. It is the user's own input, read line by line for `Author:` and indented subject lines; every line is either taken as text or skipped, so no input is refused or can fail. Unit tests cover the reader. |
+| The patch text that `kit apply` and `kit am` read | `patch_parse` |
+| The `--prefix` and paths of `kit archive` | None. The prefix is checked for a leading `/` and `..` parts, and each path goes through `pathspec::index_path_for_arg`; `kit archive` writes tar but parses none. Unit and integration tests cover both. |
+| The `-L <range>:<file>` argument of `kit log` | None for the split: kit cuts the text at its first `:` and treats the rest as a path, which `pathspec::index_path_for_arg` checks. The range part goes to `libkit::blame::line_range::parse`, which `blame_line_range` fuzzes. |
+| The diff text that `kit range-diff` reshapes into a patch | None. kit writes that diff itself, from its own trees, in the same process; the reshaping takes each line as text or skips it, so no input is refused. Integration tests, one against `git range-diff`, cover it. |
+| The mailbox that `kit am` reads | `mailbox_parse` |
+| The `am/` state files that `kit am` reads: `orig-head`, `next` and `last` | None. kit writes them under `.kit/am/` for its own paused `am`, and they never come from a peer. They are read with a 128-byte cap and checked as 64 hex digits or a number of at most four digits. The mails in `am/` are read again by `mailbox_parse`'s parser. |
+| The `rr-cache/` entries that `libkit::rerere` reads: `version`, the entry name, `side1`, `side2` and `postimage` | `rerere_entry` for the name and sides. `version` is compared byte for byte, the files are size-capped, and a `postimage` is copied as it is, never parsed. |
 | `libkit::attestation::SignerSpec` | `signer_spec_parse` |
 | `libkit::keys::parse_secret_hex` | `secret_hex_parse` |
 | `libkit::git::patch::split_range`, `slug`, `is_mbox_from_line`, `rfc2822` | `git_patch_text` |

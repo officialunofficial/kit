@@ -492,6 +492,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "rename_score"
+path = "fuzz_targets/rename_score.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "blame_line_range"
 path = "fuzz_targets/blame_line_range.rs"
 test = false
@@ -518,6 +526,38 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "identity_parse"
 path = "fuzz_targets/identity_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rebase_autosquash"
+path = "fuzz_targets/rebase_autosquash.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "rerere_entry"
+path = "fuzz_targets/rerere_entry.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "patch_parse"
+path = "fuzz_targets/patch_parse.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "mailbox_parse"
+path = "fuzz_targets/mailbox_parse.rs"
 test = false
 doc = false
 bench = false
@@ -622,6 +662,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "maintenance_stamp"
 path = "fuzz_targets/maintenance_stamp.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "shallow_record"
+path = "fuzz_targets/shallow_record.rs"
 test = false
 doc = false
 bench = false

@@ -27,12 +27,29 @@ use crate::verify::VerifyError;
 /// Hard cap on the number of packs a closure manifest may list.
 pub const MAX_CLOSURE_PACKS: usize = 65_536;
 
-/// Largest valid encoded [`ClosureManifest`]: the fixed header, a
-/// four-byte length prefix and [`MAX_CLOSURE_PACKS`] pack keys.
-pub const MAX_MANIFEST_BYTES: u64 = 5 + 32 + 1 + 4 + MAX_CLOSURE_PACKS as u64 * 32;
+/// Most bases a version 2 [`ClosureManifest`] may list.
+pub const MAX_CLOSURE_BASES: usize = 256;
+
+/// Longest branch name, in bytes, a version 2 [`ClosureManifest`] may hold.
+pub const MAX_CLOSURE_BRANCH_BYTES: usize = 255;
+
+/// Largest valid encoded [`ClosureManifest`]: the fixed header, the pack
+/// keys, and for version 2 the branch, the bases and the checksum, each
+/// list with a length prefix of at most four bytes.
+pub const MAX_MANIFEST_BYTES: u64 = 5
+    + 32
+    + 1
+    + 4
+    + MAX_CLOSURE_PACKS as u64 * 32
+    + 4
+    + MAX_CLOSURE_BRANCH_BYTES as u64
+    + 4
+    + MAX_CLOSURE_BASES as u64 * 32
+    + 32;
 
 const MANIFEST_MAGIC: &[u8; 4] = b"KCLM";
 const MANIFEST_VERSION: u8 = 1;
+const MANIFEST_VERSION_2: u8 = 2;
 const MODE_SNAPSHOT: u8 = 0;
 const MODE_HISTORY: u8 = 1;
 
@@ -117,8 +134,10 @@ pub struct ClosureExport {
     pub packs: Vec<Vec<u8>>,
 }
 
-/// Convenience index of a closure export: magic `"KCLM"`, version 1,
-/// root id, mode, and the [`pack_key`] of each pack in order.
+/// Convenience index of a closure export: magic `"KCLM"`, a version, the
+/// root id, the mode, the [`pack_key`] of each pack in order and, in
+/// version 2, the branch the root came from, the bases of an incremental
+/// export and a checksum (SPEC-DISCLOSURE §7.3).
 ///
 /// The caller supplies the trusted root to [`verify_closure_manifest`];
 /// the manifest does not authenticate the objects and is not itself a
@@ -132,37 +151,87 @@ pub struct ClosureManifest {
     /// `pack_key` of each pack, in export order. At most
     /// [`MAX_CLOSURE_PACKS`] entries.
     pub packs: Vec<Hash>,
+    /// The branch the root came from, without `refs/heads/`. Version 2.
+    pub branch: Option<String>,
+    /// Commits the export leaves out together with everything they reach,
+    /// sorted ascending without repeats; empty for a full export. At most
+    /// [`MAX_CLOSURE_BASES`], and only in history mode. Version 2.
+    pub bases: Vec<Hash>,
 }
 
 impl ClosureManifest {
-    /// Encode to `"KCLM" ‖ version ‖ root ‖ mode ‖ packs`.
+    /// A manifest with no branch and no bases.
+    #[must_use]
+    pub fn new(root: Hash, mode: ClosureMode, packs: Vec<Hash>) -> Self {
+        Self {
+            root,
+            mode,
+            packs,
+            branch: None,
+            bases: Vec::new(),
+        }
+    }
+
+    /// Encode to `"KCLM" ‖ 1 ‖ root ‖ mode ‖ packs` when there is no branch
+    /// and no base, else to `"KCLM" ‖ 2 ‖ root ‖ mode ‖ packs ‖ branch ‖
+    /// bases ‖ check`, where `check` is the BLAKE3 of the bytes before it.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        let v2 = self.branch.is_some() || !self.bases.is_empty();
         let mut out = Vec::with_capacity(5 + 32 + 1 + self.packs.encode_size());
         out.extend_from_slice(MANIFEST_MAGIC);
-        out.push(MANIFEST_VERSION);
+        out.push(if v2 {
+            MANIFEST_VERSION_2
+        } else {
+            MANIFEST_VERSION
+        });
         self.root.write(&mut out);
         mode_byte(self.mode).write(&mut out);
         self.packs.write(&mut out);
+        if v2 {
+            self.branch
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes()
+                .to_vec()
+                .write(&mut out);
+            self.bases.write(&mut out);
+            let check = crate::hash::hash(&out);
+            out.extend_from_slice(&check);
+        }
         out
     }
 
-    /// Decode, rejecting unknown version/mode and trailing bytes.
+    /// Decode version 1 or 2, rejecting an unknown version or mode,
+    /// trailing bytes and, in version 2, a wrong checksum, an invalid branch
+    /// and invalid bases.
     ///
     /// # Errors
     ///
     /// [`VerifyError::ClosureManifestBadMagic`],
-    /// [`VerifyError::ClosureManifestUnsupportedVersion`], or
+    /// [`VerifyError::ClosureManifestUnsupportedVersion`],
+    /// [`VerifyError::ClosureManifestChecksum`], or
     /// [`VerifyError::ClosureManifestMalformed`].
     pub fn decode(bytes: &[u8]) -> Result<Self, VerifyError> {
         if bytes.len() < 5 || bytes[..4] != *MANIFEST_MAGIC {
             return Err(VerifyError::ClosureManifestBadMagic);
         }
         let version = bytes[4];
-        if version != MANIFEST_VERSION {
-            return Err(VerifyError::ClosureManifestUnsupportedVersion(version));
-        }
-        let mut r = Copying(&bytes[5..]);
+        let body = match version {
+            MANIFEST_VERSION => &bytes[5..],
+            MANIFEST_VERSION_2 => {
+                if bytes.len() < 5 + HASH_LEN {
+                    return Err(VerifyError::ClosureManifestMalformed);
+                }
+                let (signed, check) = bytes.split_at(bytes.len() - HASH_LEN);
+                if crate::hash::hash(signed)[..] != *check {
+                    return Err(VerifyError::ClosureManifestChecksum);
+                }
+                &signed[5..]
+            }
+            other => return Err(VerifyError::ClosureManifestUnsupportedVersion(other)),
+        };
+        let mut r = Copying(body);
         let root = Hash::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode_b = u8::read(&mut r).map_err(|_| VerifyError::ClosureManifestMalformed)?;
         let mode = match mode_b {
@@ -172,11 +241,44 @@ impl ClosureManifest {
         };
         let packs = read_list::<Hash>(&mut r, MAX_CLOSURE_PACKS, HASH_LEN, &())
             .map_err(|_| VerifyError::ClosureManifestMalformed)?;
+        let mut manifest = Self::new(root, mode, packs);
+        if version == MANIFEST_VERSION_2 {
+            let raw = read_list::<u8>(&mut r, MAX_CLOSURE_BRANCH_BYTES, 1, &())
+                .map_err(|_| VerifyError::ClosureManifestMalformed)?;
+            if !raw.is_empty() {
+                let name =
+                    String::from_utf8(raw).map_err(|_| VerifyError::ClosureManifestMalformed)?;
+                if !valid_branch(&name) {
+                    return Err(VerifyError::ClosureManifestMalformed);
+                }
+                manifest.branch = Some(name);
+            }
+            manifest.bases = read_list::<Hash>(&mut r, MAX_CLOSURE_BASES, HASH_LEN, &())
+                .map_err(|_| VerifyError::ClosureManifestMalformed)?;
+            // Version 2 with neither field is not canonical: the writer
+            // writes version 1 then.
+            if !manifest.bases.windows(2).all(|w| w[0] < w[1])
+                || (mode == ClosureMode::Snapshot && !manifest.bases.is_empty())
+                || (manifest.branch.is_none() && manifest.bases.is_empty())
+            {
+                return Err(VerifyError::ClosureManifestMalformed);
+            }
+        }
         if r.has_remaining() {
             return Err(VerifyError::ClosureManifestMalformed);
         }
-        Ok(Self { root, mode, packs })
+        Ok(manifest)
     }
+}
+
+/// Whether `name` may be the branch of a version 2 manifest: at most
+/// [`MAX_CLOSURE_BRANCH_BYTES`] bytes, and `refs/heads/<name>` a valid ref
+/// name (SPEC-REFS §3).
+#[must_use]
+pub fn valid_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_CLOSURE_BRANCH_BYTES
+        && crate::refs::validate_ref_name(&format!("{}{name}", crate::refs::BRANCH_REF_PREFIX))
 }
 
 fn mode_byte(mode: ClosureMode) -> u8 {
@@ -319,6 +421,20 @@ pub(crate) fn walk(
     roots: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
+    known: impl FnMut(&Hash) -> Known,
+    root_rule: RootRule,
+    visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
+) -> Result<Walk, VerifyError> {
+    walk_within(roots, &|_| mode, source, known, root_rule, visit)
+}
+
+/// [`walk`] where `mode` picks the edges to follow from each object: a
+/// shallow repository's history walk follows no parent of a commit in its
+/// record.
+fn walk_within(
+    roots: &[Hash],
+    mode: &dyn Fn(&Hash) -> ClosureMode,
+    source: &mut impl ObjectSource,
     mut known: impl FnMut(&Hash) -> Known,
     root_rule: RootRule,
     mut visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
@@ -387,7 +503,7 @@ pub(crate) fn walk(
         }
         visit(&id, &object)?;
 
-        let child_ids = typed_children(&object, mode);
+        let child_ids = typed_children(&object, mode(&id));
         if matches!(object, Object::ChunkedBlob(_)) {
             manifests.push(id);
         }
@@ -821,6 +937,39 @@ pub fn verify_closure_store(
     verify_closure_streaming(root, mode, &mut source)
 }
 
+/// [`verify_closure_store`] in history mode for a shallow repository: the
+/// walk follows no parent of a commit in `boundary`, so the history beyond
+/// the boundary is neither read nor reported missing. Whether the record
+/// itself is right is [`crate::shallow::check`].
+///
+/// # Errors
+///
+/// The errors of [`verify_closure_store`].
+pub fn verify_shallow_closure_store(
+    store: &ObjectStore,
+    root: &Hash,
+    boundary: &crate::shallow::Boundary,
+) -> Result<ClosureReport, VerifyError> {
+    let mut source = store;
+    let walked = walk_within(
+        std::slice::from_ref(root),
+        &|id| boundary.mode(id),
+        &mut source,
+        |_| Known::No,
+        RootRule::Fail,
+        |_, _| Ok(()),
+    )?;
+    Ok(ClosureReport {
+        root: *root,
+        mode: ClosureMode::History,
+        verified: walked.verified,
+        missing: walked.missing,
+        corrupt: walked.corrupt,
+        unreferenced: Vec::new(),
+        unreferenced_checked: false,
+    })
+}
+
 /// Re-hashes every supplied object and walks from `root` with
 /// [`children`](crate::ops::graph::children)`(obj, mode)`. Store-less: the caller provides the
 /// object bytes. The map path is implemented by the same
@@ -996,10 +1145,41 @@ pub fn export_closure(
     root: &Hash,
     mode: ClosureMode,
 ) -> Result<ClosureExport, VerifyError> {
+    export_closure_with(store, root, mode, &ExportOptions::default())
+}
+
+/// What a closure export records beyond its root and mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// The branch the root came from, recorded in the manifest. The root
+    /// must then be a commit.
+    pub branch: Option<String>,
+    /// Commits whose history the receiver holds: the export leaves out
+    /// every object they reach. History mode only; each must be a commit.
+    pub bases: Vec<Hash>,
+}
+
+/// [`export_closure`] with a branch and bases. A branch or a base makes
+/// the manifest version 2; without them the bytes are those of
+/// [`export_closure`].
+///
+/// # Errors
+///
+/// As [`export_closure`], plus [`VerifyError::ClosureExportOptions`] for an
+/// invalid branch name, a branch on a root that is not a commit, bases in
+/// snapshot mode, more than [`MAX_CLOSURE_BASES`] bases, or a base that is
+/// not a commit.
+pub fn export_closure_with(
+    store: &ObjectStore,
+    root: &Hash,
+    mode: ClosureMode,
+    options: &ExportOptions,
+) -> Result<ClosureExport, VerifyError> {
     export_closure_with_limits(
         store,
         root,
         mode,
+        options,
         pack::MAX_TOTAL_PAYLOAD,
         pack::MAX_ENTRIES,
     )
@@ -1009,6 +1189,7 @@ pub(crate) fn export_closure_with_limits(
     store: &ObjectStore,
     root: &Hash,
     mode: ClosureMode,
+    options: &ExportOptions,
     max_pack_payload: u64,
     max_entries: u32,
 ) -> Result<ClosureExport, VerifyError> {
@@ -1017,11 +1198,48 @@ pub(crate) fn export_closure_with_limits(
         Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
         other => return Err(VerifyError::ClosureRootWrongType(other.object_type())),
     }
+    if let Some(branch) = &options.branch {
+        if !valid_branch(branch) {
+            return Err(VerifyError::ClosureExportOptions(format!(
+                "invalid branch name '{branch}'"
+            )));
+        }
+        if !matches!(obj, Object::Commit(_)) {
+            return Err(VerifyError::ClosureExportOptions(format!(
+                "a branch names a commit, and the root is a {:?}",
+                obj.object_type()
+            )));
+        }
+    }
+    let mut bases = options.bases.clone();
+    bases.sort_unstable();
+    bases.dedup();
+    if !bases.is_empty() && mode == ClosureMode::Snapshot {
+        return Err(VerifyError::ClosureExportOptions(
+            "an incremental export needs history mode".into(),
+        ));
+    }
+    if bases.len() > MAX_CLOSURE_BASES {
+        return Err(VerifyError::ClosureExportOptions(format!(
+            "at most {MAX_CLOSURE_BASES} bases"
+        )));
+    }
 
-    let hashes = match mode {
+    let mut hashes = match mode {
         ClosureMode::Snapshot => crate::ops::graph::reachable_snapshot(store, root)?,
         ClosureMode::History => crate::ops::graph::reachable_objects(store, root)?,
     };
+    for base in &bases {
+        if !matches!(store.read_object(base)?, Object::Commit(_)) {
+            return Err(VerifyError::ClosureExportOptions(format!(
+                "base {} is not a commit",
+                crate::hash::to_hex(base)
+            )));
+        }
+        for held in crate::ops::graph::reachable_objects(store, base)? {
+            hashes.remove(&held);
+        }
+    }
 
     let mut packs: Vec<Vec<u8>> = Vec::new();
     let mut writer = PackWriter::new_raw_only();
@@ -1050,6 +1268,8 @@ pub(crate) fn export_closure_with_limits(
         root: *root,
         mode,
         packs: packs.iter().map(|p| pack_key(p)).collect(),
+        branch: options.branch.clone(),
+        bases,
     };
     Ok(ClosureExport {
         manifest: manifest.encode(),
@@ -1072,11 +1292,8 @@ mod tests {
 
     #[test]
     fn largest_manifest_fits_the_manifest_byte_limit() {
-        let manifest = ClosureManifest {
-            root: ZERO,
-            mode: ClosureMode::History,
-            packs: vec![ZERO; MAX_CLOSURE_PACKS],
-        };
+        let manifest =
+            ClosureManifest::new(ZERO, ClosureMode::History, vec![ZERO; MAX_CLOSURE_PACKS]);
         let encoded = manifest.encode();
         assert!(encoded.len() as u64 <= MAX_MANIFEST_BYTES);
         assert_eq!(ClosureManifest::decode(&encoded).unwrap(), manifest);
@@ -1900,11 +2117,7 @@ mod tests {
     #[test]
     fn manifest_with_a_huge_pack_count_and_short_input_is_malformed() {
         use commonware_codec::Encode as _;
-        let m = ClosureManifest {
-            root: [0u8; 32],
-            mode: ClosureMode::Snapshot,
-            packs: vec![],
-        };
+        let m = ClosureManifest::new([0u8; 32], ClosureMode::Snapshot, vec![]);
         let mut bytes = m.encode();
         // The empty pack list is the last byte: a zero length prefix.
         assert_eq!(bytes.pop(), Some(0));
@@ -1918,22 +2131,18 @@ mod tests {
 
     #[test]
     fn manifest_rejects_unknown_version_trailing_and_mode() {
-        let m = ClosureManifest {
-            root: [0u8; 32],
-            mode: ClosureMode::Snapshot,
-            packs: vec![],
-        };
+        let m = ClosureManifest::new([0u8; 32], ClosureMode::Snapshot, vec![]);
         let mut bytes = m.encode();
         bytes.push(0xFF);
         assert!(matches!(
             ClosureManifest::decode(&bytes),
             Err(VerifyError::ClosureManifestMalformed)
         ));
-        let mut v2 = m.encode();
-        v2[4] = 2;
+        let mut v3 = m.encode();
+        v3[4] = 3;
         assert!(matches!(
-            ClosureManifest::decode(&v2),
-            Err(VerifyError::ClosureManifestUnsupportedVersion(2))
+            ClosureManifest::decode(&v3),
+            Err(VerifyError::ClosureManifestUnsupportedVersion(3))
         ));
         assert!(matches!(
             ClosureManifest::decode(b"XXXX\x01"),
@@ -1946,6 +2155,221 @@ mod tests {
             ClosureManifest::decode(&bad_mode),
             Err(VerifyError::ClosureManifestMalformed)
         ));
+    }
+
+    fn v2_manifest() -> ClosureManifest {
+        ClosureManifest {
+            root: [7u8; 32],
+            mode: ClosureMode::History,
+            packs: vec![[1u8; 32], [2u8; 32]],
+            branch: Some("feature/x".into()),
+            bases: vec![[3u8; 32], [4u8; 32]],
+        }
+    }
+
+    /// Re-encode a v2 manifest's signed part with a fresh checksum.
+    fn rechecked(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes.truncate(bytes.len() - HASH_LEN);
+        let check = crate::hash::hash(&bytes);
+        bytes.extend_from_slice(&check);
+        bytes
+    }
+
+    /// A version 2 manifest with no branch and no base, which no writer
+    /// produces.
+    fn neither_field() -> Vec<u8> {
+        let mut bytes = ClosureManifest::new([7u8; 32], ClosureMode::History, vec![]).encode();
+        bytes[4] = 2;
+        bytes.extend_from_slice(&[0, 0]);
+        let check = crate::hash::hash(&bytes);
+        bytes.extend_from_slice(&check);
+        bytes
+    }
+
+    #[test]
+    fn a_manifest_without_branch_or_bases_stays_version_1() {
+        let m = ClosureManifest::new([7u8; 32], ClosureMode::History, vec![[1u8; 32]]);
+        let bytes = m.encode();
+        assert_eq!(bytes[4], 1);
+        assert_eq!(bytes.len(), 5 + 32 + 1 + 1 + 32);
+        assert_eq!(ClosureManifest::decode(&bytes).unwrap(), m);
+    }
+
+    #[test]
+    fn a_v2_manifest_round_trips() {
+        let m = v2_manifest();
+        let bytes = m.encode();
+        assert_eq!(bytes[4], 2);
+        assert_eq!(ClosureManifest::decode(&bytes).unwrap(), m);
+        let only_branch = ClosureManifest {
+            bases: Vec::new(),
+            ..v2_manifest()
+        };
+        assert_eq!(
+            ClosureManifest::decode(&only_branch.encode()).unwrap(),
+            only_branch
+        );
+        let only_bases = ClosureManifest {
+            branch: None,
+            ..v2_manifest()
+        };
+        assert_eq!(
+            ClosureManifest::decode(&only_bases.encode()).unwrap(),
+            only_bases
+        );
+    }
+
+    #[test]
+    fn every_flipped_bit_of_a_v2_manifest_is_refused() {
+        let bytes = v2_manifest().encode();
+        for i in 0..bytes.len() {
+            for bit in 0..8 {
+                let mut damaged = bytes.clone();
+                damaged[i] ^= 1 << bit;
+                assert!(
+                    ClosureManifest::decode(&damaged).is_err(),
+                    "bit {bit} of byte {i} decoded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_v2_manifest_refuses_bad_fields_under_a_good_checksum() {
+        let base = v2_manifest();
+        let bad_branch = ClosureManifest {
+            branch: Some("a b".into()),
+            ..base.clone()
+        };
+        let unsorted = ClosureManifest {
+            bases: vec![[4u8; 32], [3u8; 32]],
+            ..base.clone()
+        };
+        let repeated = ClosureManifest {
+            bases: vec![[3u8; 32], [3u8; 32]],
+            ..base.clone()
+        };
+        let snapshot_bases = ClosureManifest {
+            mode: ClosureMode::Snapshot,
+            ..base.clone()
+        };
+        for bytes in [bad_branch, unsorted, repeated, snapshot_bases]
+            .iter()
+            .map(ClosureManifest::encode)
+            .chain(std::iter::once(neither_field()))
+        {
+            assert!(
+                matches!(
+                    ClosureManifest::decode(&bytes),
+                    Err(VerifyError::ClosureManifestMalformed)
+                ),
+                "{bytes:?} decoded"
+            );
+        }
+        let mut trailing = base.encode();
+        trailing.truncate(trailing.len() - HASH_LEN);
+        trailing.push(0);
+        trailing.extend_from_slice(&[0u8; HASH_LEN]);
+        assert!(matches!(
+            ClosureManifest::decode(&rechecked(trailing)),
+            Err(VerifyError::ClosureManifestMalformed)
+        ));
+        let mut wrong = base.encode();
+        let last = wrong.len() - 1;
+        wrong[last] ^= 1;
+        assert!(matches!(
+            ClosureManifest::decode(&wrong),
+            Err(VerifyError::ClosureManifestChecksum)
+        ));
+    }
+
+    #[test]
+    fn largest_v2_manifest_fits_the_manifest_byte_limit() {
+        let mut bases: Vec<Hash> = (0..MAX_CLOSURE_BASES)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                h
+            })
+            .collect();
+        bases.sort_unstable();
+        let m = ClosureManifest {
+            root: ZERO,
+            mode: ClosureMode::History,
+            packs: vec![ZERO; MAX_CLOSURE_PACKS],
+            branch: Some("b".repeat(MAX_CLOSURE_BRANCH_BYTES)),
+            bases,
+        };
+        let encoded = m.encode();
+        assert!(encoded.len() as u64 <= MAX_MANIFEST_BYTES);
+        assert_eq!(ClosureManifest::decode(&encoded).unwrap(), m);
+    }
+
+    #[test]
+    fn an_incremental_export_leaves_out_what_the_base_reaches() {
+        let (_d, store, c1, c2) = two_commit_fixture();
+        let options = ExportOptions {
+            branch: Some("main".into()),
+            bases: vec![c1],
+        };
+        let export = export_closure_with(&store, &c2, ClosureMode::History, &options).unwrap();
+        let manifest = ClosureManifest::decode(&export.manifest).unwrap();
+        assert_eq!(manifest.branch.as_deref(), Some("main"));
+        assert_eq!(manifest.bases, vec![c1]);
+        let refs: Vec<&[u8]> = export.packs.iter().map(Vec::as_slice).collect();
+        let report = verify_closure_manifest(&c2, &export.manifest, &refs).unwrap();
+        // Alone, the walk stops at the base, which the export left out.
+        assert_eq!(report.missing, vec![c1]);
+        let full = crate::ops::graph::reachable_objects(&store, &c2).unwrap();
+        let held = crate::ops::graph::reachable_objects(&store, &c1).unwrap();
+        assert_eq!(report.verified, full.len() - held.len());
+    }
+
+    #[test]
+    fn export_options_are_checked() {
+        let (_d, store, c1, c2) = two_commit_fixture();
+        let bad = |options: ExportOptions, mode| {
+            matches!(
+                export_closure_with(&store, &c2, mode, &options),
+                Err(VerifyError::ClosureExportOptions(_))
+            )
+        };
+        assert!(bad(
+            ExportOptions {
+                branch: Some("a b".into()),
+                bases: vec![],
+            },
+            ClosureMode::History
+        ));
+        assert!(bad(
+            ExportOptions {
+                branch: None,
+                bases: vec![c1],
+            },
+            ClosureMode::Snapshot
+        ));
+        let tree = store.read_object(&c1).unwrap();
+        let Object::Commit(commit) = tree else {
+            panic!("not a commit")
+        };
+        assert!(matches!(
+            export_closure_with(
+                &store,
+                &c2,
+                ClosureMode::History,
+                &ExportOptions {
+                    branch: None,
+                    bases: vec![commit.tree_hash],
+                },
+            ),
+            Err(VerifyError::ClosureExportOptions(_))
+        ));
+        // Without options the bytes are those of `export_closure`.
+        assert_eq!(
+            export_closure_with(&store, &c2, ClosureMode::History, &ExportOptions::default())
+                .unwrap(),
+            export_closure(&store, &c2, ClosureMode::History).unwrap()
+        );
     }
 
     #[test]

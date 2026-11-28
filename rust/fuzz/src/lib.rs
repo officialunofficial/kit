@@ -303,7 +303,20 @@ pub fn config_parse_one_iteration(input: &[u8]) {
             assert!(cfg.trusted_remote_endpoint.is_empty());
             assert!(cfg.http_ssl_ca_info.is_empty());
             assert!(cfg.pull_require_signed.is_empty());
+            assert!(cfg.aliases.is_empty());
         }
+    }
+    // An alias value that splits re-splits to the same arguments once each
+    // argument is quoted.
+    if let Ok(args) = libkit::config::split_alias(text) {
+        let quoted: Vec<String> = args
+            .iter()
+            .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        assert_eq!(
+            libkit::config::split_alias(&quoted.join(" ")).as_ref(),
+            Ok(&args)
+        );
     }
 }
 
@@ -1254,6 +1267,27 @@ pub fn verify_closure_one_iteration_with(input: &[u8], fixture: &ClosureFixture)
     let _ = verify::verify_closure(&fixture.root, kit_core::ClosureMode::Snapshot, [input]);
     let _ = kit_core::pack::PackEntries::new(input);
 
+    // Raw input as a manifest: any manifest that decodes encodes back to
+    // the same bytes, version 1 or 2.
+    if let Ok(decoded) = verify::ClosureManifest::decode(input) {
+        assert_eq!(decoded.encode(), input, "a decoded manifest re-encodes");
+    }
+    // A version 2 manifest carries a checksum: no flipped byte decodes.
+    if input.len() >= 2 {
+        let mut v2 =
+            verify::ClosureManifest::decode(&fixture.manifest).expect("fixture manifest decodes");
+        v2.branch = Some("main".into());
+        let bytes = v2.encode();
+        assert_eq!(verify::ClosureManifest::decode(&bytes).ok(), Some(v2));
+        let mut flipped = bytes;
+        let pos = usize::from(input[0]) % flipped.len();
+        flipped[pos] ^= input[1].max(1);
+        assert!(
+            verify::ClosureManifest::decode(&flipped).is_err(),
+            "a v2 manifest with a flipped byte decoded"
+        );
+    }
+
     // Feed raw fuzzer input directly as closure pack buffers (not wrapped
     // in valid PackEntries framing), both whole and split into two, so the
     // profile/framing checks in verify_closure_packs and
@@ -1551,6 +1585,17 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
             kit_core::refs::Head::Detached(h) => format!("{}\n", kit_core::to_hex(&h)),
         };
         assert_eq!(wire.as_bytes(), input);
+    }
+    if let Some(record) = kit_core::refs::fuzz_parse_head_history(input) {
+        assert!(record.len() <= kit_core::refs::HEAD_HISTORY_MAX);
+        // The complete lines re-encode to the input up to any torn tail.
+        let encoded = kit_core::refs::fuzz_encode_head_history(&record);
+        assert!(input.starts_with(&encoded));
+        assert!(!input[encoded.len()..].contains(&b'\n'));
+        assert_eq!(
+            kit_core::refs::fuzz_parse_head_history(&encoded).as_ref(),
+            Some(&record)
+        );
     }
     let state = kit_core::ops::pull_state::PullState {
         target: kit_core::hash::hash(input),
@@ -2060,6 +2105,16 @@ pub fn maintenance_stamp_one_iteration(input: &[u8]) {
     kit_core::ops::gc::fuzz_maintenance_stamp(input);
 }
 
+/// Check that an accepted shallow boundary record is canonical: it encodes
+/// back to the input bytes.
+pub fn shallow_record_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(boundary) = kit_core::shallow::fuzz_parse(input) {
+        assert!(!boundary.is_empty());
+        assert_eq!(kit_core::shallow::encode(&boundary), input);
+    }
+}
+
 /// Exercise index validation with a bounded input.
 pub fn local_pack_index_one_iteration(input: &[u8]) {
     kit_core::store::fuzz_local_pack_index(&input[..input.len().min(MAX_INPUT)]);
@@ -2485,7 +2540,7 @@ pub fn diff_args_one_iteration(input: &[u8]) {
         let request = Request {
             staged: flags & 1 != 0,
             merge_base: flags & 2 != 0,
-            renames: flags & 4 != 0,
+            renames: (flags & 4 != 0).then(kit_core::ops::RenameOptions::default),
             args: &args,
         };
         if let Ok(result) = diff::compute(repo, &request) {
@@ -2502,7 +2557,7 @@ pub fn diff_args_one_iteration(input: &[u8]) {
             &Request {
                 staged: false,
                 merge_base: false,
-                renames: true,
+                renames: Some(kit_core::ops::RenameOptions::default()),
                 args: &pinned,
             },
         )
@@ -2510,6 +2565,127 @@ pub fn diff_args_one_iteration(input: &[u8]) {
         let paths: Vec<&str> = result.entries().iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["a.txt", "b.txt"]);
     });
+}
+
+/// Rename scores (`rename_score`): `parse_rename_score` never panics, gives
+/// the same answer twice and never passes `MAX_SCORE`, and an integer percent
+/// up to 100 reads as that percent. `detect_renames` on one deleted and one
+/// added blob never panics, makes at most one pair with a score of at most
+/// 100%, pairs identical content at 100%, gives the same pair and score with
+/// the sides swapped, and gives the same answer when the deleted blob is
+/// stored as two chunks.
+pub fn rename_score_one_iteration(input: &[u8]) {
+    use kit_core::object::{Blob, ChunkedBlob, EntryMode, Object};
+    use kit_core::ops::{
+        DiffEntry, DiffKind, MAX_SCORE, RenameOptions, detect_renames, parse_rename_score,
+    };
+    use kit_core::serialize::serialize;
+    use kit_core::store::MemorySource;
+
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Some((&head, rest)) = input.split_first() else {
+        return;
+    };
+    // The threshold text is the first line; the blobs share the rest.
+    let (line, rest) = match rest.iter().position(|&b| b == b'\n') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, &[][..]),
+    };
+    let text = String::from_utf8_lossy(line);
+    let parsed = parse_rename_score(&text);
+    assert_eq!(
+        parsed,
+        parse_rename_score(&text),
+        "a threshold parses the same twice"
+    );
+    if let Some(score) = parsed {
+        assert!(score <= MAX_SCORE, "a score is at most MAX_SCORE");
+    }
+    if let Some(n) = text.strip_suffix('%').and_then(|d| d.parse::<u32>().ok())
+        && n <= 100
+        && text
+            .bytes()
+            .take(text.len() - 1)
+            .all(|b| b.is_ascii_digit())
+    {
+        assert_eq!(parsed, Some(n * MAX_SCORE / 100), "{text}");
+    }
+
+    let split = usize::from(head) * rest.len() / 256;
+    let (a, b) = rest.split_at(split);
+    let mut store = MemorySource::default();
+    let mut put = |object: &Object| {
+        let bytes = serialize(object).expect("serialize");
+        let id = object.id().expect("id");
+        store.insert(id, bytes).expect("insert");
+        id
+    };
+    let blob = |data: &[u8]| {
+        Object::Blob(Blob {
+            data: data.to_vec(),
+        })
+    };
+    let (ia, ib) = (put(&blob(a)), put(&blob(b)));
+    let cut = a.len() / 2;
+    let (left, right) = (put(&blob(&a[..cut])), put(&blob(&a[cut..])));
+    let chunks: Vec<(kit_core::Hash, u64)> = [(left, cut), (right, a.len())]
+        .into_iter()
+        .filter(|(_, end)| *end > 0)
+        .map(|(id, end)| (id, end as u64))
+        .collect();
+    let chunked = if a.is_empty() {
+        None
+    } else {
+        ChunkedBlob::new(a.len() as u64, 0, chunks)
+            .ok()
+            .map(|m| put(&Object::ChunkedBlob(m)))
+    };
+    let side = |kind: DiffKind, path: &str, id: kit_core::Hash| DiffEntry {
+        path: path.to_owned(),
+        kind,
+        old_hash: (kind == DiffKind::Removed).then_some(id),
+        new_hash: (kind == DiffKind::Added).then_some(id),
+        old_mode: (kind == DiffKind::Removed).then_some(EntryMode::Blob),
+        new_mode: (kind == DiffKind::Added).then_some(EntryMode::Blob),
+        old_path: None,
+        similarity: None,
+    };
+    let pair = |old: kit_core::Hash, new: kit_core::Hash, old_name: &str, new_name: &str| {
+        let mut entries = vec![
+            side(DiffKind::Removed, old_name, old),
+            side(DiffKind::Added, new_name, new),
+        ];
+        entries.sort_by(|x, y| x.path.cmp(&y.path));
+        detect_renames(&store, &mut entries, &RenameOptions::default()).expect("detect");
+        let renamed: Vec<&DiffEntry> = entries
+            .iter()
+            .filter(|e| e.kind == DiffKind::Renamed)
+            .collect();
+        assert!(renamed.len() <= 1, "one source makes at most one pair");
+        assert_eq!(entries.len(), 2 - renamed.len());
+        renamed
+            .first()
+            .map(|e| e.similarity.expect("a rename has a score"))
+    };
+    let forward = pair(ia, ib, "x", "y");
+    if let Some(score) = forward {
+        assert!(score <= 100);
+    }
+    if a == b {
+        assert_eq!(forward, Some(100), "identical content pairs at 100%");
+    }
+    assert_eq!(
+        forward,
+        pair(ib, ia, "y", "x"),
+        "swapped sides keep the score"
+    );
+    if let Some(chunked) = chunked {
+        assert_eq!(
+            forward,
+            pair(chunked, ib, "x", "y"),
+            "chunking keeps the score"
+        );
+    }
 }
 
 /// Blame ranges and revisions (`blame_line_range`): `blame::line_range::parse`
@@ -2915,8 +3091,9 @@ pub fn identity_parse_one_iteration(input: &[u8]) {
 
 /// The todo list of an interactive rebase (`rebase_todo_parse`):
 /// `rebase::parse_todo` never panics on any text. It gives the same answer
-/// twice. A result has one action for each commit, names only commits of the
-/// candidate list, and never starts with a squash or a fixup. A line with a
+/// twice. A result has one commit for each step but `exec` and one command
+/// for each `exec`, names only commits of the candidate list, never folds its
+/// first commit, and holds only commands that fit on one line. A line with a
 /// verb and the hash of a candidate reads as that candidate. The first byte
 /// sets the count of candidates, from one to eight. The rest is the text.
 pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
@@ -2937,26 +3114,194 @@ pub fn rebase_todo_parse_one_iteration(input: &[u8]) {
         parse_todo(&candidates, text),
         "a todo list reads the same twice"
     );
-    if let Ok((todo, actions)) = first {
-        assert_eq!(todo.len(), actions.len(), "one action for each commit");
+    if let Ok(plan) = first {
+        let commits = plan.actions.iter().filter(|a| a.takes_commit()).count();
+        assert_eq!(
+            plan.todo.len(),
+            commits,
+            "one commit for each step but exec"
+        );
+        let count = |kind: RebaseAction| plan.actions.iter().filter(|a| **a == kind).count();
+        assert_eq!(
+            plan.exec.len(),
+            count(RebaseAction::Exec),
+            "one command for each exec"
+        );
+        assert_eq!(
+            plan.update_refs.len(),
+            count(RebaseAction::UpdateRef),
+            "one branch for each update-ref"
+        );
         assert!(
-            todo.iter().all(|h| candidates.contains(h)),
+            plan.update_refs
+                .iter()
+                .all(|b| kit_core::refs::validate_ref_name(b)),
+            "an update-ref names a valid branch"
+        );
+        assert!(
+            plan.todo.iter().all(|h| candidates.contains(h)),
             "a todo names only candidates"
         );
         assert!(
-            actions.first().is_none_or(|a| !a.folds_into_previous()),
-            "a fold is never first"
+            plan.actions
+                .iter()
+                .find(|a| a.takes_commit())
+                .is_none_or(|a| !a.folds_into_previous()),
+            "a fold is never the first commit"
         );
-        assert!(actions.iter().all(|a| matches!(
+        assert!(
+            plan.exec
+                .iter()
+                .all(|c| kit_core::ops::rebase::is_valid_exec_command(c)),
+            "an exec command fits on one line"
+        );
+        assert!(plan.actions.iter().all(|a| matches!(
             a,
-            RebaseAction::Pick | RebaseAction::Reword | RebaseAction::Squash | RebaseAction::Fixup
+            RebaseAction::Pick
+                | RebaseAction::Reword
+                | RebaseAction::Squash
+                | RebaseAction::Fixup
+                | RebaseAction::Edit
+                | RebaseAction::Exec
+                | RebaseAction::UpdateRef
         )));
     }
     let line = format!("pick {}\n", kit_core::hash::to_hex(&candidates[0]));
     assert_eq!(
-        parse_todo(&candidates, &line).map(|(todo, _)| todo),
+        parse_todo(&candidates, &line).map(|plan| plan.todo),
         Ok(vec![candidates[0]]),
         "a full hash names its candidate"
+    );
+}
+
+/// Autosquash (`rebase_autosquash`): `kit_core::ops::rebase::autosquash`
+/// never panics on any subjects. Each line of the input is the subject of
+/// one commit. The result arranges every commit once, starts with a pick,
+/// keeps the picks in order, makes every plain subject a pick, and gives
+/// the same order when it arranges its own result.
+pub fn rebase_autosquash_one_iteration(input: &[u8]) {
+    use kit_core::ops::rebase::{RebaseAction, autosquash};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let text = String::from_utf8_lossy(input);
+    let commits: Vec<(kit_core::hash::Hash, &str)> = text
+        .lines()
+        .take(64)
+        .enumerate()
+        .map(|(i, s)| (kit_core::hash::hash(&i.to_le_bytes()), s))
+        .collect();
+    let out = autosquash(&commits);
+    assert_eq!(out.len(), commits.len(), "every commit once");
+    let position = |h: &kit_core::hash::Hash| commits.iter().position(|(c, _)| c == h);
+    let mut seen: Vec<usize> = out.iter().filter_map(|(h, _)| position(h)).collect();
+    seen.sort_unstable();
+    assert!(seen.iter().copied().eq(0..commits.len()), "a permutation");
+    assert!(
+        out.first().is_none_or(|(_, a)| *a == RebaseAction::Pick),
+        "a pick comes first"
+    );
+    let picks: Vec<usize> = out
+        .iter()
+        .filter(|(_, a)| *a == RebaseAction::Pick)
+        .filter_map(|(h, _)| position(h))
+        .collect();
+    assert!(
+        picks.windows(2).all(|w| w[0] < w[1]),
+        "picks keep their order"
+    );
+    for (h, a) in &out {
+        let subject = position(h).map_or("", |i| commits[i].1);
+        if !subject.starts_with("fixup! ") && !subject.starts_with("squash! ") {
+            assert_eq!(*a, RebaseAction::Pick, "a plain subject is a pick");
+        }
+    }
+    let again: Vec<(kit_core::hash::Hash, &str)> = out
+        .iter()
+        .filter_map(|(h, _)| position(h).map(|i| commits[i]))
+        .collect();
+    let twice: Vec<_> = autosquash(&again).into_iter().map(|(h, _)| h).collect();
+    let once: Vec<_> = out.iter().map(|(h, _)| *h).collect();
+    assert_eq!(twice, once, "arranging an arrangement changes nothing");
+}
+
+/// Patch text (`patch_parse`): `kit_core::ops::patch::parse` never panics
+/// on any text. A parsed patch names at least one file, every path is a
+/// valid index path, every hunk keeps its counts (the old side less the
+/// removed lines equals the new side less the added lines), reversing twice
+/// gives the patch back, and a file patch with one hunk at line 1 turns its
+/// own old side into its new side.
+pub fn patch_parse_one_iteration(input: &[u8]) {
+    use kit_core::ops::patch::{apply, parse};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let Ok(files) = parse(input) else {
+        return;
+    };
+    assert!(!files.is_empty(), "a parsed patch names a file");
+    for f in &files {
+        for p in f.old.iter().chain(&f.new) {
+            assert!(kit_core::index::validate_index_path(p), "{p}");
+        }
+        for h in &f.hunks {
+            assert_eq!(h.old.len() - h.removed, h.new.len() - h.added);
+        }
+        assert_eq!(&f.reversed().reversed(), f);
+        if let [h] = f.hunks.as_slice()
+            && h.old_start <= 1
+            && f.old.is_some()
+            && f.new.is_some()
+        {
+            let old: Vec<u8> = h.old.concat();
+            let new: Vec<u8> = h.new.concat();
+            assert_eq!(apply(Some(&old), f), Ok(Some(new)));
+        }
+    }
+}
+
+/// Mailboxes (`mailbox_parse`): `kit_core::ops::mailbox::split` and
+/// `parse` never panic on any text. The mails of a split are slices of the
+/// text in order, and a mail that parses has an author and a patch that
+/// parses.
+pub fn mailbox_parse_one_iteration(input: &[u8]) {
+    use kit_core::ops::mailbox::{parse, split};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mails = split(input);
+    assert!(mails.iter().map(|m| m.len()).sum::<usize>() <= input.len());
+    for m in mails {
+        if let Ok(mail) = parse(m) {
+            assert!(!mail.author.trim().is_empty());
+            assert!(kit_core::ops::patch::parse(&mail.patch).is_ok());
+        }
+    }
+}
+
+/// Cache entries (`rerere_entry`): `kit_core::ops::rerere::entry_is_valid`
+/// never panics on any entry name and sides. The input is the name, a NUL,
+/// `side1`, a NUL and `side2`. An entry is valid only when its name is the
+/// id of its sorted sides, and the sides of any conflict make a valid entry
+/// under their id, whatever their order.
+pub fn rerere_entry_one_iteration(input: &[u8]) {
+    use kit_core::ops::rerere::{conflict_id, entry_is_valid, is_id, sorted_sides};
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let mut parts = input.splitn(3, |b| *b == 0);
+    let name = String::from_utf8_lossy(parts.next().unwrap_or_default());
+    let side1 = parts.next().unwrap_or_default();
+    let side2 = parts.next().unwrap_or_default();
+    if entry_is_valid(&name, side1, side2) {
+        assert!(is_id(&name), "a valid name is an id");
+        assert!(side1 <= side2, "valid sides are sorted");
+        assert_eq!(conflict_id(side2, side1), name, "the name is the id");
+    }
+    let id = conflict_id(side1, side2);
+    assert_eq!(
+        id,
+        conflict_id(side2, side1),
+        "the order of the sides is ignored"
+    );
+    let (a, b) = sorted_sides(side1, side2);
+    assert!(entry_is_valid(&id, a, b), "the sides make a valid entry");
+    assert_eq!(
+        entry_is_valid(&id, side1, side2),
+        side1 <= side2,
+        "unsorted sides are invalid"
     );
 }
 
@@ -3943,6 +4288,20 @@ mod tests {
     }
 
     #[test]
+    fn unit_shallow_record() {
+        run_iterated_unit(shallow_record_one_iteration).unwrap();
+        let line = format!("{}\n", "ab".repeat(32));
+        for case in [
+            line.clone(),
+            line.repeat(2),
+            line.to_uppercase(),
+            String::new(),
+        ] {
+            run_one(case.as_bytes(), shallow_record_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
     fn unit_local_pack_index() {
         run_iterated_unit(local_pack_index_one_iteration).unwrap();
     }
@@ -4081,6 +4440,23 @@ mod tests {
     }
 
     #[test]
+    fn unit_rename_score() {
+        run_iterated_unit(rename_score_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"\x80",
+            b"\x8050%\n1\n2\n3\n1\n2\nx\n",
+            b"\x80100%\nsame\nsame\n",
+            b"\x00\n\r\n\r\n",
+            b"\xff9\nabc",
+            b"\x40.5%\n\0\0\0\0bin",
+            b"\x80\n\r\r\n\r",
+        ] {
+            run_one(case, rename_score_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
     fn unit_blame_line_range() {
         run_iterated_unit(blame_line_range_one_iteration).unwrap();
         for case in [
@@ -4152,6 +4528,54 @@ mod tests {
     }
 
     #[test]
+    fn unit_rebase_autosquash() {
+        run_iterated_unit(rebase_autosquash_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"A\nfixup! A\n",
+            b"A\nB\nsquash! fixup! A\nfixup! B\nfixup! nothing\n",
+            b"fixup! fixup! \nfixup! \n\n",
+            b"\xff\nfixup! \xff\n",
+        ] {
+            run_one(case, rebase_autosquash_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_patch_parse() {
+        run_iterated_unit(patch_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            b"diff --git a/f b/f\nnew file mode 100644\n",
+            b"diff --git a/f b/g\nrename from f\nrename to g\n",
+            b"--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+a\n",
+        ] {
+            run_one(case, patch_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_mailbox_parse() {
+        run_iterated_unit(mailbox_parse_one_iteration).unwrap();
+        for case in [
+            &b""[..],
+            b"From 0 Mon Sep 17 00:00:00 2001\nFrom: A <a@x>\nSubject: s\n\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            b"From: =?UTF-8?B?w6k=?=\nSubject: [PATCH] x\n\nFrom: B\n\nbody\n",
+        ] {
+            run_one(case, mailbox_parse_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_rerere_entry() {
+        run_iterated_unit(rerere_entry_one_iteration).unwrap();
+        for case in [&b""[..], b"\0a\0b", b"\0b\0a", b"00\0\0", b"\xff\0\0\xff"] {
+            run_one(case, rerere_entry_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
     fn unit_rebase_todo_parse() {
         run_iterated_unit(rebase_todo_parse_one_iteration).unwrap();
         for case in [
@@ -4163,6 +4587,8 @@ mod tests {
             b"\x03edit 0\n",
             b"\x03drop\n",
             b"\x03p a\nr b\ns c\nf d\nd e\n",
+            b"\x03update-ref refs/heads/a\nu refs/heads/..\n",
+            b"\x03u refs/tags/v1\n",
             b"\x03\xff\xfe",
         ] {
             run_one(case, rebase_todo_parse_one_iteration).unwrap();

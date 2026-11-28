@@ -14,7 +14,7 @@ complete -c kit -f
 set -l __kit_subcommands \
     init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean \
     tag config merge push pull fetch stash worktree clone remote key grant epoch visibility keygen \
-    cherry-pick revert rebase bisect gc sparse-checkout serve mcp git blame prove verify \
+    cherry-pick revert rebase bisect rerere gc grep shortlog range-diff archive describe apply am sparse-checkout serve mcp git blame prove verify \
     verify-proof closure attest verify-attest self version help
 
 # Subcommand list (only when no subcommand has been entered yet).
@@ -92,6 +92,12 @@ complete -c kit -n "__fish_seen_subcommand_from diff" \
     -s U -l unified -d "Context lines around each hunk (default 3)"
 complete -c kit -n "__fish_seen_subcommand_from diff" \
     -s z -d "NUL-terminate name-only/name-status records, raw paths"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -s M -l find-renames -d "Detect renames at a similarity threshold (default 50%)"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -l no-renames -d "Turn off rename detection"
+complete -c kit -n "__fish_seen_subcommand_from diff" \
+    -s l -d "Rename candidate limit (default 1000, 0 for none)"
 complete -c kit -n "__fish_seen_subcommand_from cat-file" \
     -s t -d "Print object type"
 complete -c kit -n "__fish_seen_subcommand_from cat-file" \
@@ -143,16 +149,58 @@ complete -c kit -n "__fish_seen_subcommand_from status" \
     -s s -l short -d "Short format; alias for --porcelain=v1"
 complete -c kit -n "__fish_seen_subcommand_from status" \
     -s z -d "NUL-terminate records; raw unquoted paths"
+complete -c kit -n "__fish_seen_subcommand_from status" \
+    -l find-renames -d "Detect renames at a similarity threshold (default 50%)"
+complete -c kit -n "__fish_seen_subcommand_from status" \
+    -l no-renames -d "Turn off rename detection"
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l all -s a -d "Stage tracked changes"
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l amend -d "Replace HEAD instead of adding a new commit"
+complete -c kit -n "__fish_seen_subcommand_from commit" \
+    -l fixup -d "Make a fixup! commit for rebase --autosquash" -r
+complete -c kit -n "__fish_seen_subcommand_from commit" \
+    -l squash -d "Make a squash! commit for rebase --autosquash" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l message -s m -d "Commit message" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l file -s F -d "Read the commit message from a file (- for stdin)" -r
 complete -c kit -n "__fish_seen_subcommand_from commit" \
     -l author -d "Override the author identity" -r
+complete -c kit -n "__fish_seen_subcommand_from shortlog" -s s -l summary -d "Print counts only"
+complete -c kit -n "__fish_seen_subcommand_from shortlog" -s n -l numbered -d "Sort by count"
+complete -c kit -n "__fish_seen_subcommand_from shortlog" -s e -l email -d "Keep the email or key id"
+complete -c kit -n "__fish_seen_subcommand_from shortlog" -l format -d "Output format" -xa "default json"
+complete -c kit -n "__fish_seen_subcommand_from archive" -l format -d "Archive format" -xa "tar tar.gz"
+complete -c kit -n "__fish_seen_subcommand_from archive" -l prefix -d "Text before every path" -x
+complete -c kit -n "__fish_seen_subcommand_from archive" -s o -l output -d "Write to this file" -r
+complete -c kit -n "__fish_seen_subcommand_from range-diff" -l creation-factor -d "Cost of an unpaired commit, in percent" -x
+complete -c kit -n "__fish_seen_subcommand_from range-diff" -l no-dual-color -d "Accepted for git; kit prints no color"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l index -d "Apply to the worktree and the index"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l cached -d "Apply to the index only"
+complete -c kit -n "__fish_seen_subcommand_from apply" -s R -l reverse -d "Apply in reverse"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l check -d "Check only; write nothing"
+complete -c kit -n "__fish_seen_subcommand_from apply" -l stat -d "Print a diffstat; write nothing"
+complete -c kit -n "__fish_seen_subcommand_from am" -l continue -d "Commit the staged result and go on"
+complete -c kit -n "__fish_seen_subcommand_from am" -l skip -d "Drop the stopped mail"
+complete -c kit -n "__fish_seen_subcommand_from am" -l abort -d "Return to where am started"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l tags -d "Count lightweight tags"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l always -d "Fall back to the short id"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l abbrev -d "Id length" -r
+complete -c kit -n "__fish_seen_subcommand_from describe" -l long -d "Always print the long form"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l dirty -d "Mark a changed worktree"
+complete -c kit -n "__fish_seen_subcommand_from describe" -l match -d "Keep tags matching a glob" -r
+complete -c kit -n "__fish_seen_subcommand_from describe" -l exclude -d "Drop tags matching a glob" -r
+complete -c kit -n "__fish_seen_subcommand_from grep" -s i -l ignore-case -d "Ignore case"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s w -l word-regexp -d "Match whole words"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s v -l invert-match -d "Select lines that do not match"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s n -l line-number -d "Print line numbers"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s l -l files-with-matches -d "Print only paths"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s c -l count -d "Print counts"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s q -l quiet -d "Print nothing"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s F -l fixed-strings -d "Literal patterns"
+complete -c kit -n "__fish_seen_subcommand_from grep" -s e -d "A pattern" -r
+complete -c kit -n "__fish_seen_subcommand_from grep" -l cached -d "Search the staged content"
 complete -c kit -n "__fish_seen_subcommand_from blame" \
     -l format -d "Output format (default|json)" -r -a "default json"
 complete -c kit -n "__fish_seen_subcommand_from blame" \
@@ -182,9 +230,19 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l format -d "Output format (json)" -r -a json
 complete -c kit -n "__fish_seen_subcommand_from log" \
-    -l author -d "Filter by author substring" -r
+    -l author -d "Filter by author regex" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
-    -l grep -d "Filter by message substring" -r
+    -l grep -d "Filter by message regex" -r
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s F -l fixed-strings -d "Take patterns literally"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s i -l regexp-ignore-case -d "Ignore case in patterns"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s E -l extended-regexp -d "Extended regex (the default)"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l all-match -d "Require every --grep"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l invert-grep -d "Keep commits that do not match"
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l since -d "Only commits at or after this date" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
@@ -193,6 +251,10 @@ complete -c kit -n "__fish_seen_subcommand_from log" \
     -l no-merges -d "Hide merge commits from the output"
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -l first-parent -d "Follow only first parents"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -l follow -d "Follow one file across renames"
+complete -c kit -n "__fish_seen_subcommand_from log" \
+    -s L -d "Follow a range of lines: <start>,<end>:<file>" -r
 complete -c kit -n "__fish_seen_subcommand_from log" \
     -s p -l patch -d "Show the patch of each commit"
 complete -c kit -n "__fish_seen_subcommand_from log" \
@@ -209,6 +271,8 @@ complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -l format -d "Output format (default|json)" -r -a "default json"
 complete -c kit -n "__fish_seen_subcommand_from reflog" \
     -s n -d "Limit number of entries" -r
+complete -c kit -n "__fish_seen_subcommand_from reflog" \
+    -l recovery -d "List commits that amend, reset and rebase replaced"
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l all -d "Mirror every local branch"
 complete -c kit -n "__fish_seen_subcommand_from push" \
@@ -262,6 +326,16 @@ complete -c kit -n "__fish_seen_subcommand_from rebase" \
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l onto -d "Replay onto this revision" -r
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l autosquash -d "Fold fixup! and squash! commits into their targets"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l no-autosquash -d "Ignore rebase.autosquash"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l update-refs -d "Move the branches stacked on the replayed commits"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l no-update-refs -d "Ignore rebase.updateRefs"
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
+    -l exec -s x -d "Run a shell command after each replayed commit" -r
+complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l continue -d "Continue an in-progress rebase"
 complete -c kit -n "__fish_seen_subcommand_from rebase" \
     -l skip -d "Skip the current commit"
@@ -281,6 +355,12 @@ complete -c kit -n "__fish_seen_subcommand_from merge" \
     -l no-commit -d "Merge but stop before creating the merge commit"
 complete -c kit -n "__fish_seen_subcommand_from merge" \
     -l message -s m -d "Override the merge commit message" -r
+complete -c kit -n "__fish_seen_subcommand_from merge" \
+    -l strategy -s s -d "Merge strategy" -xa "ort recursive ours"
+complete -c kit -n "__fish_seen_subcommand_from merge" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from cherry-pick" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from revert" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
+complete -c kit -n "__fish_seen_subcommand_from rebase" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
 complete -c kit -n "__fish_seen_subcommand_from cherry-pick" \
     -l continue -d "Continue an in-progress cherry-pick"
 complete -c kit -n "__fish_seen_subcommand_from cherry-pick" \
@@ -302,6 +382,9 @@ complete -c kit -n "__fish_seen_subcommand_from keygen" \
 complete -c kit -n "__fish_seen_subcommand_from bisect; \
     and not __fish_seen_subcommand_from start good bad reset" \
     -a "start good bad reset"
+complete -c kit -n "__fish_seen_subcommand_from rerere; \
+    and not __fish_seen_subcommand_from status diff forget clear gc" \
+    -a "status diff forget clear gc"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l dry-run -s n -d "Preview without deleting"
 complete -c kit -n "__fish_seen_subcommand_from gc" -l grace-secs -d "Keep objects younger than SECS"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and not __fish_seen_subcommand_from add list remove prune move lock unlock repair" -a "add list remove prune move lock unlock repair"
@@ -424,6 +507,10 @@ complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_sub
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l history -d "Full ancestry (history mode)"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
+    -l branch -d "Record the branch of the root" -x
+complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
+    -l since -d "Leave out what this commit reaches" -x
+complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -s o -l output -d "Output directory" -r
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l force -d "Overwrite a non-empty directory"
@@ -508,6 +595,7 @@ complete -c kit -n "__fish_seen_subcommand_from revert" -l format -d "Output for
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l all -d "Pull from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l rebase -d "Replay the current branch onto the fetched branch"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-ff -d "Always create a merge commit"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l strategy-option -s X -d "Resolve every conflict to one side" -xa "ours theirs"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
@@ -531,4 +619,7 @@ function __kit_argument_names
 end
 complete -c kit -n 'test (count (commandline -opc)) -gt 1' -a '(__kit_argument_names)'
 complete -c kit -n "__fish_seen_subcommand_from stash" -s u -l include-untracked -d "Include non-ignored untracked files"
+complete -c kit -n "__fish_seen_subcommand_from stash" -s a -l all -d "Also stash ignored files"
+complete -c kit -n "__fish_seen_subcommand_from stash" -a branch -d "Branch from the stash's base and pop it"
 complete -c kit -n "__fish_seen_subcommand_from switch checkout" -a "- '@{-1}'" -d "Return to the previous HEAD"
+complete -c kit -n "__fish_seen_subcommand_from config" -l get-regexp -d "List set keys whose names match a regex" -r

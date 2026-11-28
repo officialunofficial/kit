@@ -1275,3 +1275,55 @@ resend an acknowledged part or advance refs without its upload commitment.
 
 **Enforced by:** request-policy seam tests and both-backend native push tests,
 including multipart interruption and receipt reuse across fresh instances.
+
+## A shallow repository's walks stop at its record
+
+**Always:** `.kit/shallow` is canonical: sorted 64-hex lines with no
+duplicates, each ending in a newline, never empty, at most 1 MiB. A reader
+refuses any other file with a typed error, and a writer replaces it under
+`shallow.lock` by an atomic rename, removing it when the boundary is empty.
+Every history walk (`log`, `rev-list`, `shortlog`, `gc`, the history check of
+`closure verify`) treats a commit in the record as having no parents. A
+merge base search fails with "the merge base is beyond the shallow
+boundary" when a common ancestor past the record could be nearer than the
+base it found, so it never returns a base it could not prove.
+`closure verify --history` refuses a record that names a reachable commit
+whose parents are all present, or that leaves out a reachable commit with a
+missing parent (SPEC-SHALLOW SH1 and SH2: every object the window reaches
+is present, and the record is exact).
+
+**Because:** a shallow repository lacks the parents of its boundary commits.
+A walk that followed them would fail on a missing object, and a merge that
+guessed a base would merge against the wrong history.
+
+**If violated:** `log` fails or lies about where history starts, `gc`
+refuses a shallow repository or keeps history it was told to drop, and a
+merge runs against a base the repository never saw.
+
+**Enforced by:** `kit_core::shallow` unit and property tests (the parser
+against its encoder, the exact record of SH2 on random graphs), the
+`shallow_record` fuzz target, and `kit-bin/tests/shallow.rs` for each command.
+
+## A shallow window is a function of the commit graph
+
+**Always:** the window of a set of `(tip, depth)` pairs holds exactly the
+commits at a shortest parent distance of less than the depth from some tip,
+and its boundary is the window's commits with a parent in no window, which is
+the record SH2 demands for a repository that holds exactly the window. A
+depth at or above the longest parent path from the tip gives the whole
+history and an empty boundary. The objects sent for a window are each window
+commit and its snapshot closure, less the snapshot closure of each commit the
+client holds (SPEC-SHALLOW SH3 and SH4).
+
+**Because:** the client computes the boundary again from the objects it
+receives and refuses a response whose list differs. That check needs the
+server and the client to compute one answer from one graph.
+
+**If violated:** two servers with the same objects send different windows, a
+client refuses an honest response, or a full-depth clone lacks part of the
+history.
+
+**Enforced by:** `kit_core::shallow::window` property tests against a
+breadth-first reference on random graphs, the SH2 cross-check with
+`exact_record`, and unit tests of `window_objects` and `window_packs` over a
+store.

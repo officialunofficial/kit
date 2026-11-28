@@ -1608,6 +1608,9 @@ fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+pub mod closure;
+pub use closure::{ClosureOpenError, ClosureTransport};
+
 #[cfg(test)]
 mod push_tests;
 

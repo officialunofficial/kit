@@ -45,7 +45,7 @@ use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
 use crate::layout::RepoLayout;
 use crate::object::Object;
-use crate::ops::merge::{Conflict, ConflictKind};
+use crate::ops::merge::{Conflict, ConflictKind, RenameConflict};
 use crate::refs;
 use crate::store::ObjectStore;
 
@@ -102,6 +102,10 @@ pub struct ConflictRecord {
     pub ours_hash: Option<Hash>,
     /// Theirs-side blob hash (`None` when theirs deleted).
     pub theirs_hash: Option<Hash>,
+    /// The rename behind the conflict, as [`Conflict::rename`]. It serves
+    /// the report when the operation pauses and is not stored, so a record
+    /// read back from disk has `None`.
+    pub rename: Option<RenameConflict>,
 }
 
 impl From<&Conflict> for ConflictRecord {
@@ -112,6 +116,7 @@ impl From<&Conflict> for ConflictRecord {
             base_hash: c.base_hash,
             ours_hash: c.ours_hash,
             theirs_hash: c.theirs_hash,
+            rename: c.rename.clone(),
         }
     }
 }
@@ -202,6 +207,7 @@ pub fn deserialize_conflicts(data: &[u8]) -> ConflictStateResult<Vec<ConflictRec
             base_hash: parse_hex_or_dash(base)?,
             ours_hash: parse_hex_or_dash(ours)?,
             theirs_hash: parse_hex_or_dash(theirs)?,
+            rename: None,
         });
     }
     Ok(out)
@@ -715,11 +721,18 @@ pub fn is_cherry_pick_in_progress(layout: &RepoLayout) -> bool {
     layout.cherry_pick_head_file().exists()
 }
 
-/// `true` when any merge / cherry-pick / rebase is in progress. Used to
+/// `true` when a `kit am` is paused (`am/` present).
+#[must_use]
+pub fn is_am_in_progress(layout: &RepoLayout) -> bool {
+    layout.am_dir().exists()
+}
+
+/// `true` when any merge / cherry-pick / rebase / am is in progress. Used to
 /// refuse starting a second such operation while one is unfinished.
 #[must_use]
 pub fn any_op_in_progress(layout: &RepoLayout) -> bool {
-    is_merge_in_progress(layout)
+    is_am_in_progress(layout)
+        || is_merge_in_progress(layout)
         || is_cherry_pick_in_progress(layout)
         || is_revert_in_progress(layout)
         || crate::ops::rebase::is_rebase_in_progress(layout)
@@ -736,6 +749,8 @@ pub fn in_progress_op_name(layout: &RepoLayout) -> Option<&'static str> {
         Some("revert")
     } else if crate::ops::rebase::is_rebase_in_progress(layout) {
         Some("rebase")
+    } else if is_am_in_progress(layout) {
+        Some("am")
     } else {
         None
     }
@@ -912,6 +927,7 @@ mod tests {
                 base_hash: Some(h("b")),
                 ours_hash: Some(h("o")),
                 theirs_hash: Some(h("t")),
+                rename: None,
             },
             ConflictRecord {
                 path: "new.txt".into(),
@@ -919,6 +935,7 @@ mod tests {
                 base_hash: None,
                 ours_hash: Some(h("o2")),
                 theirs_hash: Some(h("t2")),
+                rename: None,
             },
             ConflictRecord {
                 path: "gone.txt".into(),
@@ -926,6 +943,7 @@ mod tests {
                 base_hash: Some(h("b3")),
                 ours_hash: None,
                 theirs_hash: Some(h("t3")),
+                rename: None,
             },
         ];
         let bytes = serialize_conflicts(&records);
@@ -973,6 +991,7 @@ mod tests {
             base_hash: Some(h("b")),
             ours_hash: Some(h("o")),
             theirs_hash: Some(h("t")),
+            rename: None,
         }];
         write_merge_state(&kit, &state, &conflicts).unwrap();
         assert!(is_merge_in_progress(&kit));
@@ -1067,6 +1086,7 @@ mod tests {
             base_hash: Some(h("b")),
             ours_hash: Some(h("o")),
             theirs_hash: Some(h("t")),
+            rename: None,
         }];
         assert!(write_merge_state(&kit, &state, &conflicts).is_err());
         assert!(

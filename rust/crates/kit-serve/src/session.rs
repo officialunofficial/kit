@@ -155,6 +155,7 @@ fn handshake<S: FrameSource, K: FrameSink>(
     let resp = ssh_frame::Body::HelloResponse(Box::new(HelloResponse {
         proto: Some(ProtocolVersion::ProtocolVersion1.into()),
         server_id: Some(server_id.to_owned()),
+        download_window: Some(true),
         ..Default::default()
     }));
     send_body(sink, resp).map_err(|_| SessionEnd::ProtocolError)

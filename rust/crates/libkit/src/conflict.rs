@@ -61,6 +61,28 @@ pub enum Event {
         /// How the path is presented.
         class: ConflictClass,
     },
+    /// A recorded resolution replaced the markers of a text conflict.
+    ReusedResolution {
+        /// The repository-relative path.
+        path: String,
+    },
+    /// The sides of a text conflict are recorded, so that its resolution
+    /// can be kept.
+    RecordedPreimage {
+        /// The repository-relative path.
+        path: String,
+    },
+    /// The staged content of a conflict is recorded as its resolution.
+    RecordedResolution {
+        /// The repository-relative path.
+        path: String,
+    },
+    /// The resolution cache could not be used for a path or at all. The
+    /// operation goes on without it.
+    RerereWarning {
+        /// What went wrong.
+        message: String,
+    },
 }
 
 /// Errors from the conflict workflow.
@@ -235,7 +257,7 @@ const MARK_SEP: &str = "=======";
 const MARK_THEIRS: &str = ">>>>>>> theirs";
 
 /// A blob is text when it has no NUL byte and is valid UTF-8.
-fn is_text(data: &[u8]) -> bool {
+pub(crate) fn is_text(data: &[u8]) -> bool {
     !data.contains(&0) && core::str::from_utf8(data).is_ok()
 }
 
@@ -389,6 +411,11 @@ fn stage_ours(idx: &mut Index, store: &ObjectStore, c: &Conflict) {
 }
 
 fn write_text_markers(abs: &Path, ours: &[u8], theirs: &[u8]) -> Result<(), Error> {
+    write_bytes(abs, &marker_bytes(ours, theirs))
+}
+
+/// The file of a text conflict: both sides whole, between markers.
+pub(crate) fn marker_bytes(ours: &[u8], theirs: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(MARK_OURS.as_bytes());
     buf.push(b'\n');
@@ -404,7 +431,7 @@ fn write_text_markers(abs: &Path, ours: &[u8], theirs: &[u8]) -> Result<(), Erro
     }
     buf.extend_from_slice(MARK_THEIRS.as_bytes());
     buf.push(b'\n');
-    write_bytes(abs, &buf)
+    buf
 }
 
 /// Put the surviving side of a non-text conflict in the files, with its mode.
@@ -440,7 +467,7 @@ fn materialize_side(store: &ObjectStore, abs: &Path, c: &Conflict) -> Result<(),
 /// an existing ancestor is a symlink or not a directory, or when a component
 /// is the repository directory under another spelling, since the write would
 /// resolve into another path.
-fn writable_path(root: &Path, rel: &str) -> Result<PathBuf, Error> {
+pub(crate) fn writable_path(root: &Path, rel: &str) -> Result<PathBuf, Error> {
     let path = root.join(rel);
     match worktree::path_for_write(root, rel) {
         Ok(Some(abs)) => Ok(abs),
@@ -531,7 +558,7 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
     ))
 }
 
-fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), Error> {
+pub(crate) fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), Error> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|source| Error::CreateDir {
             path: parent.to_path_buf(),

@@ -24,8 +24,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::hash::Hash;
 use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::ops::graph::{AncestorError, read_history_commit};
+use crate::ops::similarity::RenameOptions;
 use crate::serialize;
+use crate::shallow::Boundary;
 use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError, WalkBudget};
+
+mod renames;
 
 /// Distinct conflict kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +40,55 @@ pub enum ConflictKind {
     DeleteModify,
     /// Both sides created the path with different content.
     AddAdd,
+}
+
+/// The side a content conflict resolves to, as git's `-X ours` and
+/// `-X theirs`. With a side, a conflicting hunk of a text file takes that
+/// side's lines, a binary or large file takes that side's whole content,
+/// and an add/add conflict between two files takes that side's file.
+/// Delete/modify conflicts, a file against a directory and two different
+/// modes still conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Favor {
+    /// Report every conflict.
+    #[default]
+    None,
+    /// Resolve conflicts to the ours side.
+    Ours,
+    /// Resolve conflicts to the theirs side.
+    Theirs,
+}
+
+impl Favor {
+    /// Parse the value of `-X`: `ours` or `theirs`. Anything else is `None`.
+    #[must_use]
+    pub fn from_option(s: &str) -> Option<Self> {
+        match s {
+            "ours" => Some(Favor::Ours),
+            "theirs" => Some(Favor::Theirs),
+            _ => None,
+        }
+    }
+
+    /// The `-X` value of this side, or `None` for [`Favor::None`].
+    #[must_use]
+    pub fn option(self) -> Option<&'static str> {
+        match self {
+            Favor::None => None,
+            Favor::Ours => Some("ours"),
+            Favor::Theirs => Some("theirs"),
+        }
+    }
+
+    /// The favored one of `ours` and `theirs`, or `None` for
+    /// [`Favor::None`].
+    fn pick<T>(self, ours: T, theirs: T) -> Option<T> {
+        match self {
+            Favor::None => None,
+            Favor::Ours => Some(ours),
+            Favor::Theirs => Some(theirs),
+        }
+    }
 }
 
 /// Single conflict report. `base_hash`, `ours_hash`, `theirs_hash` are
@@ -57,6 +110,40 @@ pub struct Conflict {
     /// Tree mode of the theirs-side entry (`None` when theirs deleted
     /// the path).
     pub theirs_mode: Option<EntryMode>,
+    /// Set when the conflict comes from a rename: a rename against a
+    /// delete, or one of two renames of a file to different paths. `path`
+    /// is the new path, and the conflict has the shape of
+    /// [`ConflictKind::DeleteModify`].
+    pub rename: Option<RenameConflict>,
+}
+
+/// The rename behind a [`Conflict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameConflict {
+    /// The path in the base.
+    pub from: String,
+    /// The path the other side renamed the file to, or `None` when the
+    /// other side deleted it.
+    pub other: Option<String>,
+}
+
+/// What a three-way merge does beyond the path-by-path merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeOptions {
+    /// The side content conflicts resolve to.
+    pub favor: Favor,
+    /// How renames between the base and each side are detected, or `None`
+    /// to merge path by path only.
+    pub renames: Option<RenameOptions>,
+}
+
+impl Default for MergeOptions {
+    fn default() -> Self {
+        Self {
+            favor: Favor::None,
+            renames: Some(RenameOptions::default()),
+        }
+    }
 }
 
 /// Result of [`merge_trees`]. The `tree_hash` is always populated —
@@ -100,12 +187,67 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
     ours_hash: Option<Hash>,
     theirs_hash: Option<Hash>,
 ) -> Result<MergeResult, StoreError> {
+    merge_trees_favoring(store, base_hash, ours_hash, theirs_hash, Favor::None)
+}
+
+/// [`merge_trees`] that resolves content conflicts to one side, as
+/// [`Favor`] describes. With [`Favor::None`] it is [`merge_trees`].
+///
+/// # Errors
+///
+/// As [`merge_trees`].
+pub fn merge_trees_favoring<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
+    base_hash: Option<Hash>,
+    ours_hash: Option<Hash>,
+    theirs_hash: Option<Hash>,
+    favor: Favor,
+) -> Result<MergeResult, StoreError> {
+    merge_trees_with(
+        store,
+        base_hash,
+        ours_hash,
+        theirs_hash,
+        &MergeOptions {
+            favor,
+            ..MergeOptions::default()
+        },
+    )
+}
+
+/// [`merge_trees`] with [`MergeOptions`].
+///
+/// With rename detection, a file that one side renamed and the other side
+/// kept merges at the new path, and the other side's changes to it go
+/// there. A rename against a delete, and two renames of one file to
+/// different paths, are conflicts at each new path, with
+/// [`Conflict::rename`] set. Conflicts come sorted by path.
+///
+/// # Errors
+///
+/// As [`merge_trees`].
+pub fn merge_trees_with<S: ObjectSource + ObjectSink + ?Sized>(
+    store: &S,
+    base_hash: Option<Hash>,
+    ours_hash: Option<Hash>,
+    theirs_hash: Option<Hash>,
+    options: &MergeOptions,
+) -> Result<MergeResult, StoreError> {
+    let favor = options.favor;
+    let mut conflicts: Vec<Conflict> = Vec::new();
+    let (base_hash, ours_hash, theirs_hash) = match &options.renames {
+        Some(renames) => {
+            let prepared = renames::prepare(store, base_hash, ours_hash, theirs_hash, renames)?;
+            conflicts = prepared.conflicts;
+            (prepared.base, prepared.ours, prepared.theirs)
+        }
+        None => (base_hash, ours_hash, theirs_hash),
+    };
     let base_entries = load_entries(store, base_hash)?;
     let ours_entries = load_entries(store, ours_hash)?;
     let theirs_entries = load_entries(store, theirs_hash)?;
 
     let mut merged: Vec<TreeEntry> = Vec::new();
-    let mut conflicts: Vec<Conflict> = Vec::new();
     merge_entries_recursive(
         store,
         &base_entries,
@@ -116,9 +258,11 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
         &mut conflicts,
         0,
         &mut WalkBudget::new(),
+        favor,
     )?;
 
     let tree_hash = put_tree(store, merged)?;
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(MergeResult {
         tree_hash,
         conflicts,
@@ -370,6 +514,154 @@ fn is_ancestor_strict_with_cap<S: ObjectSource + ?Sized>(
     Ok(false)
 }
 
+/// [`find_merge_base_strict`] in a repository whose history stops at
+/// `boundary`. Both walks stop at the commits in the record, and the second
+/// walk picks the base as [`find_merge_base_strict`] does.
+///
+/// The answer stands only when no common ancestor the walks cannot see
+/// could be as near. Such an ancestor lies past a boundary commit on at
+/// least one side, so its total depth is more than the depth of that
+/// side's nearest boundary commit. Otherwise the walk fails with
+/// [`AncestorError::BeyondShallowBoundary`]: it never answers from the part
+/// of the history it holds. With an empty boundary it is
+/// [`find_merge_base_strict`].
+///
+/// # Errors
+///
+/// [`AncestorError::BeyondShallowBoundary`] as above, and every error of
+/// [`find_merge_base_strict`].
+pub fn find_merge_base_within<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    a: Hash,
+    b: Hash,
+) -> Result<Option<Hash>, AncestorError> {
+    if boundary.is_empty() {
+        return find_merge_base_strict(store, a, b);
+    }
+    if a == b {
+        return Ok(Some(a));
+    }
+    let side_a = window_depths(store, boundary, a)?;
+    let mut cut_b: Option<usize> = None;
+    let mut seen_b: HashSet<Hash> = HashSet::new();
+    let mut queue: VecDeque<(Hash, usize)> = VecDeque::new();
+    seen_b.insert(b);
+    queue.push_back((b, 0));
+    let mut best: Option<(Hash, usize)> = None;
+    while let Some((node, depth)) = queue.pop_front() {
+        if let Some((_, best_total)) = best
+            && depth > best_total
+        {
+            break;
+        }
+        if let Some(&ancestor_depth) = side_a.depths.get(&node) {
+            let total = ancestor_depth + depth;
+            if best.is_none_or(|(_, t)| total < t) {
+                best = Some((node, total));
+            }
+        }
+        let commit = read_history_commit(store, node)?;
+        if boundary.contains(&node) {
+            if !commit.parents.is_empty() && cut_b.is_none() {
+                cut_b = Some(depth);
+            }
+            continue;
+        }
+        for p in commit.parents {
+            if !seen_b.contains(&p) {
+                if seen_b.len() >= MAX_STRICT_WALK_COMMITS {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                seen_b.insert(p);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+    // The nearest a hidden common ancestor can be.
+    let hidden = [side_a.nearest_cut, cut_b]
+        .into_iter()
+        .flatten()
+        .map(|cut| cut + 1)
+        .min();
+    match (best, hidden) {
+        (best, None) => Ok(best.map(|(h, _)| h)),
+        (Some((h, total)), Some(bound)) if total < bound => Ok(Some(h)),
+        _ => Err(AncestorError::BeyondShallowBoundary),
+    }
+}
+
+/// The commits a walk from `start` reaches inside the window, each at its
+/// smallest depth, and the smallest depth of a boundary commit whose
+/// parents the walk did not follow.
+struct WindowDepths {
+    depths: HashMap<Hash, usize>,
+    nearest_cut: Option<usize>,
+}
+
+fn window_depths<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    start: Hash,
+) -> Result<WindowDepths, AncestorError> {
+    let mut depths: HashMap<Hash, usize> = HashMap::new();
+    let mut nearest_cut = None;
+    let mut queue: VecDeque<(Hash, usize)> = VecDeque::new();
+    depths.insert(start, 0);
+    queue.push_back((start, 0));
+    while let Some((node, depth)) = queue.pop_front() {
+        let commit = read_history_commit(store, node)?;
+        if boundary.contains(&node) {
+            if !commit.parents.is_empty() && nearest_cut.is_none() {
+                nearest_cut = Some(depth);
+            }
+            continue;
+        }
+        for p in commit.parents {
+            if !depths.contains_key(&p) {
+                if depths.len() >= MAX_STRICT_WALK_COMMITS {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                depths.insert(p, depth + 1);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+    Ok(WindowDepths {
+        depths,
+        nearest_cut,
+    })
+}
+
+/// [`is_ancestor_strict`] in a repository whose history stops at
+/// `boundary`. The walk stops at the commits in the record. When it does
+/// not reach `ancestor` and had to stop at a boundary commit, the answer
+/// lies beyond the boundary and the walk fails with
+/// [`AncestorError::BeyondShallowBoundary`].
+///
+/// # Errors
+///
+/// [`AncestorError::BeyondShallowBoundary`] as above, and every error of
+/// [`is_ancestor_strict`].
+pub fn is_ancestor_within<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    ancestor: Hash,
+    descendant: Hash,
+) -> Result<bool, AncestorError> {
+    if boundary.is_empty() {
+        return is_ancestor_strict(store, ancestor, descendant);
+    }
+    let walk = window_depths(store, boundary, descendant)?;
+    if walk.depths.contains_key(&ancestor) {
+        Ok(true)
+    } else if walk.nearest_cut.is_some() {
+        Err(AncestorError::BeyondShallowBoundary)
+    } else {
+        Ok(false)
+    }
+}
+
 fn strict_limit(limit: &'static str) -> AncestorError {
     AncestorError::Limit(StoreError::OperationLimitExceeded(limit))
 }
@@ -420,21 +712,24 @@ fn single_blob_bytes<S: ObjectSource + ?Sized>(
 /// blob. Returns the hash of the merged blob when ours/theirs
 /// changed disjoint regions of base, or `None` to fall back to a
 /// modify/modify conflict (overlapping changes, a binary side, or a
-/// chunked/large blob). Genuine store I/O errors propagate.
+/// chunked/large blob). With a [`Favor`] side it never falls back: a
+/// conflicting hunk takes that side's lines, and content that cannot be
+/// line-merged is that side's blob. Genuine store I/O errors propagate.
 fn try_text_merge<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
     base_h: Hash,
     ours_h: Hash,
     theirs_h: Hash,
+    favor: Favor,
 ) -> Result<Option<Hash>, StoreError> {
     let (Some(base), Some(ours), Some(theirs)) = (
         single_blob_bytes(store, base_h)?,
         single_blob_bytes(store, ours_h)?,
         single_blob_bytes(store, theirs_h)?,
     ) else {
-        return Ok(None);
+        return Ok(favor.pick(ours_h, theirs_h));
     };
-    match crate::ops::merge_blob_3way(&base, &ours, &theirs) {
+    match crate::ops::merge_blob_3way_favoring(&base, &ours, &theirs, favor) {
         Some(merged) => {
             // Store as a single Blob — same shape (and hash) `add` produces
             // for sub-threshold content, so the merged object dedups.
@@ -540,6 +835,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
     conflicts: &mut Vec<Conflict>,
     depth: usize,
     budget: &mut WalkBudget,
+    favor: Favor,
 ) -> Result<(), StoreError> {
     let sub_prefix = join_path(prefix, entry_name);
     let base_entries = load_entries(store, base_sub)?;
@@ -557,6 +853,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
         conflicts,
         depth + 1,
         budget,
+        favor,
     )?;
 
     let sub_hash = put_tree(store, sub_merged)?;
@@ -575,6 +872,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     conflicts: &mut Vec<Conflict>,
     depth: usize,
     budget: &mut WalkBudget,
+    favor: Favor,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -651,6 +949,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -669,6 +968,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, t.mode, t.object_hash);
@@ -687,6 +987,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                             conflicts,
                             depth,
                             budget,
+                            favor,
                         )?;
                     } else {
                         add_entry(merged, min_name, o.mode, o.object_hash);
@@ -707,11 +1008,12 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         conflicts,
                         depth,
                         budget,
+                        favor,
                     )?;
                 } else if o.mode == t.mode
                     && matches!(o.mode, EntryMode::Blob | EntryMode::Executable)
                     && let Some(merged_hash) =
-                        try_text_merge(store, b.object_hash, o.object_hash, t.object_hash)?
+                        try_text_merge(store, b.object_hash, o.object_hash, t.object_hash, favor)?
                 {
                     // Both changed the same regular file, but on disjoint
                     // lines — auto-merge the content. Mode is shared,
@@ -729,6 +1031,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: Some(o.mode),
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     // Ours wins in the merged tree.
                     add_entry(merged, min_name, o.mode, o.object_hash);
@@ -755,7 +1058,15 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         conflicts,
                         depth,
                         budget,
+                        favor,
                     )?;
+                } else if o.mode != EntryMode::Tree
+                    && t.mode != EntryMode::Tree
+                    && let Some(side) = favor.pick(o, t)
+                {
+                    // Two files added at one path: the favored side's file,
+                    // which is what a line merge over an empty base gives.
+                    add_entry(merged, min_name, side.mode, side.object_hash);
                 } else {
                     conflicts.push(Conflict {
                         path: join_path(prefix, min_name),
@@ -765,6 +1076,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: Some(o.mode),
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -781,6 +1093,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: None,
                         ours_mode: Some(o.mode),
                         theirs_mode: None,
+                        rename: None,
                     });
                     add_entry(merged, min_name, o.mode, o.object_hash);
                 }
@@ -797,6 +1110,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
                         theirs_hash: Some(t.object_hash),
                         ours_mode: None,
                         theirs_mode: Some(t.mode),
+                        rename: None,
                     });
                     add_entry(merged, min_name, t.mode, t.object_hash);
                 }
@@ -888,6 +1202,65 @@ mod tests {
     }
     fn find_entry<'a>(entries: &'a [TreeEntry], name: &[u8]) -> Option<&'a TreeEntry> {
         entries.iter().find(|e| e.name == name)
+    }
+
+    fn merge_favoring(
+        s: &CorpusStore,
+        base: Hash,
+        ours: Hash,
+        theirs: Hash,
+        favor: Favor,
+    ) -> MergeResult {
+        s.compare(|backend| {
+            super::merge_trees_favoring(backend, Some(base), Some(ours), Some(theirs), favor)
+        })
+        .unwrap()
+    }
+
+    fn one_file(s: &CorpusStore, mode: EntryMode, data: &[u8]) -> Hash {
+        let blob = put_blob(s, data);
+        make_tree(s, vec![entry(b"f", mode, blob)])
+    }
+
+    #[test]
+    fn favoring_resolves_a_content_and_an_add_add_conflict_to_the_side() {
+        let (_d, s) = store();
+        let base = one_file(&s, EntryMode::Blob, b"1\n2\n3\n");
+        let ours = one_file(&s, EntryMode::Blob, b"ours\n2\n3\n");
+        let theirs = one_file(&s, EntryMode::Blob, b"theirs\n2\n3\n");
+        let empty = make_tree(&s, Vec::new());
+        assert!(merge_favoring(&s, base, ours, theirs, Favor::None).has_conflicts());
+        for (favor, want) in [(Favor::Ours, ours), (Favor::Theirs, theirs)] {
+            let r = merge_favoring(&s, base, ours, theirs, favor);
+            assert!(!r.has_conflicts(), "{favor:?}");
+            assert_eq!(r.tree_hash, want, "{favor:?}");
+            let r = merge_favoring(&s, empty, ours, theirs, favor);
+            assert!(!r.has_conflicts(), "add/add {favor:?}");
+            assert_eq!(r.tree_hash, want, "add/add {favor:?}");
+        }
+    }
+
+    #[test]
+    fn favoring_still_stops_on_delete_modify_mode_and_kind_conflicts() {
+        let (_d, s) = store();
+        let base = one_file(&s, EntryMode::Blob, b"1\n");
+        let changed = one_file(&s, EntryMode::Blob, b"2\n");
+        let exec = one_file(&s, EntryMode::Executable, b"3\n");
+        let empty = make_tree(&s, Vec::new());
+        let dir = make_tree(&s, vec![entry(b"f", EntryMode::Tree, base)]);
+        for favor in [Favor::Ours, Favor::Theirs] {
+            let kinds = |b, o, t| {
+                merge_favoring(&s, b, o, t, favor)
+                    .conflicts
+                    .iter()
+                    .map(|c| c.kind)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(kinds(base, empty, changed), [ConflictKind::DeleteModify]);
+            assert_eq!(kinds(base, changed, empty), [ConflictKind::DeleteModify]);
+            assert_eq!(kinds(base, changed, exec), [ConflictKind::ModifyModify]);
+            assert_eq!(kinds(empty, changed, dir), [ConflictKind::AddAdd]);
+        }
     }
 
     #[test]
@@ -1751,6 +2124,7 @@ mod walk_budget_tests {
                 &mut conflicts,
                 0,
                 &mut budget,
+                Favor::None,
             )
         };
         merge(1_000_000).unwrap();
@@ -1803,10 +2177,116 @@ mod walk_budget_tests {
                 &mut conflicts,
                 0,
                 &mut budget,
+                Favor::None,
             )
         };
         let exact = (67 + 100) + 2 * (67 + 102);
         merge(exact).unwrap();
         assert!(matches!(merge(exact - 1), Err(StoreError::TreeTooLarge)));
+    }
+
+    mod shallow_walks {
+        use super::super::{
+            find_merge_base_strict, find_merge_base_within, is_ancestor_strict, is_ancestor_within,
+        };
+        use crate::hash::Hash;
+        use crate::object::{Commit, Identity, Object, Tree, object_id_from_bytes};
+        use crate::ops::graph::AncestorError;
+        use crate::serialize;
+        use crate::shallow::{Boundary, exact_record};
+        use crate::store::MemorySource;
+        use proptest::prelude::*;
+
+        /// Commits 0..n, each with parents among the lower numbers, written
+        /// to a full store and, where `present`, to a shallow one.
+        fn stores(
+            edges: &[Vec<prop::sample::Index>],
+            present: &[bool],
+        ) -> (MemorySource, MemorySource, Vec<Hash>, Vec<Vec<Hash>>) {
+            let mut full = MemorySource::default();
+            let mut part = MemorySource::default();
+            let tree = serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap();
+            let tree_id = object_id_from_bytes(&tree);
+            full.insert(tree_id, tree.clone()).unwrap();
+            part.insert(tree_id, tree).unwrap();
+            let mut ids: Vec<Hash> = Vec::new();
+            let mut parents_of: Vec<Vec<Hash>> = Vec::new();
+            for (i, ps) in edges.iter().enumerate() {
+                let mut parents: Vec<Hash> = if i == 0 {
+                    vec![]
+                } else {
+                    ps.iter().map(|ix| ids[ix.index(i)]).collect()
+                };
+                parents.dedup();
+                let bytes = serialize::serialize(&Object::Commit(Commit {
+                    tree_hash: tree_id,
+                    parents: parents.clone(),
+                    author: Identity::ed25519([0; 32]),
+                    signer: [0; 32],
+                    message: format!("c{i}").into_bytes(),
+                    timestamp: i as u64,
+                    message_hash: [0; 32],
+                    content_digest: [0; 32],
+                    signature: [0; 64],
+                }))
+                .unwrap();
+                let id = object_id_from_bytes(&bytes);
+                full.insert(id, bytes.clone()).unwrap();
+                if present[i] {
+                    part.insert(id, bytes).unwrap();
+                }
+                ids.push(id);
+                parents_of.push(parents);
+            }
+            (full, part, ids, parents_of)
+        }
+
+        fn graph() -> impl Strategy<Value = (Vec<Vec<prop::sample::Index>>, Vec<bool>, usize, usize)>
+        {
+            (2usize..20).prop_flat_map(|n| {
+                (
+                    proptest::collection::vec(
+                        proptest::collection::vec(any::<prop::sample::Index>(), 0..3),
+                        n,
+                    ),
+                    proptest::collection::vec(proptest::bool::weighted(0.8), n),
+                    0..n,
+                    0..n,
+                )
+            })
+        }
+
+        proptest! {
+            /// A walk that stops at the exact record either fails with the
+            /// typed error or gives the answer the whole history gives.
+            #[test]
+            fn a_shallow_answer_is_the_full_answer(
+                (edges, mut present, a, b) in graph()
+            ) {
+                present[a] = true;
+                present[b] = true;
+                let (full, part, ids, parents_of) = stores(&edges, &present);
+                let index = |h: &Hash| ids.iter().position(|x| x == h);
+                let boundary: Boundary = exact_record(&[ids[a], ids[b]], |h| {
+                    index(h).filter(|&i| present[i]).map(|i| parents_of[i].clone())
+                });
+                let (ha, hb) = (ids[a], ids[b]);
+
+                match find_merge_base_within(&part, &boundary, ha, hb) {
+                    Ok(base) => prop_assert_eq!(base, find_merge_base_strict(&full, ha, hb).unwrap()),
+                    Err(e) => prop_assert!(matches!(e, AncestorError::BeyondShallowBoundary), "{e}"),
+                }
+                match is_ancestor_within(&part, &boundary, ha, hb) {
+                    Ok(v) => prop_assert_eq!(v, is_ancestor_strict(&full, ha, hb).unwrap()),
+                    Err(e) => prop_assert!(matches!(e, AncestorError::BeyondShallowBoundary), "{e}"),
+                }
+                if boundary.is_empty() {
+                    prop_assert_eq!(
+                        find_merge_base_within(&part, &boundary, ha, hb).unwrap(),
+                        find_merge_base_strict(&full, ha, hb).unwrap()
+                    );
+                }
+            }
+        }
     }
 }
