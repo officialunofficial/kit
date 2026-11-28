@@ -597,11 +597,12 @@ where
 /// index from the tree records these as the stat cache, so the next
 /// command does not re-hash files the restore just wrote.
 ///
-/// An observation is pushed only when the file at its final path is
-/// still the inode this restore wrote, with the same size and mtime as
-/// the open handle reported after the last write. Its fields are read
-/// from the final path after the rename, because a rename moves the
-/// ctime. A later edit that leaves size, mtime and ctime unchanged is
+/// On Unix an observation is read from the open handle of the file this
+/// restore wrote, after the link or rename that gave it its final name,
+/// because that moves the ctime. Elsewhere it is pushed only when the file
+/// at its final path is still the inode this restore wrote, with the same
+/// size and mtime as the open handle reported after the last write, and
+/// its fields are read from the final path. A later edit that leaves size, mtime and ctime unchanged is
 /// invisible to it, as to every stat observation. A caller that writes the
 /// index after this returns can wait out the racy window first, as
 /// `kit_sync::worktree::sync_index_to_tree_observed` does, so that the next
@@ -1625,9 +1626,7 @@ fn restore_blob(
                 cb.check_reassembled_size(written)?;
                 Ok(())
             })();
-            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
-            drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, None)?;
+            finish_or_discard_tmp(tmp, result, &tmp_path, &final_path, executable, false, None)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
@@ -1644,7 +1643,7 @@ fn restore_blob(
 /// entry point's own signature).
 ///
 /// With `observe`, returns the written file's stat fields when
-/// [`observe_written`] can prove them; see
+/// the handle gives them; see
 /// [`restore_tree_to_worktree_observed`].
 ///
 /// # Panics
@@ -1694,15 +1693,15 @@ where
                     cb.check_reassembled_size(written)
                         .map_err(RestoreError::from)
                 });
-            let written = if observe && result.is_ok() {
-                tmp.metadata().ok()
-            } else {
-                None
-            };
-            #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
-            drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
-            Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
+            finish_or_discard_tmp(
+                tmp,
+                result,
+                &tmp_path,
+                &final_path,
+                executable,
+                observe,
+                case_source,
+            )
         }
         _ => Err(RestoreError::NotABlob),
     }
@@ -1779,6 +1778,7 @@ fn observation(path: String, object_hash: Hash, stat: StatFields) -> worktree::S
 /// size and mtime; any later write that moved the mtime fails the check.
 /// The fields come from the final path, because the rename moved the
 /// ctime.
+#[cfg(any(not(unix), test))]
 fn observe_written(written: &fs::Metadata, final_path: &Path) -> Option<StatFields> {
     let now = fs::symlink_metadata(final_path).ok()?;
     let (mtime, size, ino, _) = worktree::stat_cache_fields(written);
@@ -1787,28 +1787,76 @@ fn observe_written(written: &fs::Metadata, final_path: &Path) -> Option<StatFiel
         .then_some(fields)
 }
 
-/// Rename the tmp file into place when `result` is `Ok`. When the write,
-/// the mode change or the rename fails, remove the tmp file this call was
-/// given, and only that file, and return the error. A failed restore then
-/// leaves no partial file behind. A failure to remove the tmp file never
-/// replaces the error.
+/// Stat-cache fields of a file this restore just put in place, read from
+/// its open handle after it got its final name, which moved its ctime. They
+/// describe the file at its name unless the name was taken by another file
+/// since, which has another inode, so a later status hashes it again. A
+/// write to this file through its name after that moves its mtime into the
+/// index's racy window, which hashes it again too. This is the one stat git
+/// makes of a file it checks out.
+#[cfg(unix)]
+fn observe_handle(file: &fs::File) -> Option<StatFields> {
+    let meta = file.metadata().ok()?;
+    let fields = worktree::stat_cache_fields(&meta);
+    (meta.is_file() && fields.0 != 0).then_some(fields)
+}
+
+/// Rename the tmp file into place when `result` is `Ok`, and with `observe`
+/// return its stat fields. When the write, the mode change or the rename
+/// fails, remove the tmp file this call was given, and only that file, and
+/// return the error. A failed restore then leaves no partial file behind. A
+/// failure to remove the tmp file never replaces the error.
+///
+/// On Unix `tmp` stays open through the rename: the mode is set and the stat
+/// fields are read through it, with no lookup of either name. Elsewhere it
+/// is closed first, and the fields come from the final name when
+/// [`observe_written`] can prove them.
+#[allow(clippy::too_many_arguments)]
 fn finish_or_discard_tmp(
+    tmp: fs::File,
     result: RestoreResult<()>,
     tmp_path: &Path,
     final_path: &Path,
     executable: bool,
+    observe: bool,
     case_source: Option<&CaseRenameSource>,
-) -> RestoreResult<()> {
-    let result = result.and_then(|()| {
-        if executable {
-            apply_executable_bit(tmp_path)?;
+) -> RestoreResult<Option<StatFields>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let result = result.and_then(|()| {
+            if executable {
+                tmp.set_permissions(fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(publish_restore_temp(tmp_path, final_path, case_source)?)
+        });
+        if let Err(error) = result {
+            drop(tmp);
+            let _ = fs::remove_file(tmp_path);
+            return Err(error);
         }
-        Ok(publish_restore_temp(tmp_path, final_path, case_source)?)
-    });
-    if result.is_err() {
-        let _ = fs::remove_file(tmp_path);
+        Ok(if observe { observe_handle(&tmp) } else { None })
     }
-    result
+    #[cfg(not(unix))]
+    {
+        let written = if observe && result.is_ok() {
+            tmp.metadata().ok()
+        } else {
+            None
+        };
+        #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
+        drop(tmp);
+        let result = result.and_then(|()| {
+            let _ = executable;
+            Ok(publish_restore_temp(tmp_path, final_path, case_source)?)
+        });
+        if result.is_err() {
+            let _ = fs::remove_file(tmp_path);
+        }
+        result?;
+        Ok(written.and_then(|meta| observe_written(&meta, final_path)))
+    }
 }
 
 /// Read the chunks of `manifest` in batches of `batch_size` via
@@ -2023,8 +2071,8 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
 /// flushes (`F_FULLFSYNC` each on macOS) for no recoverable state; git
 /// likewise does not flush checked-out files.
 ///
-/// With `observe`, returns the file's stat fields when
-/// [`observe_written`] can prove them.
+/// With `observe`, returns the file's stat fields, read as
+/// [`finish_or_discard_tmp`] reads them.
 fn write_file_atomic(
     dir: &Path,
     name: &str,
@@ -2042,11 +2090,15 @@ fn write_file_atomic(
     }
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     let result = tmp.write_all(data).map_err(RestoreError::from);
-    let written = if observe { tmp.metadata().ok() } else { None };
-    #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
-    drop(tmp);
-    finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
-    Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
+    finish_or_discard_tmp(
+        tmp,
+        result,
+        &tmp_path,
+        &final_path,
+        executable,
+        observe,
+        case_source,
+    )
 }
 
 /// Create a fresh tmp file in `dir`. The tmp name is new: a name that is
@@ -2142,23 +2194,10 @@ mod unnamed {
             Err(_) => return Ok(Outcome::Unavailable),
         }
         Ok(Outcome::Written(if observe {
-            observe_linked(&file)
+            super::observe_handle(&file)
         } else {
             None
         }))
-    }
-
-    /// Stat-cache fields of the file this write linked into place, read
-    /// from its handle after the link, which moved its ctime. They describe
-    /// the file at its name unless the name was taken by another file since,
-    /// which has another inode, so a later status hashes it again. A write
-    /// to this file through its name after the link moves its mtime into the
-    /// index's racy window, which hashes it again too. This is the one stat
-    /// git makes of a file it checks out.
-    fn observe_linked(file: &fs::File) -> Option<StatFields> {
-        let meta = file.metadata().ok()?;
-        let fields = crate::worktree::stat_cache_fields(&meta);
-        (meta.is_file() && fields.0 != 0).then_some(fields)
     }
 
     /// Give `file` the name `path`. `false` when the name exists.
@@ -2207,8 +2246,18 @@ fn publish_restore_temp(
     case_source: Option<&CaseRenameSource>,
 ) -> io::Result<()> {
     let Some(source) = case_source else {
-        prepare_path_for_rename(final_path)?;
-        return fs::rename(tmp_path, final_path);
+        // A rename never replaces a directory, so it is tried first and a
+        // directory in the way is handled only when it fails.
+        return match fs::rename(tmp_path, final_path) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if !fs::symlink_metadata(final_path).is_ok_and(|meta| meta.is_dir()) {
+                    return Err(error);
+                }
+                prepare_path_for_rename(final_path)?;
+                fs::rename(tmp_path, final_path)
+            }
+        };
     };
     let parent = source.path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "restore source has no parent")
@@ -2279,20 +2328,6 @@ fn move_without_replacing(source: &Path, destination: &Path) -> io::Result<()> {
     source
         .persist_noclobber(destination)
         .map_err(|error| error.error)
-}
-
-#[cfg(unix)]
-fn apply_executable_bit(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perm = fs::metadata(path)?.permissions();
-    perm.set_mode(0o755);
-    fs::set_permissions(path, perm)
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn apply_executable_bit(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// Create directory `name` under `parent` and return its metadata, read
@@ -4008,9 +4043,11 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
         let can_remove = fs::File::create(dir.path().join("probe")).is_ok();
         let err = finish_or_discard_tmp(
+            fs::File::open(&tmp_path).unwrap(),
             Err(RestoreError::NotABlob),
             &tmp_path,
             &dir.path().join("final"),
+            false,
             false,
             None,
         )
