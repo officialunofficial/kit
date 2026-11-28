@@ -126,10 +126,17 @@ pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
         });
     }
     let mut out = [0u8; HASH_LEN];
-    for i in 0..HASH_LEN {
-        let hi = hex_nibble(bytes[i * 2])?;
-        let lo = hex_nibble(bytes[i * 2 + 1])?;
-        out[i] = (hi << 4) | lo;
+    // Invalid digits map to `INVALID_NIBBLE`, which sets a bit above the low
+    // four. One check after the loop replaces a branch per digit.
+    let mut seen = 0u8;
+    for (dst, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let hi = HEX_NIBBLE[usize::from(pair[0])];
+        let lo = HEX_NIBBLE[usize::from(pair[1])];
+        seen |= hi | lo;
+        *dst = (hi << 4) | (lo & 0x0F);
+    }
+    if seen > 0x0F {
+        return Err(FromHexError::InvalidChar);
     }
     Ok(out)
 }
@@ -150,6 +157,25 @@ pub fn from_hex_bytes(s: &str) -> Option<Vec<u8>> {
         .map(|pair| Some((hex_nibble(pair[0]).ok()? << 4) | hex_nibble(pair[1]).ok()?))
         .collect()
 }
+
+const INVALID_NIBBLE: u8 = 0xFF;
+
+/// Value of each hex digit byte, or `INVALID_NIBBLE`.
+static HEX_NIBBLE: [u8; 256] = {
+    let mut table = [INVALID_NIBBLE; 256];
+    let mut i = 0u8;
+    while i < 10 {
+        table[(b'0' + i) as usize] = i;
+        i += 1;
+    }
+    let mut i = 0u8;
+    while i < 6 {
+        table[(b'a' + i) as usize] = 10 + i;
+        table[(b'A' + i) as usize] = 10 + i;
+        i += 1;
+    }
+    table
+};
 
 fn hex_nibble(b: u8) -> Result<u8, FromHexError> {
     match b {
@@ -233,6 +259,34 @@ mod tests {
         let hex = to_hex(&h);
         let parsed = from_hex(&hex).unwrap();
         assert_eq!(h, parsed);
+    }
+
+    #[test]
+    fn from_hex_classifies_every_byte_like_to_digit() {
+        let valid = "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f";
+        for b in 0u8..=127 {
+            for pos in [0usize, 1, 31, 62, 63] {
+                let mut bytes = valid.as_bytes().to_vec();
+                bytes[pos] = b;
+                let s = std::str::from_utf8(&bytes).unwrap();
+                let digit = char::from(b).to_digit(16);
+                match from_hex(s) {
+                    Ok(h) => {
+                        let d = u8::try_from(digit.expect("digit")).unwrap();
+                        let got = if pos % 2 == 0 {
+                            h[pos / 2] >> 4
+                        } else {
+                            h[pos / 2] & 0x0F
+                        };
+                        assert_eq!(got, d);
+                    }
+                    Err(e) => {
+                        assert!(digit.is_none());
+                        assert_eq!(e, FromHexError::InvalidChar);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

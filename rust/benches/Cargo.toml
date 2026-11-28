@@ -62,6 +62,10 @@ name = "delta_encode_scan"
 harness = false
 
 [[bench]]
+name = "hex_decode"
+harness = false
+
+[[bench]]
 name = "chunker"
 harness = false
 
