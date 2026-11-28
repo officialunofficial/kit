@@ -19,6 +19,10 @@
 //! | `ReadRepoCursor` | any | a reply with no cursor |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a read, after the header | `INTERNAL "pack read failed"` |
+//! | `DownloadWindow` | a request outside the limits of SPEC-SHALLOW §8 | `INVALID_REQUEST`, the limit |
+//! | `DownloadWindow` | a tip, or a parent inside the window, the server lacks | `KEY_NOT_FOUND "window commit not found"` |
+//! | `DownloadWindow` | packs over 1 GiB | `INVALID_REQUEST "window too large"` |
+//! | `DownloadWindow` | any other | `INTERNAL "window failed"` |
 //! | `UploadPack` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UploadPack` | bytes that do not hash to `pack_id` | `INVALID_REQUEST`, [`UploadError::DigestMismatch`] text |
 //! | `UploadPack` | any other | `INTERNAL "upload failed"` |
@@ -28,16 +32,18 @@
 //! verb.
 
 use kit_core::hash::Hash;
-use kit_core::protocol::PackKey;
+use kit_core::protocol::{PackKey, TransportError, WindowRequest};
 use kit_core::refs::{RefWriteCondition, validate_ref_name};
 use kit_rpc::kit::common::v1::RefEntry;
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, DownloadPackHeader, ListRefs, ListRefsResponse, PackChunk, PackExistsResponse,
-    ReadRefResponse, ReadRepoCursorResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
+    DownloadPack, DownloadPackHeader, DownloadWindow, DownloadWindowBoundary, DownloadWindowPack,
+    ListRefs, ListRefsResponse, PackChunk, PackExistsResponse, ReadRefResponse,
+    ReadRepoCursorResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
 
 use crate::budget::upload_limits;
+use crate::packs::DOWNLOAD_CHUNK_MAX;
 use crate::packs::FinishError;
 use crate::refs::{
     DigestField, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, REF_NAME_TOO_LONG, condition, digest,
@@ -46,6 +52,7 @@ use crate::refs::{
 use crate::repo::{RefUpdate, Repo};
 use crate::session::{FrameIoError, FrameSink, FrameSource, Stop, emit_error, send_body};
 use crate::upload::{UploadError, UploadValidator};
+use crate::window::{WindowServeError, build_window};
 
 /// A verb's fixed rejection: the code and message of its error frame.
 type VerbError = (ErrorCode, &'static str);
@@ -91,6 +98,28 @@ fn pack_key(id: Option<&[u8]>) -> Result<PackKey, VerbError> {
 /// A decoded `UpdateRef` request (SPEC-TRANSPORT §4.2.1): the name, the
 /// condition and the new id. `new_id` is checked first. `expected_id` is read
 /// for `MATCH` only.
+/// A `DownloadWindow` frame as a checked [`WindowRequest`].
+fn decode_window(req: &DownloadWindow) -> Result<WindowRequest, VerbError> {
+    let ids = |list: &[Vec<u8>]| -> Result<Vec<Hash>, VerbError> {
+        list.iter()
+            .map(|id| {
+                <Hash>::try_from(id.as_slice())
+                    .map_err(|_| (ErrorCode::InvalidRequest, "a window commit id is 32 bytes"))
+            })
+            .collect()
+    };
+    let request = WindowRequest {
+        tips: ids(&req.tips)?,
+        depth: req.depth.unwrap_or_default(),
+        have: ids(&req.have)?,
+    };
+    match request.validate() {
+        Ok(()) => Ok(request),
+        Err(TransportError::Unsupported(message)) => Err((ErrorCode::InvalidRequest, message)),
+        Err(_) => Err((ErrorCode::InvalidRequest, "invalid window request")),
+    }
+}
+
 fn decode_update_ref(req: &UpdateRef) -> Result<(String, RefWriteCondition, Hash), VerbError> {
     let bad = |message| (ErrorCode::InvalidRequest, message);
     let new = digest(
@@ -187,6 +216,7 @@ impl<'r> Verbs<'r> {
         };
         match body {
             Body::DownloadPack(req) => self.download(&req, sink),
+            Body::DownloadWindow(req) => self.download_window(&req, sink),
             Body::UploadPack(header) => self.upload(&header, src, sink),
             Body::PackChunk(_) => {
                 let message = "PackChunk arrived without UploadPack header";
@@ -357,6 +387,60 @@ impl<'r> Verbs<'r> {
             };
             send_body(sink, Body::PackChunk(Box::new(chunk)))?;
         }
+    }
+
+    /// `DownloadWindow` (SPEC-SHALLOW §8): each pack of the window as a
+    /// `DownloadWindowPack` and its `PackChunk` frames, then one
+    /// `DownloadWindowBoundary`. The window is built in full before the
+    /// first frame, so a failure is always a lone error frame.
+    fn download_window<K: FrameSink>(
+        &self,
+        req: &DownloadWindow,
+        sink: &mut K,
+    ) -> Result<(), Stop> {
+        let request = match decode_window(req) {
+            Ok(request) => request,
+            Err((code, message)) => return emit_error(sink, code, message),
+        };
+        let (packs, boundary) = match build_window(self.repo.root(), &request) {
+            Ok(built) => built,
+            Err(WindowServeError::Missing) => {
+                return emit_error(sink, ErrorCode::KeyNotFound, "window commit not found");
+            }
+            Err(WindowServeError::TooLarge) => {
+                return emit_error(sink, ErrorCode::InvalidRequest, "window too large");
+            }
+            Err(WindowServeError::Internal) => {
+                return emit_error(sink, ErrorCode::Internal, "window failed");
+            }
+        };
+        for (key, bytes) in packs {
+            let pack_id = key.as_bytes().to_vec();
+            let header = DownloadWindowPack {
+                pack_id: Some(pack_id.clone()),
+                total_bytes: Some(bytes.len() as u64),
+                ..Default::default()
+            };
+            send_body(sink, Body::DownloadWindowPack(Box::new(header)))?;
+            let mut offset = 0usize;
+            for data in bytes.chunks(DOWNLOAD_CHUNK_MAX) {
+                let last = offset + data.len() == bytes.len();
+                let chunk = PackChunk {
+                    pack_id: Some(pack_id.clone()),
+                    offset: Some(offset as u64),
+                    data: Some(data.to_vec()),
+                    last: Some(last),
+                    ..Default::default()
+                };
+                send_body(sink, Body::PackChunk(Box::new(chunk)))?;
+                offset += data.len();
+            }
+        }
+        let boundary = DownloadWindowBoundary {
+            commits: boundary.iter().map(|h| h.to_vec()).collect(),
+            ..Default::default()
+        };
+        send_body(sink, Body::DownloadWindowBoundary(Box::new(boundary)))
     }
 
     /// `UploadPack`: the header, then `PackChunk` frames read from `src`

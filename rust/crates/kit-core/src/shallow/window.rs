@@ -13,6 +13,7 @@ use crate::hash::{Hash, to_hex};
 use crate::object::Object;
 use crate::ops::graph::reachable_snapshot;
 use crate::pack::{self, PackWriter};
+use crate::protocol::PackKey;
 use crate::store::{ObjectSource, ObjectStore, StoreError};
 
 use super::Boundary;
@@ -187,8 +188,8 @@ pub fn window_objects(
     Ok(out)
 }
 
-/// [`window_objects`] written as raw packs, each within the pack limits of
-/// the transport.
+/// [`window_objects`] written as raw packs, each with its key and within
+/// the pack limits of the transport.
 ///
 /// # Errors
 /// [`WindowError::Store`] for the errors of [`window_objects`] and
@@ -197,7 +198,7 @@ pub fn window_packs(
     store: &ObjectStore,
     window: &Window,
     have: &[Hash],
-) -> Result<Vec<Vec<u8>>, WindowError> {
+) -> Result<Vec<(PackKey, Vec<u8>)>, WindowError> {
     let mut packs = Vec::new();
     let mut writer = PackWriter::new_raw_only();
     for id in window_objects(store, window, have)? {
@@ -208,15 +209,21 @@ pub fn window_packs(
             crate::protocol::PACK_BODY_LIMIT,
             pack::MAX_ENTRIES as usize,
         ) {
-            packs.push(writer.finish()?);
+            packs.push(keyed(writer)?);
             writer = PackWriter::new_raw_only();
         }
         writer.push_raw(id, &bytes)?;
     }
     if writer.entry_count() > 0 {
-        packs.push(writer.finish()?);
+        packs.push(keyed(writer)?);
     }
     Ok(packs)
+}
+
+/// A finished pack with the key it is stored under.
+fn keyed(writer: PackWriter) -> Result<(PackKey, Vec<u8>), WindowError> {
+    let (bytes, id) = writer.finish_with_key()?;
+    Ok((PackKey::from_hash(id), bytes))
 }
 
 /// Why a received window is refused (SPEC-SHALLOW §8.2).
@@ -524,7 +531,7 @@ mod tests {
 
             let packs = window_packs(&s, &w, &[]).unwrap();
             let mut ids = BTreeSet::new();
-            for p in &packs {
+            for (_, p) in &packs {
                 for entry in pack::PackEntries::new(p).unwrap() {
                     let pack::PackEntry::Raw { bytes } = entry.unwrap() else {
                         panic!("a window pack is raw");

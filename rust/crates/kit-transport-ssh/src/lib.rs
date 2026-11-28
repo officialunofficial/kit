@@ -56,8 +56,8 @@ use kit_core::protocol::{
 use kit_core::ref_listing::{MAX_PAGES, RefListing};
 use kit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor, SshFrame,
-    UpdateRef, UploadPack, ssh_frame,
+    DownloadPack, DownloadWindow, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor,
+    SshFrame, UpdateRef, UploadPack, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{ErrorCode, ProtocolVersion};
 use kit_rpc::{
@@ -67,7 +67,9 @@ use kit_rpc::{
 
 pub use crate::url::{KIT_SSH_PREFIX, SshTarget, parse_kit_ssh_url, validate_ssh_path};
 
-use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
+use kit_core::protocol::{
+    PACK_BODY_LIMIT, PackBody, PackSink, WindowRequest, WindowSink, saturating_usize,
+};
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -174,6 +176,8 @@ struct ChildIo {
     /// `true` once we've shut down the child pipe. Guards double-close
     /// from `Drop` + explicit `close`.
     closed: bool,
+    /// The server's `HelloResponse.download_window`: it serves windows.
+    download_window: bool,
 }
 
 #[derive(Debug)]
@@ -303,12 +307,16 @@ fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<Child
         remaining_frames: SESSION_FRAMES,
         remaining_bytes: SESSION_BYTES,
         closed: false,
+        download_window: false,
     };
-    if let Err(e) = perform_client_handshake(&mut io) {
-        // Tear down before returning so the caller never sees a
-        // half-initialised connection.
-        let _ = shut_child(&mut io);
-        return Err(e);
+    match perform_client_handshake(&mut io) {
+        Ok(download_window) => io.download_window = download_window,
+        Err(e) => {
+            // Tear down before returning so the caller never sees a
+            // half-initialised connection.
+            let _ = shut_child(&mut io);
+            return Err(e);
+        }
     }
     Ok(io)
 }
@@ -415,6 +423,46 @@ impl Transport for SshTransport {
                 Some(ssh_frame::Body::UploadPackResponse(_)) => Ok(()),
                 Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
                 other => Err(unexpected_frame("ssh", "UploadPackResponse", other)),
+            }
+        })
+    }
+
+    fn supports_download_window(&self) -> bool {
+        self.io.lock().is_ok_and(|io| io.download_window)
+    }
+
+    /// One attempt, without the retry ladder: the sink has stored the packs
+    /// that arrived, so a failure ends the fetch and the caller starts again.
+    fn download_window(
+        &self,
+        request: &WindowRequest,
+        sink: &mut dyn WindowSink,
+    ) -> TransportResult<Vec<Hash>> {
+        request.validate()?;
+        let mut io = self
+            .io
+            .lock()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if !io.download_window {
+            return Err(TransportError::Unsupported(
+                kit_core::protocol::SHALLOW_UNSUPPORTED,
+            ));
+        }
+        let req = SshFrame {
+            body: Some(ssh_frame::Body::DownloadWindow(Box::new(DownloadWindow {
+                tips: request.tips.iter().map(|h| h.to_vec()).collect(),
+                depth: Some(request.depth),
+                have: request.have.iter().map(|h| h.to_vec()).collect(),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        self.write_request(&mut io, req)?;
+        read_download_window(|| read_child_frame_or_err(&mut io), sink).map_err(|e| match e {
+            ReplyError::Answered(e) => e,
+            ReplyError::Cut(e) => {
+                abandon_child(&mut io);
+                e
             }
         })
     }
@@ -730,6 +778,104 @@ where
     }
 }
 
+/// The most bytes of packs a client takes in one window reply. The server
+/// refuses a window over 1 GiB of objects; the packs add their framing.
+const MAX_WINDOW_REPLY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Read a `DownloadWindow` reply (SPEC-SHALLOW §8) from `next_frame` into
+/// `sink`: packs, each a `DownloadWindowPack` and its chunks, then the
+/// boundary. Each chunk names its pack and continues it at its offset, and
+/// the last chunk ends at the declared length.
+fn read_download_window<F>(
+    mut next_frame: F,
+    sink: &mut dyn WindowSink,
+) -> Result<Vec<Hash>, ReplyError>
+where
+    F: FnMut() -> TransportResult<SshFrame>,
+{
+    let bad = |what: &str| {
+        ReplyError::Cut(TransportError::RemoteError(format!(
+            "invalid window reply: {what}"
+        )))
+    };
+    let mut received = 0u64;
+    let mut first = true;
+    loop {
+        let frame = next_frame().map_err(ReplyError::Cut)?;
+        let header = match frame.body {
+            Some(ssh_frame::Body::DownloadWindowPack(h)) => h,
+            Some(ssh_frame::Body::DownloadWindowBoundary(b)) => {
+                if b.commits.len() > kit_core::shallow::MAX_WINDOW_COMMITS {
+                    return Err(bad("too many boundary commits"));
+                }
+                return b
+                    .commits
+                    .iter()
+                    .map(|id| <Hash>::try_from(id.as_slice()).map_err(|_| bad("boundary id")))
+                    .collect();
+            }
+            Some(ssh_frame::Body::Error(e)) if first => {
+                return Err(ReplyError::Answered(rpc_error_to_transport(*e, "ssh")));
+            }
+            Some(ssh_frame::Body::Error(e)) => {
+                return Err(ReplyError::Cut(rpc_error_to_transport(*e, "ssh")));
+            }
+            other => {
+                return Err(ReplyError::Cut(unexpected_frame(
+                    "ssh",
+                    "DownloadWindowPack",
+                    other,
+                )));
+            }
+        };
+        first = false;
+        let id = header.pack_id.unwrap_or_default();
+        let key = <Hash>::try_from(id.as_slice())
+            .map(PackKey::from_hash)
+            .map_err(|_| bad("pack id"))?;
+        let total = header.total_bytes.ok_or_else(|| bad("pack length"))?;
+        if total == 0 || total > PACK_BODY_LIMIT {
+            return Err(bad("pack length"));
+        }
+        received = received.saturating_add(total);
+        if received > MAX_WINDOW_REPLY_BYTES {
+            return Err(bad("window too large"));
+        }
+        let out = sink.begin_pack(&key, total).map_err(ReplyError::Cut)?;
+        out.begin(Some(total)).map_err(ReplyError::Cut)?;
+        let mut offset = 0u64;
+        loop {
+            let frame = next_frame().map_err(ReplyError::Cut)?;
+            let chunk = match frame.body {
+                Some(ssh_frame::Body::PackChunk(c)) => c,
+                Some(ssh_frame::Body::Error(e)) => {
+                    return Err(ReplyError::Cut(rpc_error_to_transport(*e, "ssh")));
+                }
+                other => {
+                    return Err(ReplyError::Cut(unexpected_frame("ssh", "PackChunk", other)));
+                }
+            };
+            if chunk.pack_id.as_deref() != Some(id.as_slice()) || chunk.offset != Some(offset) {
+                return Err(bad("chunk out of place"));
+            }
+            let data = chunk.data.unwrap_or_default();
+            offset += data.len() as u64;
+            if offset > total {
+                return Err(bad("chunk past the pack length"));
+            }
+            out.write(&data).map_err(ReplyError::Cut)?;
+            let last = chunk.last.unwrap_or(false);
+            if last != (offset == total) {
+                return Err(bad("last chunk"));
+            }
+            if last {
+                break;
+            }
+        }
+        sink.end_pack().map_err(ReplyError::Cut)?;
+    }
+}
+
 /// Close a connection whose reply was not read to its end.
 fn abandon_child(io: &mut ChildIo) {
     io.closed = true;
@@ -888,7 +1034,8 @@ fn frame_error_to_transport(e: &FrameError) -> TransportError {
 // Hello handshake + child teardown
 // ---------------------------------------------------------------------------
 
-fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
+/// The handshake, answering whether the server serves windows.
+fn perform_client_handshake(io: &mut ChildIo) -> Result<bool, SshInitError> {
     let hello = SshFrame {
         body: Some(ssh_frame::Body::Hello(Box::new(
             Hello::default()
@@ -930,7 +1077,7 @@ fn perform_client_handshake(io: &mut ChildIo) -> Result<(), SshInitError> {
                     proto.to_i32()
                 )));
             }
-            Ok(())
+            Ok(h.download_window.unwrap_or(false))
         }
         Some(ssh_frame::Body::Error(e)) => Err(SshInitError::HandshakeFailed(format!(
             "server error: {}",
@@ -1043,6 +1190,172 @@ mod tests {
     use kit_rpc::kit::common::v1::{RefEntry, RefExpectation};
     use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
     use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
+
+    /// A window sink that keeps each pack in memory.
+    #[derive(Default)]
+    struct Packs {
+        done: Vec<(PackKey, Vec<u8>)>,
+        open: Option<(PackKey, MemorySink)>,
+    }
+
+    impl WindowSink for Packs {
+        fn begin_pack(&mut self, key: &PackKey, _: u64) -> TransportResult<&mut dyn PackSink> {
+            let (_, sink) = self.open.insert((*key, MemorySink::new(PACK_BODY_LIMIT)));
+            Ok(sink)
+        }
+        fn end_pack(&mut self) -> TransportResult<()> {
+            let (key, sink) = self.open.take().ok_or(TransportError::InvalidResponse)?;
+            self.done.push((key, sink.into_bytes()?));
+            Ok(())
+        }
+    }
+
+    fn window_pack(id: [u8; 32], total: u64) -> SshFrame {
+        SshFrame {
+            body: Some(ssh_frame::Body::DownloadWindowPack(Box::new(
+                kit_rpc::kit::rpc::v1::ssh::DownloadWindowPack {
+                    pack_id: Some(id.to_vec()),
+                    total_bytes: Some(total),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        }
+    }
+
+    fn window_chunk(id: [u8; 32], offset: u64, data: &[u8], last: bool) -> SshFrame {
+        SshFrame {
+            body: Some(ssh_frame::Body::PackChunk(Box::new(PackChunk {
+                pack_id: Some(id.to_vec()),
+                offset: Some(offset),
+                data: Some(data.to_vec()),
+                last: Some(last),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        }
+    }
+
+    fn window_boundary(ids: &[[u8; 32]]) -> SshFrame {
+        SshFrame {
+            body: Some(ssh_frame::Body::DownloadWindowBoundary(Box::new(
+                kit_rpc::kit::rpc::v1::ssh::DownloadWindowBoundary {
+                    commits: ids.iter().map(|h| h.to_vec()).collect(),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        }
+    }
+
+    fn read_window(frames: Vec<SshFrame>) -> (Result<Vec<Hash>, ReplyError>, Packs) {
+        let mut frames = frames.into_iter();
+        let mut sink = Packs::default();
+        let got = read_download_window(
+            || frames.next().ok_or(TransportError::ConnectionFailed),
+            &mut sink,
+        );
+        (got, sink)
+    }
+
+    #[test]
+    fn a_window_reply_gives_each_pack_and_the_boundary() {
+        let (got, sink) = read_window(vec![
+            window_pack([1; 32], 5),
+            window_chunk([1; 32], 0, b"abc", false),
+            window_chunk([1; 32], 3, b"de", true),
+            window_pack([2; 32], 1),
+            window_chunk([2; 32], 0, b"z", true),
+            window_boundary(&[[7; 32]]),
+        ]);
+        assert_eq!(got.ok().unwrap(), vec![[7; 32]]);
+        let packs: Vec<_> = sink
+            .done
+            .iter()
+            .map(|(k, b)| (*k.as_bytes(), b.clone()))
+            .collect();
+        assert_eq!(
+            packs,
+            vec![([1; 32], b"abcde".to_vec()), ([2; 32], b"z".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_window_reply_out_of_order_is_cut() {
+        let cases = [
+            // A chunk of another pack.
+            vec![
+                window_pack([1; 32], 2),
+                window_chunk([2; 32], 0, b"ab", true),
+            ],
+            // A gap.
+            vec![
+                window_pack([1; 32], 2),
+                window_chunk([1; 32], 1, b"b", true),
+            ],
+            // Past the length.
+            vec![
+                window_pack([1; 32], 2),
+                window_chunk([1; 32], 0, b"abc", true),
+            ],
+            // Short of the length but marked last.
+            vec![
+                window_pack([1; 32], 2),
+                window_chunk([1; 32], 0, b"a", true),
+            ],
+            // At the length but not marked last.
+            vec![
+                window_pack([1; 32], 1),
+                window_chunk([1; 32], 0, b"a", false),
+            ],
+            // An empty pack.
+            vec![window_pack([1; 32], 0)],
+            // A pack over the cap.
+            vec![window_pack([1; 32], PACK_BODY_LIMIT + 1)],
+            // A short boundary id.
+            vec![SshFrame {
+                body: Some(ssh_frame::Body::DownloadWindowBoundary(Box::new(
+                    kit_rpc::kit::rpc::v1::ssh::DownloadWindowBoundary {
+                        commits: vec![vec![1; 31]],
+                        ..Default::default()
+                    },
+                ))),
+                ..Default::default()
+            }],
+            // The stream ends before the boundary.
+            vec![
+                window_pack([1; 32], 1),
+                window_chunk([1; 32], 0, b"a", true),
+            ],
+        ];
+        for frames in cases {
+            let (got, _) = read_window(frames);
+            assert!(matches!(got, Err(ReplyError::Cut(_))));
+        }
+    }
+
+    #[test]
+    fn a_window_refused_up_front_is_answered() {
+        let refused = SshFrame {
+            body: Some(ssh_frame::Body::Error(Box::new(RpcError {
+                code: Some(ErrorCode::KeyNotFound.into()),
+                message: Some("window commit not found".into()),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        let (got, _) = read_window(vec![refused.clone()]);
+        assert!(matches!(got, Err(ReplyError::Answered(_))));
+        let (got, _) = read_window(vec![
+            window_pack([1; 32], 1),
+            window_chunk([1; 32], 0, b"a", true),
+            refused,
+        ]);
+        assert!(
+            matches!(got, Err(ReplyError::Cut(_))),
+            "an error part way is a cut"
+        );
+    }
 
     /// `--` sits right before the destination, so a hostile user or
     /// host field stays an operand even when it looks like an option.
