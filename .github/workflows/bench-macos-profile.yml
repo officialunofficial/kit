@@ -1,7 +1,7 @@
 name: "Bench: macOS clone profile"
 
-# Temporary: splits the clone of 10,000 small files into fetch and checkout
-# for kit and git on macOS, and sums file system calls with fs_usage.
+# Temporary: times the checkout of 10,000 small files on macOS for kit on
+# main, kit on this branch with and without threads, and git.
 
 on:
   push:
@@ -14,9 +14,11 @@ permissions:
 jobs:
   profile:
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-rust
         with:
           cache-prefix: bench-vs-git-macos-latest
@@ -26,9 +28,14 @@ jobs:
       - name: Build
         working-directory: rust
         run: cargo build --release --locked -p kit-bin --bin kit
+      - name: Build main
+        run: |
+          git worktree add -q ../base f1d837b5
+          (cd ../base/rust && cargo build --release --locked -p kit-bin --bin kit)
       - name: Profile
         run: |
           K="$PWD/rust/target/release/kit"
+          M="$(cd ../base && pwd)/rust/target/release/kit"
           W="$(mktemp -d)"; W="$(cd "$W" && pwd -P)"
           python3 - "$W/small10k" <<'PY'
           import os, sys
@@ -47,44 +54,22 @@ jobs:
           (cd "$W/src/git" && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$W/small10k/" . \
             && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$W/remotes/git.git")
           cd "$W"
-          sysctl -n hw.ncpu machdep.cpu.brand_string
-          hyperfine -N --warmup 2 --runs 15 --export-json phases.json \
-            --prepare 'rm -rf work' -n kit-clone "$K clone kit+file://$W/remotes/kit work" \
-            --prepare 'rm -rf work' -n git-clone "git clone -q file://$W/remotes/git.git work" \
-            --prepare 'rm -rf work' -n kit-fetch "$K clone -n kit+file://$W/remotes/kit work" \
-            --prepare 'rm -rf work' -n git-fetch "git clone -q -n file://$W/remotes/git.git work" \
-            --prepare "rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work" -n kit-checkout "$K -C work checkout main" \
-            --prepare "rm -rf work && git clone -q -n file://$W/remotes/git.git work" -n git-checkout "git -C work reset -q --hard"
-          python3 - phases.json <<'PY'
+          KP="rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work"
+          GP="rm -rf work && git clone -q -n file://$W/remotes/git.git work"
+          for i in 1 2 3; do
+            hyperfine -N --warmup 2 --runs 15 --export-json "p$i.json" \
+              --prepare "$KP" -n main "$M -C work checkout main" \
+              --prepare "$KP" -n branch "$K -C work checkout main" \
+              --prepare "$KP" -n branch-1thread "env RAYON_NUM_THREADS=1 $K -C work checkout main" \
+              --prepare "$KP" -n branch-2threads "env RAYON_NUM_THREADS=2 $K -C work checkout main" \
+              --prepare "$GP" -n git "git -C work reset -q --hard" \
+              --prepare 'rm -rf work' -n clone-main "$M clone -q kit+file://$W/remotes/kit work" \
+              --prepare 'rm -rf work' -n clone-branch "$K clone -q kit+file://$W/remotes/kit work" \
+              --prepare 'rm -rf work' -n clone-git "git clone -q file://$W/remotes/git.git work"
+            python3 - "p$i.json" <<'PY'
           import json, sys
           for r in json.load(open(sys.argv[1]))["results"]:
               t = r.get("summary", {}).get("time_wall_clock", r)
-              print("PHASE", r["command"].split()[0] if False else r.get("name", r["command"]), round(t["mean"] * 1000), "ms +-", round(t["stddev"] * 1000), "user", round(r.get("user", 0) * 1000), "sys", round(r.get("system", 0) * 1000))
-          PY
-          for tool in kit git; do
-            rm -rf work
-            sudo fs_usage -w -f filesys > "fs-$tool.txt" 2>/dev/null &
-            FS=$!
-            sleep 3
-            if [ $tool = kit ]; then "$K" clone -q kit+file://$W/remotes/kit work; else git clone -q file://$W/remotes/git.git work; fi
-            sleep 2
-            sudo pkill -INT fs_usage || true; sleep 3
-            python3 - "fs-$tool.txt" $tool <<'PY'
-          import collections, re, sys
-          count = collections.Counter(); spent = collections.Counter()
-          for line in open(sys.argv[1], errors="replace"):
-              parts = line.split()
-              if len(parts) < 4 or sys.argv[2] not in parts[-1]:
-                  continue
-              m = re.search(r"\s(\d+\.\d+)( W)?\s+\S+$", line)
-              if not m:
-                  continue
-              call = parts[1]
-              count[call] += 1; spent[call] += float(m.group(1))
-          for call, n in sorted(count.items(), key=lambda kv: -spent[kv[0]])[:25]:
-              print("FS", sys.argv[2], call, n, round(spent[call] * 1000, 1), "ms")
-          print("FS", sys.argv[2], "TOTAL", sum(count.values()), round(sum(spent.values()) * 1000, 1), "ms")
+              print("PHASE", r.get("name", r["command"]), round(t["mean"] * 1000), "+-", round(t["stddev"] * 1000), "median", round(t["median"] * 1000))
           PY
           done
-          grep -E ' kit(\.[0-9]+)?$' fs-kit.txt | sed -n '30000,30080p' | sed 's/^/SAMPLE /'
-          grep -E ' git' fs-git.txt | grep -E 'WrData|rename|open' | sed -n '2000,2040p' | sed 's/^/GSAMPLE /'
