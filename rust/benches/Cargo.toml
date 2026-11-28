@@ -26,6 +26,10 @@ name = "hashing"
 harness = false
 
 [[bench]]
+name = "hex_codec"
+harness = false
+
+[[bench]]
 name = "sign_verify"
 harness = false
 
