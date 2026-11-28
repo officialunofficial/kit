@@ -50,6 +50,18 @@ pub const PACK_SEAL_ENTRIES: usize = 1 << 16;
 /// loads its rows.
 const LAZY_PROBE_BUDGET: usize = 2048;
 
+/// The fewest pair probes a catalog makes before it loads its rows. Below
+/// this, a catalog of a few small pairs would load rows for a single lookup.
+const LAZY_PROBE_FLOOR: usize = 64;
+
+/// The probe budget of a lazy catalog whose pairs hold `rows` ids. A probe
+/// costs a few small reads of the index file and loading costs reading
+/// about 44 bytes a row, so the budget grows with the rows, between
+/// [`LAZY_PROBE_FLOOR`] and [`LAZY_PROBE_BUDGET`].
+fn lazy_probe_budget(rows: usize) -> usize {
+    (rows / 256).clamp(LAZY_PROBE_FLOOR, LAZY_PROBE_BUDGET)
+}
+
 /// A pair that failed to open, and the shards its ids can be in.
 #[derive(Debug)]
 struct PairError {
@@ -171,6 +183,9 @@ struct Discovery {
     full: bool,
     #[cfg(test)]
     budgets: Option<(usize, usize)>,
+    /// Replaces [`lazy_probe_budget`] for a test that probes many times.
+    #[cfg(test)]
+    probe_budget: Option<usize>,
     #[cfg(test)]
     retire_after_listing: Option<PathBuf>,
 }
@@ -182,6 +197,9 @@ pub(super) struct LocalPacks {
     handles: Handles,
     /// Pair probes made against index files by a catalog with no rows.
     lazy_probes: AtomicUsize,
+    /// The probes after which the current lazy catalog loads its rows. See
+    /// [`lazy_probe_budget`].
+    probe_budget: AtomicUsize,
     #[cfg(test)]
     index_loads: std::sync::atomic::AtomicUsize,
 }
@@ -193,6 +211,7 @@ impl LocalPacks {
             discovery: Mutex::default(),
             handles: Handles::default(),
             lazy_probes: AtomicUsize::new(0),
+            probe_budget: AtomicUsize::new(LAZY_PROBE_BUDGET),
             #[cfg(test)]
             index_loads: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -341,8 +360,22 @@ impl LocalPacks {
                 .is_ok_and(|i| Arc::ptr_eq(&packs[i], locator))
         });
         discovery.latest = None;
+        self.reset_probe_budget(lazy, &discovery, &packs);
         discovery.catalog = Arc::new(Catalog::from_packs(packs, errors, lazy));
         Ok(Arc::clone(&discovery.catalog))
+    }
+
+    /// Set the probe budget of a new catalog of `packs`, when it is lazy.
+    fn reset_probe_budget(&self, lazy: bool, discovery: &Discovery, packs: &[Arc<Locator>]) {
+        if !lazy {
+            return;
+        }
+        let budget = lazy_probe_budget(packs.iter().map(|p| p.count()).sum());
+        #[cfg(test)]
+        let budget = discovery.probe_budget.unwrap_or(budget);
+        #[cfg(not(test))]
+        let _ = discovery;
+        self.probe_budget.store(budget, Ordering::Relaxed);
     }
 
     // Freeze the set of candidates for one local write session. A later
@@ -365,8 +398,9 @@ impl LocalPacks {
     // Probing index files is cheaper than loading rows for a few lookups.
     // Past the probe budget, loading the rows is cheaper.
     fn promote_when_spent(&self, store: &ObjectStore) {
-        if self.lazy_probes.load(Ordering::Relaxed) >= LAZY_PROBE_BUDGET
-            && self.lazy_probes.swap(0, Ordering::Relaxed) >= LAZY_PROBE_BUDGET
+        let budget = self.probe_budget.load(Ordering::Relaxed);
+        if self.lazy_probes.load(Ordering::Relaxed) >= budget
+            && self.lazy_probes.swap(0, Ordering::Relaxed) >= budget
         {
             self.promote();
             // A failure here belongs to the refresh after a miss, which
@@ -427,6 +461,7 @@ impl LocalPacks {
 
     /// Resolve known indexed locations, then the loose path, then any pair
     /// discovered by a fresh scan. Stop at the first copy the caller accepts.
+    #[cfg(test)]
     pub(super) fn lookup<T>(
         &self,
         store: &ObjectStore,
@@ -658,6 +693,37 @@ impl Location {
         Ok(crate::store::read_header_prefix(&mut contents, head))
     }
 
+    /// Read the whole object into `buf`, reusing its allocation: the offset
+    /// of the object's bytes in `buf`. A packed copy gives its frame header
+    /// and the bytes in one read when it can, and the bytes follow the header
+    /// in `buf`, so nothing is moved. At most `limit` bytes are read; a
+    /// longer object fails with [`StoreError::ObjectTooLarge`].
+    pub(super) fn read_into(&self, buf: &mut Vec<u8>, limit: usize) -> StoreResult<usize> {
+        if let Self::Cached(index, frame, file, checked) = self {
+            if frame.len as usize > limit {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            if let Some(start) = index.read_frame_into(file, *frame, *checked, buf)? {
+                return Ok(start);
+            }
+        }
+        let contents = self.open()?;
+        let len = usize::try_from(contents.len)
+            .ok()
+            .filter(|&len| len <= limit)
+            .ok_or(StoreError::ObjectTooLarge)?;
+        buf.clear();
+        buf.reserve(len);
+        contents.take(limit as u64 + 1).read_to_end(buf)?;
+        if buf.len() > limit {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        if self.is_packed() && buf.len() != len {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        }
+        Ok(0)
+    }
+
     /// The length of the frame a packed copy occupies. `None` for a loose file.
     pub(super) fn frame_len(&self) -> Option<u32> {
         match self {
@@ -680,6 +746,9 @@ impl Location {
             } else {
                 Err(io::Error::from(io::ErrorKind::NotFound).into())
             };
+        }
+        if let Self::Cached(index, frame, file, checked) = self {
+            return index.frame_present(file, *frame, *checked);
         }
         self.open().map(|_| ())
     }

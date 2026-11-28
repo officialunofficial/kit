@@ -240,6 +240,9 @@ fn land_pull(
         });
     }
 
+    // One read session spans the safety check, the restore and the index
+    // build, so each tree of the target is verified once.
+    let _session = store.read_session();
     let tree = load_tree_hash(store, remote_tip)?;
     // Recovery may have changed the worktree and index. Read HEAD afterwards.
     let base_tree = current_head_tree(layout, store).map_err(SyncError::RestoreSafety)?;
@@ -422,6 +425,7 @@ fn resume_pull(
         clear_pull_head(layout)?;
         return Ok(false);
     }
+    let _session = store.read_session();
     let tree = load_tree_hash(store, tip)?;
     ensure_pull_restore_safe(layout, store, tree, state.before_tree)
         .map_err(SyncError::RestoreSafety)?;

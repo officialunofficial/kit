@@ -40,7 +40,7 @@ use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::layout::RepoLayout;
 use crate::object::{self, EntryMode, Object, Tree, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectStore};
+use crate::store::{BlobRead, MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
 const MAX_SPARSE_BYTES: u64 = 1024 * 1024;
@@ -861,7 +861,20 @@ where
         remove_stale_temps(target_dir, &tree.entries, case_rename_sources);
     }
 
-    for entry in &tree.entries {
+    let mut written = write_files_in_parallel(
+        store,
+        &tree.entries,
+        &base_entries,
+        target_dir,
+        sparse,
+        path_prefix,
+        batch_size,
+        read_chunks,
+        observed.is_some(),
+        case_rename_sources,
+    );
+
+    for (index, entry) in tree.entries.iter().enumerate() {
         if !crate::object::TreeEntry::validate_name(&entry.name) {
             continue;
         }
@@ -893,8 +906,9 @@ where
                 if sparse.is_some_and(|m| !m.matches(&full_path, false)) {
                     continue;
                 }
-                let stat = at_path(
-                    restore_blob_with(
+                let result = match written.get_mut(index).and_then(Option::take) {
+                    Some(result) => result,
+                    None => restore_blob_with(
                         store,
                         target_dir,
                         name,
@@ -905,8 +919,8 @@ where
                         observed.is_some(),
                         case_source,
                     ),
-                    &full_path,
-                )?;
+                };
+                let stat = at_path(result, &full_path)?;
                 report.files_written += 1;
                 if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
                     out.push(observation(full_path, entry.object_hash, stat));
@@ -966,6 +980,106 @@ where
         }
     }
     Ok(())
+}
+
+/// The fewest files of one directory that [`write_files_in_parallel`] writes
+/// on several threads. Fewer are written in the walk, one at a time.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_FILES: usize = 16;
+
+/// Write the regular files of one directory of the walk on several threads,
+/// before the walk visits them: the outcome of each, by its index in
+/// `entries`, or no outcome for an entry the walk writes itself. A file the
+/// walk skips is not written here: an invalid name, one the base tree already
+/// holds, one outside the sparse cone, and the target of a case-only rename.
+/// Each write is the one the walk would make, so every byte is verified and
+/// each file is published whole, as in the walk. An error is reported by the
+/// walk at its entry.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn write_files_in_parallel<F>(
+    store: &ObjectStore,
+    entries: &[TreeEntry],
+    base_entries: &std::collections::HashMap<&[u8], &TreeEntry>,
+    target_dir: &Path,
+    sparse: Option<&SparseMatcher<'_>>,
+    path_prefix: &str,
+    batch_size: usize,
+    read_chunks: &F,
+    observe: bool,
+    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
+) -> Vec<Option<RestoreResult<Option<StatFields>>>>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    use rayon::prelude::*;
+
+    let files: Vec<(usize, &str)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry.mode, EntryMode::Blob | EntryMode::Executable))
+        .filter(|(_, entry)| TreeEntry::validate_name(&entry.name))
+        .filter(|(_, entry)| {
+            !base_entries
+                .get(entry.name.as_slice())
+                .is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash)
+        })
+        .filter_map(|(index, entry)| Some((index, std::str::from_utf8(&entry.name).ok()?)))
+        .filter(|(_, name)| {
+            let full_path = name_path(path_prefix, name);
+            !case_rename_sources.contains_key(&full_path)
+                && sparse.is_none_or(|m| m.matches(&full_path, false))
+        })
+        .collect();
+    let mut written: Vec<Option<RestoreResult<Option<StatFields>>>> = Vec::new();
+    if files.len() < PARALLEL_FILES {
+        return written;
+    }
+    written.resize_with(entries.len(), || None);
+    let outcomes: Vec<_> = files
+        .par_iter()
+        .map(|&(index, name)| {
+            let entry = &entries[index];
+            let outcome = restore_blob_with(
+                store,
+                target_dir,
+                name,
+                entry.object_hash,
+                entry.mode == EntryMode::Executable,
+                batch_size,
+                read_chunks,
+                observe,
+                None,
+            );
+            (index, outcome)
+        })
+        .collect();
+    for (index, outcome) in outcomes {
+        written[index] = Some(outcome);
+    }
+    written
+}
+
+/// [`write_files_in_parallel`] on a target without threads: the walk writes
+/// every file itself.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn write_files_in_parallel<F>(
+    _: &ObjectStore,
+    _: &[TreeEntry],
+    _: &std::collections::HashMap<&[u8], &TreeEntry>,
+    _: &Path,
+    _: Option<&SparseMatcher<'_>>,
+    _: &str,
+    _: usize,
+    _: &F,
+    _: bool,
+    _: &std::collections::HashMap<String, CaseRenameSource>,
+) -> Vec<Option<RestoreResult<Option<StatFields>>>>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    Vec::new()
 }
 
 /// Materialise `tree_hash` into `target_dir`. See module docs for the
@@ -1551,7 +1665,18 @@ fn restore_blob_with<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    let obj = store.read_object(&blob_hash)?;
+    let obj = match write_blob_payload(
+        store,
+        blob_hash,
+        dir,
+        name,
+        executable,
+        observe,
+        case_source,
+    )? {
+        BlobStep::Written(written) => return written,
+        BlobStep::Other(obj) => *obj,
+    };
     match obj {
         Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe, case_source),
         Object::ChunkedBlob(cb) => {
@@ -1581,6 +1706,55 @@ where
         }
         _ => Err(RestoreError::NotABlob),
     }
+}
+
+/// The largest blob buffer a thread keeps between restore writes. A larger
+/// one is freed after its write.
+const MAX_KEPT_BLOB_BUFFER: usize = 1 << 20;
+
+thread_local! {
+    /// The buffer each thread reads blobs into for restore writes, reused
+    /// from one file to the next.
+    static BLOB_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What [`write_blob_payload`] did.
+enum BlobStep {
+    /// The object was a blob, and this is the outcome of its write.
+    Written(RestoreResult<Option<StatFields>>),
+    /// The object was not a blob. Nothing was written.
+    Other(Box<Object>),
+}
+
+/// Read `blob_hash` into this thread's blob buffer and, when it is a blob,
+/// write its payload to `dir/name` straight from that buffer: the bytes are
+/// read once, verified where they lie, and written from there.
+fn write_blob_payload(
+    store: &ObjectStore,
+    blob_hash: Hash,
+    dir: &Path,
+    name: &str,
+    executable: bool,
+    observe: bool,
+    case_source: Option<&CaseRenameSource>,
+) -> RestoreResult<BlobStep> {
+    BLOB_BUFFER.with_borrow_mut(|buf| {
+        let step = match store.read_blob_into(&blob_hash, buf)? {
+            BlobRead::Payload(payload) => BlobStep::Written(write_file_atomic(
+                dir,
+                name,
+                &buf[payload],
+                executable,
+                observe,
+                case_source,
+            )),
+            BlobRead::Object(obj) => BlobStep::Other(obj),
+        };
+        if buf.capacity() > MAX_KEPT_BLOB_BUFFER {
+            *buf = Vec::new();
+        }
+        Ok(step)
+    })
 }
 
 /// Stat-cache fields in [`worktree::stat_cache_fields`] order:
@@ -1859,6 +2033,13 @@ fn write_file_atomic(
     observe: bool,
     case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<Option<StatFields>> {
+    #[cfg(target_os = "linux")]
+    if case_source.is_none()
+        && let unnamed::Outcome::Written(observed) =
+            unnamed::write(dir, name, data, executable, observe)?
+    {
+        return Ok(observed);
+    }
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     let result = tmp.write_all(data).map_err(RestoreError::from);
     let written = if observe { tmp.metadata().ok() } else { None };
@@ -1888,6 +2069,130 @@ fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// Restore writes through a file with no name, which is linked into place
+/// once its bytes are written.
+///
+/// The usual write creates a named temporary file and renames it over the
+/// final name, so a crash leaves the old file or the new one, plus at worst a
+/// temporary file that the next restore sweeps. A file opened with
+/// `O_TMPFILE` has no name until `linkat` gives it one, so a crash leaves
+/// nothing, and a new name costs one link where the usual write costs a
+/// create, a stat and a rename. The link fails when the name exists, as
+/// `rename` would not, so a name that exists takes a temporary name first and
+/// is renamed over the old file, as before.
+#[cfg(target_os = "linux")]
+mod unnamed {
+    use std::fs;
+    use std::io::{self, Write as _};
+    use std::os::fd::AsRawFd as _;
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags};
+    use rustix::io::Errno;
+
+    use super::{RestoreResult, StatFields, make_tmp_name, publish_restore_temp};
+
+    /// What [`write`] did.
+    #[derive(Debug)]
+    pub(super) enum Outcome {
+        /// The file is in place, with its stat fields when they were asked
+        /// for and could be proved.
+        Written(Option<StatFields>),
+        /// This path cannot be used here, and nothing was created: the
+        /// caller writes through a named temporary file.
+        Unavailable,
+    }
+
+    /// Write `data` to `dir/name` through an unnamed file.
+    pub(super) fn write(
+        dir: &Path,
+        name: &str,
+        data: &[u8],
+        executable: bool,
+        observe: bool,
+    ) -> RestoreResult<Outcome> {
+        if !proc_fd_available() {
+            return Ok(Outcome::Unavailable);
+        }
+        // Any error here, such as a file system without `O_TMPFILE`, leaves
+        // the work to the named write, which reports its own errors.
+        let Ok(fd) = rustix::fs::openat(
+            CWD,
+            dir,
+            OFlags::WRONLY | OFlags::TMPFILE | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o666),
+        ) else {
+            return Ok(Outcome::Unavailable);
+        };
+        let mut file = fs::File::from(fd);
+        file.write_all(data)?;
+        if executable {
+            rustix::fs::fchmod(&file, Mode::from_raw_mode(0o755)).map_err(io::Error::from)?;
+        }
+        let final_path = dir.join(name);
+        match link(&file, &final_path) {
+            Ok(true) => {}
+            Ok(false) => replace(&file, dir, &final_path)?,
+            // The file closes unnamed and is gone; the named write starts
+            // over from `data`.
+            Err(_) => return Ok(Outcome::Unavailable),
+        }
+        Ok(Outcome::Written(if observe {
+            observe_linked(&file)
+        } else {
+            None
+        }))
+    }
+
+    /// Stat-cache fields of the file this write linked into place, read
+    /// from its handle after the link, which moved its ctime. They describe
+    /// the file at its name unless the name was taken by another file since,
+    /// which has another inode, so a later status hashes it again. A write
+    /// to this file through its name after the link moves its mtime into the
+    /// index's racy window, which hashes it again too. This is the one stat
+    /// git makes of a file it checks out.
+    fn observe_linked(file: &fs::File) -> Option<StatFields> {
+        let meta = file.metadata().ok()?;
+        let fields = crate::worktree::stat_cache_fields(&meta);
+        (meta.is_file() && fields.0 != 0).then_some(fields)
+    }
+
+    /// Give `file` the name `path`. `false` when the name exists.
+    fn link(file: &fs::File, path: &Path) -> io::Result<bool> {
+        let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        match rustix::fs::linkat(CWD, proc_path.as_str(), CWD, path, AtFlags::SYMLINK_FOLLOW) {
+            Ok(()) => Ok(true),
+            Err(Errno::EXIST) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Link `file` to a new temporary name in `dir`, then publish it over
+    /// `final_path` as a named write does. A failed publish removes the
+    /// temporary name.
+    fn replace(file: &fs::File, dir: &Path, final_path: &Path) -> io::Result<()> {
+        let tmp_path = loop {
+            let tmp_path = dir.join(make_tmp_name());
+            if link(file, &tmp_path)? {
+                break tmp_path;
+            }
+        };
+        let result = publish_restore_temp(&tmp_path, final_path, None);
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        result
+    }
+
+    /// Whether `/proc/self/fd` names open files, which `linkat` needs to
+    /// name an unnamed file without `CAP_DAC_READ_SEARCH`.
+    fn proc_fd_available() -> bool {
+        static AVAILABLE: OnceLock<bool> = OnceLock::new();
+        *AVAILABLE.get_or_init(|| Path::new("/proc/self/fd").is_dir())
     }
 }
 
@@ -4288,6 +4593,114 @@ mod tests {
         check(&observed, &[("a", a2)]);
     }
 
+    /// A directory with many files is written on several threads, with the
+    /// same bytes, modes and observations as the walk, in tree order. A file
+    /// the base already holds is left alone, and a failed file is reported
+    /// at its path.
+    #[test]
+    fn a_wide_directory_is_written_in_parallel_as_the_walk_writes_it() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let count = PARALLEL_FILES * 2 + 3;
+        let names: Vec<String> = (0..count).map(|n| format!("f{n:02}")).collect();
+        let entries = |skip: Option<usize>, changed: bool| {
+            let entries = names
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| Some(*n) != skip)
+                .map(|(n, name)| {
+                    let data = if changed && n == 1 {
+                        b"changed".to_vec()
+                    } else {
+                        format!("{name} contents").into_bytes()
+                    };
+                    TreeEntry {
+                        name: name.clone().into_bytes(),
+                        mode: if n % 5 == 0 {
+                            EntryMode::Executable
+                        } else {
+                            EntryMode::Blob
+                        },
+                        object_hash: put_blob(&store, &data),
+                    }
+                })
+                .collect();
+            put_tree_with(&store, entries)
+        };
+        let opts = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let tree = entries(None, false);
+        let mut observed = Vec::new();
+        let report = restore_tree_to_worktree_observed(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &opts,
+            &rd,
+            Some(&mut observed),
+        )
+        .unwrap();
+        assert_eq!(report.files_written as usize, count);
+        let paths: Vec<&str> = observed.iter().map(|o| o.path.as_str()).collect();
+        assert_eq!(paths, names.iter().map(String::as_str).collect::<Vec<_>>());
+        for (n, name) in names.iter().enumerate() {
+            let path = target.path().join(name);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                format!("{name} contents").as_bytes()
+            );
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(observed[n].size, meta.len());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                assert_eq!(observed[n].ino, meta.ino());
+                assert_eq!(meta.permissions().mode() & 0o111 != 0, n % 5 == 0, "{name}");
+            }
+        }
+
+        // Against a base, only the changed file is written.
+        fs::write(target.path().join("f02"), b"left alone").unwrap();
+        let next = entries(None, true);
+        let report = restore_tree_to_worktree_observed(
+            &store,
+            &next,
+            Some(tree),
+            target.path(),
+            &opts,
+            &rd,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.files_written, 1);
+        assert_eq!(fs::read(target.path().join("f01")).unwrap(), b"changed");
+        assert_eq!(fs::read(target.path().join("f02")).unwrap(), b"left alone");
+
+        // A file whose blob is missing fails the restore.
+        let missing = TempDir::new().unwrap();
+        let mut broken = match store.read_object(&tree).unwrap() {
+            Object::Tree(tree) => tree.entries,
+            _ => unreachable!(),
+        };
+        broken[7].object_hash = [0xab; 32];
+        let broken = put_tree_with(&store, broken);
+        let err = restore_tree_to_worktree_observed(
+            &store,
+            &broken,
+            None,
+            missing.path(),
+            &opts,
+            &rd,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(&"ab".repeat(32)), "{err}");
+    }
+
     /// An observation is refused when the final path no longer holds the
     /// file the handle wrote: another inode renamed over it, or a write
     /// that changed its size.
@@ -5940,6 +6353,207 @@ mod tests {
             restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
                 .unwrap_err();
         assert!(matches!(err, RestoreError::InvalidSymlinkTarget(_)));
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A restore into an empty target writes each file's bytes and mode,
+    /// leaves no other name, and records stat fields that match the file.
+    #[test]
+    fn a_restore_into_an_empty_target_writes_bytes_modes_and_matching_stats() {
+        let (_d, store) = fresh_store();
+        let plain = put_blob(&store, b"plain bytes");
+        let tool = put_blob(&store, b"#!/bin/sh\n");
+        let empty = put_blob(&store, b"");
+        let tree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"empty".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: empty,
+                },
+                TreeEntry {
+                    name: b"plain".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: plain,
+                },
+                TreeEntry {
+                    name: b"tool".to_vec(),
+                    mode: EntryMode::Executable,
+                    object_hash: tool,
+                },
+            ],
+        );
+        let target = TempDir::new().unwrap();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let mut observed = Vec::new();
+        restore_tree_to_worktree_observed(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &rd,
+            Some(&mut observed),
+        )
+        .unwrap();
+        assert_eq!(names_in(target.path()), ["empty", "plain", "tool"]);
+        assert_eq!(
+            fs::read(target.path().join("plain")).unwrap(),
+            b"plain bytes"
+        );
+        assert_eq!(
+            fs::read(target.path().join("tool")).unwrap(),
+            b"#!/bin/sh\n"
+        );
+        assert!(fs::read(target.path().join("empty")).unwrap().is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |name: &str| {
+                fs::metadata(target.path().join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            assert_eq!(mode("tool"), 0o755);
+            assert_eq!(mode("plain") & 0o111, 0);
+        }
+        assert_eq!(observed.len(), 3);
+        for seen in &observed {
+            let meta = fs::symlink_metadata(target.path().join(&seen.path)).unwrap();
+            let (mtime_ns, size, ino, ctime_ns) = worktree::stat_cache_fields(&meta);
+            assert_eq!(
+                (seen.mtime_ns, seen.size, seen.ino, seen.ctime_ns),
+                (mtime_ns, size, ino, ctime_ns),
+                "{}",
+                seen.path
+            );
+        }
+    }
+
+    /// A file, a symlink or an empty directory at a target name is replaced
+    /// as before, and the replacement leaves no temporary name behind.
+    #[test]
+    fn a_restore_replaces_a_file_a_symlink_or_a_directory_at_a_target_name() {
+        let (_d, store) = fresh_store();
+        let new = put_blob(&store, b"new");
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: new,
+            }],
+        );
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let outside = TempDir::new().unwrap();
+        for existing in ["file", "symlink", "dir"] {
+            let target = TempDir::new().unwrap();
+            let path = target.path().join("a");
+            match existing {
+                "file" => fs::write(&path, b"old").unwrap(),
+                "dir" => fs::create_dir(&path).unwrap(),
+                _ => {
+                    fs::write(outside.path().join("elsewhere"), b"keep").unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(outside.path().join("elsewhere"), &path).unwrap();
+                    #[cfg(not(unix))]
+                    continue;
+                }
+            }
+            restore_tree_to_worktree_with(
+                &store,
+                &tree,
+                None,
+                target.path(),
+                &RestoreOptions::default(),
+                &rd,
+            )
+            .unwrap();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert!(meta.is_file(), "{existing}");
+            assert_eq!(fs::read(&path).unwrap(), b"new", "{existing}");
+            if existing == "symlink" {
+                assert_eq!(fs::read(outside.path().join("elsewhere")).unwrap(), b"keep");
+            }
+            assert!(
+                names_in(target.path())
+                    .iter()
+                    .all(|n| !is_restore_temp_name(n)),
+                "{existing}: {:?}",
+                names_in(target.path())
+            );
+        }
+    }
+
+    /// A blob whose stored bytes do not hash to its id writes nothing.
+    #[test]
+    fn a_corrupted_blob_writes_nothing() {
+        let (_d, store) = fresh_store();
+        let id = put_blob(&store, b"genuine");
+        let path = store.path_for(&id);
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        fs::write(&path, bytes).unwrap();
+        let target = TempDir::new().unwrap();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let err = restore_blob_with(&store, target.path(), "a", id, false, 8, &rd, false, None)
+            .unwrap_err();
+        assert!(matches!(err, RestoreError::Store(_)), "{err:?}");
+        assert!(names_in(target.path()).is_empty());
+    }
+
+    /// The unnamed write gives way, creating nothing, where it cannot run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_unnamed_write_creates_nothing_when_it_cannot_run() {
+        let target = TempDir::new().unwrap();
+        let missing = target.path().join("missing");
+        assert!(matches!(
+            unnamed::write(&missing, "a", b"bytes", false, false).unwrap(),
+            unnamed::Outcome::Unavailable
+        ));
+        assert!(names_in(target.path()).is_empty());
+    }
+
+    /// An unnamed write over an existing name replaces it through a
+    /// temporary name and a rename, and leaves no temporary name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_unnamed_write_replaces_an_existing_name_by_rename() {
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join("a"), b"old").unwrap();
+        let before = fs::symlink_metadata(target.path().join("a")).unwrap();
+        let observed = unnamed::write(target.path(), "a", b"new", false, true).unwrap();
+        // O_TMPFILE may not be available here; the named write covers this
+        // case in the other tests.
+        if let unnamed::Outcome::Written(observed) = observed {
+            assert!(observed.is_some());
+            let after = fs::symlink_metadata(target.path().join("a")).unwrap();
+            assert_ne!(
+                worktree::stat_cache_fields(&before).2,
+                worktree::stat_cache_fields(&after).2,
+                "a new inode took the name"
+            );
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"new");
+            assert_eq!(names_in(target.path()), ["a"]);
+        }
     }
 }
 

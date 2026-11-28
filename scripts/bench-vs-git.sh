@@ -58,6 +58,7 @@ if [ "${KIT_BENCH_PROVENANCE_ONLY:-}" = "1" ]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/kit-bench.XXXXXX")"
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" XDG_DATA_HOME="$WORK/home/.local/share" XDG_CACHE_HOME="$WORK/home/.cache"
 mkdir -p "$HOME"
@@ -66,6 +67,15 @@ cd "$WORK"
 echo "== fixtures (incompressible bytes) =="
 mkdir -p fixtures/small100
 for i in $(seq 1 100); do head -c 10240 /dev/urandom > "fixtures/small100/f$i.bin"; done
+# 10,000 files of 1 KiB in 100 directories, for the clone rows.
+python3 - fixtures/small10k <<'PY'
+import os, sys
+for i in range(10000):
+    d = os.path.join(sys.argv[1], f"d{i // 100:02d}")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"f{i % 100:02d}.bin"), "wb") as f:
+        f.write(os.urandom(1024))
+PY
 head -c $((100 * 1024 * 1024)) /dev/urandom > fixtures/video100m.bin
 head -c $((1024 * 1024 * 1024)) /dev/urandom > fixtures/blob1g.bin
 head -c $((1024 * 1024)) /dev/urandom > fixtures/append1m.bin
@@ -121,6 +131,24 @@ run checkout-100m --warmup 1 \
   --prepare "$kit_v1 && $KIT branch v2 >/dev/null 2>&1 && $KIT checkout v2 >/dev/null 2>&1 && cat $F/append1m.bin >> video100m.bin && $KIT add video100m.bin >/dev/null && $KIT commit -m v2 >/dev/null 2>&1 && $KIT checkout main >/dev/null 2>&1" "cd work && $KIT checkout v2 >/dev/null 2>&1" \
   --prepare "$git_v1 && git branch v2 && git checkout -q v2 && cat $F/append1m.bin >> video100m.bin && git add video100m.bin && git commit -q -m v2 && git checkout -q main" 'cd work && git checkout -q v2'
 
+# One commit of the 10,000 small files, on a kit file remote and in a bare git
+# repository. git clones through a file:// URL, so it copies a pack as it would
+# from another machine instead of hardlinking the objects of a local path.
+mkdir -p clone-src/kit clone-src/git remotes/kit
+(cd clone-src/kit && "$KIT" init >/dev/null 2>&1 && "$KIT" keygen >/dev/null 2>&1 && cp -R "$F/small10k/" . \
+  && "$KIT" add . >/dev/null && "$KIT" commit -m bench >/dev/null 2>&1 \
+  && "$KIT" remote add origin "kit+file://$WORK/remotes/kit" >/dev/null && "$KIT" push origin >/dev/null 2>&1)
+(cd clone-src/git && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$F/small10k/" . \
+  && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$WORK/remotes/git.git")
+
+# Clone once outside hyperfine, so a broken setup fails with its own message.
+"$KIT" clone "kit+file://$WORK/remotes/kit" clone-check >/dev/null && rm -rf clone-check
+git clone -q "file://$WORK/remotes/git.git" clone-check && rm -rf clone-check
+
+run clone-small-files --warmup 1 \
+  --prepare 'rm -rf work && sync' "$KIT clone kit+file://$WORK/remotes/kit work >/dev/null 2>&1" \
+  --prepare 'rm -rf work && sync' "git clone -q file://$WORK/remotes/git.git work"
+
 echo "== sizes (du -k) ==" | tee "$OUT/sizes.txt"
 size_of() { du -sk "$1" | cut -f1; }
 say() { echo "$*" | tee -a "$OUT/sizes.txt"; }
@@ -134,6 +162,11 @@ say "size-small kit KiB: $(size_of .kit)"
 fresh_dir; git_repo
 cp -R "$F/small100/" . && git add . && git commit -q -m bench
 say "size-small git KiB: $(size_of .git)"
+
+cd "$WORK" && rm -rf work && "$KIT" clone "kit+file://$WORK/remotes/kit" work >/dev/null 2>&1
+say "size-clone-small kit KiB: $(size_of work/.kit)"
+cd "$WORK" && rm -rf work && git clone -q "file://$WORK/remotes/git.git" work
+say "size-clone-small git KiB: $(size_of work/.git)"
 
 fresh_dir; kit_repo
 cp "$F/video100m.bin" . && "$KIT" add video100m.bin >/dev/null && "$KIT" commit -m v1 >/dev/null 2>&1

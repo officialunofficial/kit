@@ -118,14 +118,20 @@ pub fn blob_prologue(len: usize) -> Result<[u8; BLOB_PROLOGUE_LEN], KitError> {
 ///
 /// As [`deserialize`].
 pub fn deserialize_owned(mut data: Vec<u8>) -> Result<Object, KitError> {
-    let canonical_blob = data.len() >= BLOB_PROLOGUE_LEN
-        && blob_prologue(data.len() - BLOB_PROLOGUE_LEN)
-            .is_ok_and(|p| p[..] == data[..BLOB_PROLOGUE_LEN]);
-    if canonical_blob {
+    if is_canonical_blob(&data) {
         data.drain(..BLOB_PROLOGUE_LEN);
         return Ok(Object::Blob(Blob { data }));
     }
     deserialize(&data)
+}
+
+/// Whether `data` is a blob whose head is the canonical prologue for the
+/// length of the rest, so the rest is its payload as [`deserialize`] would
+/// decode it.
+pub(crate) fn is_canonical_blob(data: &[u8]) -> bool {
+    data.len() >= BLOB_PROLOGUE_LEN
+        && blob_prologue(data.len() - BLOB_PROLOGUE_LEN)
+            .is_ok_and(|p| p[..] == data[..BLOB_PROLOGUE_LEN])
 }
 
 /// Deserialize bytes into an owned [`Object`]. Validates the prologue

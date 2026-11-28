@@ -58,10 +58,14 @@ fn checks(locator: &Locator) -> usize {
 /// A store handle whose catalog probes the index files, or holds their rows.
 fn reader(layout: &RepoLayout, probing: bool) -> ObjectStore {
     let store = ObjectStore::open(layout).unwrap();
-    if !probing {
-        store.packs.discovery.lock().unwrap().budgets =
-            Some((super::ROW_CACHE_BYTES, super::ROUTE_CACHE_BYTES));
+    let mut discovery = store.packs.discovery.lock().unwrap();
+    if probing {
+        // Loading the rows would replace the locators that count checks.
+        discovery.probe_budget = Some(usize::MAX);
+    } else {
+        discovery.budgets = Some((super::ROW_CACHE_BYTES, super::ROUTE_CACHE_BYTES));
     }
+    drop(discovery);
     store
 }
 
@@ -456,4 +460,34 @@ fn a_guard_from_another_store_cannot_make_a_view() {
     let (_other_dir, _, other) = fresh();
     let guard = other.prune_guard().unwrap();
     assert!(store.guarded(&guard).is_err());
+}
+
+#[test]
+fn a_read_session_checks_each_pair_once_for_reads_and_presence_checks() {
+    let (_dir, layout, _, _, chunks) = three_pairs();
+    settle(&ObjectStore::open(&layout).unwrap());
+    let store = reader(&layout, true);
+    {
+        let _session = store.read_session();
+        for id in &chunks {
+            assert!(store.contains(id));
+            store.read_object(id).unwrap();
+            let mut buf = Vec::new();
+            store.read_blob_into(id, &mut buf).unwrap();
+        }
+        let counts: Vec<_> = locators(&store).iter().map(|l| checks(l)).collect();
+        assert_eq!(counts.len(), 3);
+        assert!(
+            counts.iter().all(|&n| (1..=2).contains(&n)),
+            "each pair is checked once for the session: {counts:?}"
+        );
+    }
+    // Once the session closes, its guard no longer keeps a pair from being
+    // retired, so each read checks its pair again.
+    let before: usize = locators(&store).iter().map(|l| checks(l)).sum();
+    for id in &chunks[..10] {
+        store.read_object(id).unwrap();
+    }
+    let after: usize = locators(&store).iter().map(|l| checks(l)).sum();
+    assert!(after >= before + 10, "{before} then {after}");
 }

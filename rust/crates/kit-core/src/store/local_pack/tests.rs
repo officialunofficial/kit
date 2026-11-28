@@ -279,6 +279,27 @@ fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
 }
 
 #[test]
+fn a_presence_check_in_a_session_answers_from_the_index_and_a_read_still_checks_the_frame() {
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"present by index");
+    let mut w = writer(&store);
+    let id = w.write(&bytes).unwrap();
+    let (staged, _guard) = w.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    store.packs.discovery.lock().unwrap().full = true;
+
+    let _session = store.read_session();
+    assert!(store.contains(&id));
+    // Damage the frame header after the session checked the pair.
+    let mut file = fs::OpenOptions::new().write(true).open(&pair.pack).unwrap();
+    file.seek(SeekFrom::Start(12)).unwrap();
+    file.write_all(&[0xff; 5]).unwrap();
+    assert!(store.contains(&id));
+    assert!(store.read(&id).is_err());
+}
+
+#[test]
 fn verified_accessors_try_another_pack_after_the_cached_copy_fails() {
     let (_dir, layout, store) = fresh();
     let bytes = blob(b"survives in another pack");
@@ -3445,6 +3466,8 @@ fn lazy_full_and_promoted_catalogs_return_the_same_location_for_every_id() {
         store
     };
     let lazy = open(false, None);
+    // This store answers every id by probing.
+    lazy.packs.discovery.lock().unwrap().probe_budget = Some(usize::MAX);
     let full = open(true, None);
     let prefixes = open(true, Some((0, usize::MAX)));
     let on_disk = open(true, Some((0, 0)));
@@ -3547,6 +3570,36 @@ fn a_command_promotes_the_catalog_in_the_middle_of_its_lookups() {
         reader.packs.discovery.lock().unwrap().catalog.routes.len(),
         5
     );
+}
+
+#[test]
+fn the_probe_budget_grows_with_the_rows_between_its_bounds() {
+    use super::{LAZY_PROBE_BUDGET, LAZY_PROBE_FLOOR, lazy_probe_budget};
+    assert_eq!(lazy_probe_budget(0), LAZY_PROBE_FLOOR);
+    assert_eq!(lazy_probe_budget(10_000), LAZY_PROBE_FLOOR);
+    assert_eq!(lazy_probe_budget(256 * 100), 100);
+    assert_eq!(lazy_probe_budget(usize::MAX), LAZY_PROBE_BUDGET);
+}
+
+#[test]
+fn a_small_catalog_loads_its_rows_after_the_probe_floor() {
+    let (_dir, layout, _pairs) = packed_store(&[vec![1, 2], vec![3]]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(reader.check_presence(&packed_blob(1).0).is_ok());
+    assert!(is_lazy(&reader));
+    assert_eq!(
+        reader
+            .packs
+            .probe_budget
+            .load(std::sync::atomic::Ordering::Relaxed),
+        super::LAZY_PROBE_FLOOR
+    );
+    // Each miss probes both pairs.
+    for _ in 0..super::LAZY_PROBE_FLOOR {
+        let _ = reader.check_presence(&[0xee; 32]);
+    }
+    assert!(reader.check_presence(&packed_blob(3).0).is_ok());
+    assert!(!is_lazy(&reader));
 }
 
 #[test]

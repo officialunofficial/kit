@@ -396,6 +396,26 @@ impl Locator {
         })
     }
 
+    /// The ids the pair holds.
+    pub(super) fn count(&self) -> usize {
+        self.count
+    }
+
+    /// [`Self::open_frame`] for a pair a guarded walk found exact: the frame
+    /// lies within the pack, so it is present, and nothing is read. A pair
+    /// not found exact is opened and read as [`Self::open_frame`] does.
+    pub(super) fn frame_present(
+        &self,
+        file: &File,
+        frame: Frame,
+        checked: bool,
+    ) -> StoreResult<()> {
+        if checked {
+            return self.frame_start(frame).map(|_| ());
+        }
+        self.open_frame(file, frame, checked)
+    }
+
     pub(super) fn row_charge(&self) -> usize {
         self.rows.len()
     }
@@ -625,6 +645,28 @@ impl Locator {
         let mut header = [0; ENTRY_FRAME_LEN];
         read_spooled(file, start, &mut header).map_err(|e| self.pair.context(e))?;
         self.check_frame_len(&header, frame)
+    }
+
+    /// [`Self::open_frame`] and the whole payload in one read, into `buf`
+    /// after the frame header: the offset of the payload in `buf`. `None`
+    /// when that read fails, so the caller reads the frame as it does without
+    /// this path and a damaged pack gives the same error.
+    pub(super) fn read_frame_into(
+        &self,
+        file: &File,
+        frame: Frame,
+        checked: bool,
+        buf: &mut Vec<u8>,
+    ) -> StoreResult<Option<usize>> {
+        self.confirm_pack(file, checked)?;
+        let start = self.frame_start(frame)?;
+        buf.clear();
+        buf.resize(ENTRY_FRAME_LEN + frame.len as usize, 0);
+        if read_spooled(file, start, buf).is_err() {
+            return Ok(None);
+        }
+        self.check_frame_len(&buf[..ENTRY_FRAME_LEN], frame)?;
+        Ok(Some(ENTRY_FRAME_LEN))
     }
 
     /// [`Self::open_frame`], then the first bytes of the payload up to
