@@ -454,6 +454,16 @@ struct Service(Arc<Shared>);
 
 #[allow(refining_impl_trait)]
 impl generated::TransportService for Service {
+    async fn download_window(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, generated::DownloadWindowRequest>,
+    ) -> ServiceResult<ServiceStream<generated::DownloadWindowResponse>> {
+        Err(connectrpc::ConnectError::unimplemented(
+            "DownloadWindow is not part of this test service",
+        ))
+    }
+
     async fn list_repos(
         &self,
         _ctx: RequestContext,

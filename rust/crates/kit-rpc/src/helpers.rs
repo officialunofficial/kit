@@ -201,6 +201,9 @@ pub fn body_name(b: &Option<ssh_frame::Body>) -> &'static str {
         Some(Body::DownloadPack(_)) => "download_pack",
         Some(Body::DownloadPackHeader(_)) => "download_pack_header",
         Some(Body::PackChunk(_)) => "pack_chunk",
+        Some(Body::DownloadWindow(_)) => "download_window",
+        Some(Body::DownloadWindowPack(_)) => "download_window_pack",
+        Some(Body::DownloadWindowBoundary(_)) => "download_window_boundary",
         None => "(empty body)",
     }
 }
