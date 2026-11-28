@@ -26,6 +26,10 @@ name = "hashing"
 harness = false
 
 [[bench]]
+name = "hex_codec"
+harness = false
+
+[[bench]]
 name = "sign_verify"
 harness = false
 
@@ -50,6 +54,10 @@ name = "ignore_match"
 harness = false
 
 [[bench]]
+name = "index_retain"
+harness = false
+
+[[bench]]
 name = "restore_chunk_fanout"
 harness = false
 
@@ -63,6 +71,10 @@ harness = false
 
 [[bench]]
 name = "index_deserialize"
+harness = false
+
+[[bench]]
+name = "hex_decode"
 harness = false
 
 [[bench]]
