@@ -245,16 +245,22 @@ impl Index {
     }
 
     /// Remove and return the entry at `pos`. `O(n)` — same asymptotic cost
-    /// as the underlying `Vec::remove` shift (every later entry's position
-    /// changes), so `by_path` is fully rebuilt. Intended for single-path
-    /// removals (`rm`/`restore`/conflict abort), not a per-file staging
-    /// loop.
+    /// as the underlying `Vec::remove` shift. `by_path` drops the removed
+    /// key and shifts each later position down in place, with no path
+    /// clones. Intended for single-path removals (`rm`/`restore`/conflict
+    /// abort), not a per-file staging loop.
     ///
     /// # Panics
     /// Panics if `pos >= self.entries.len()` (same as `Vec::remove`).
     pub fn remove_entry_at(&mut self, pos: usize) -> IndexEntry {
         let removed = self.entries.remove(pos);
-        self.rebuild_path_index();
+        self.by_path.remove(removed.path.as_str());
+        for p in self.by_path.values_mut() {
+            if *p > pos {
+                *p -= 1;
+            }
+        }
+        self.debug_assert_consistent();
         removed
     }
 
@@ -267,9 +273,16 @@ impl Index {
 
     /// Retain only entries matching `keep`, rebuilding `by_path` in one
     /// pass afterward. `O(n)` — the same cost `Vec::retain` already pays.
-    pub fn retain_entries(&mut self, keep: impl FnMut(&IndexEntry) -> bool) {
-        self.entries.retain(keep);
-        self.rebuild_path_index();
+    pub fn retain_entries(&mut self, mut keep: impl FnMut(&IndexEntry) -> bool) {
+        let mut remap = Vec::with_capacity(self.entries.len());
+        let mut next = 0;
+        self.entries.retain(|entry| {
+            let kept = keep(entry);
+            remap.push(if kept { Some(next) } else { None });
+            next += usize::from(kept);
+            kept
+        });
+        self.remap_path_index(&remap);
     }
 
     /// Remove any entry that conflicts with staging `path` as a file leaf:
@@ -294,11 +307,23 @@ impl Index {
         if !has_ancestor_conflict && !has_descendant_conflict {
             return;
         }
-        self.entries.retain(|entry| {
+        self.retain_entries(|entry| {
             entry.path == path
                 || !(path_descends_from(&entry.path, path) || path_descends_from(path, &entry.path))
         });
-        self.rebuild_path_index();
+    }
+
+    /// Update `by_path` after entries were dropped. `remap[old]` is the new
+    /// position of the entry that sat at `old`, or `None` if it was dropped.
+    /// Visits each map slot once and clones no path. `O(n)`.
+    fn remap_path_index(&mut self, remap: &[Option<usize>]) {
+        self.by_path.retain(|_, pos| {
+            remap[*pos].is_some_and(|new| {
+                *pos = new;
+                true
+            })
+        });
+        self.debug_assert_consistent();
     }
 
     /// Rebuild `by_path` from `entries` in one `O(n log n)` pass. Called by
@@ -474,7 +499,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         return Err(IndexError::Corrupt);
     }
     let mut entries = Vec::with_capacity(count.min(1024)); // bound initial alloc
-    let mut seen_paths = std::collections::HashSet::with_capacity(count.min(1024));
+    let mut by_path = BTreeMap::new();
     let mut offset = 9usize;
     for _ in 0..count {
         if offset + min_entry_len > data.len() {
@@ -508,7 +533,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         if !validate_index_path(&path) {
             return Err(IndexError::InvalidPath(path));
         }
-        if !seen_paths.insert(path.clone()) {
+        if by_path.insert(path.clone(), entries.len()).is_some() {
             return Err(IndexError::DuplicatePath(path));
         }
         if status == EntryStatus::Removed && object_hash != hash::ZERO {
@@ -527,7 +552,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     if offset != data.len() {
         return Err(IndexError::Corrupt);
     }
-    Ok(Index::from_entries(entries))
+    Ok(Index { entries, by_path })
 }
 
 /// Read this worktree's staging index. Returns an empty index if the
@@ -1685,6 +1710,24 @@ mod tests {
         assert_eq!(idx.find_entry("b.txt"), Some(1));
     }
 
+    /// Removing the first, a middle and the last entry in turn keeps every
+    /// remaining path mapped to its own position.
+    #[test]
+    fn remove_entry_at_keeps_every_position_exact() {
+        let mut idx = Index::new();
+        for name in ["a", "b", "c", "d", "e"] {
+            idx.upsert_entry(blob_entry(name));
+        }
+        for victim in ["a", "c", "e"] {
+            assert!(idx.remove_path(victim).is_some());
+            for (i, e) in idx.entries.iter().enumerate() {
+                assert_eq!(idx.find_entry(&e.path), Some(i));
+            }
+            assert_eq!(idx.find_entry(victim), None);
+        }
+        assert_eq!(idx.entries.len(), 2);
+    }
+
     /// `remove_path` drops the entry and shifts later positions in the map
     /// to match the `Vec::remove` shift.
     #[test]
@@ -1717,6 +1760,27 @@ mod tests {
         assert_eq!(idx.entries[idx.find_entry("d.txt").unwrap()].path, "d.txt");
         assert_eq!(idx.find_entry("b.txt"), None);
         assert_eq!(idx.find_entry("c.txt"), None);
+    }
+
+    /// Dropping scattered entries, none, or all keeps every position exact.
+    #[test]
+    fn retain_entries_keeps_every_position_exact() {
+        let mut idx = Index::new();
+        for i in 0..100 {
+            idx.upsert_entry(blob_entry(&format!("dir{}/f{i:03}", i % 7)));
+        }
+        idx.retain_entries(|e| !e.path.ends_with('4') && !e.path.ends_with("07"));
+        let kept: Vec<String> = idx.entries.iter().map(|e| e.path.clone()).collect();
+        assert!(kept.len() < 100 && !kept.is_empty());
+        for (i, path) in kept.iter().enumerate() {
+            assert_eq!(idx.find_entry(path), Some(i));
+        }
+        assert_eq!(idx.find_entry("dir4/f004"), None);
+        idx.retain_entries(|_| true);
+        assert_eq!(idx.entries.len(), kept.len());
+        idx.retain_entries(|_| false);
+        assert!(idx.entries.is_empty());
+        assert_eq!(idx.find_entry(&kept[0]), None);
     }
 
     /// The common `add -A` case: staging an unrelated file has no ancestor

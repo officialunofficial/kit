@@ -19,11 +19,28 @@ pub type Hash = [u8; HASH_LEN];
 /// annotation fields on commit objects (`message_hash`, `content_digest`).
 pub const ZERO: Hash = [0u8; HASH_LEN];
 
-/// Hash arbitrary bytes in one shot.
+/// Input length from which [`hash`] splits the work across threads.
+/// Below it the thread hand-off costs more than it saves.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MIN: usize = 1024 * 1024;
+
+/// Whether [`hash`] splits an input of `len` bytes across threads.
+#[cfg(not(target_arch = "wasm32"))]
+const fn hashes_in_parallel(len: usize) -> bool {
+    len >= PARALLEL_MIN
+}
+
+/// Hash arbitrary bytes in one shot. The digest is the same for every
+/// input length and thread count.
 #[must_use]
 pub fn hash(data: &[u8]) -> Hash {
-    let h = blake3::hash(data);
-    *h.as_bytes()
+    #[cfg(not(target_arch = "wasm32"))]
+    if hashes_in_parallel(data.len()) {
+        let mut h = blake3::Hasher::new();
+        h.update_rayon(data);
+        return *h.finalize().as_bytes();
+    }
+    *blake3::hash(data).as_bytes()
 }
 
 /// Incremental BLAKE3 hasher for streaming data.
@@ -70,13 +87,19 @@ pub enum FromHexError {
 /// hex encoder. Use this everywhere a byte slice needs hex rendering.
 #[must_use]
 pub fn to_hex_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
+    let mut out = vec![0u8; bytes.len() * 2];
+    encode_hex(bytes, &mut out);
+    // `encode_hex` writes only ASCII, so the conversion cannot fail.
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Write the lowercase hex of `src` into `dst`, which is `2 * src.len()` bytes.
+fn encode_hex(src: &[u8], dst: &mut [u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (b, pair) in src.iter().zip(dst.chunks_exact_mut(2)) {
+        pair[0] = HEX[(b >> 4) as usize];
+        pair[1] = HEX[(b & 0x0f) as usize];
     }
-    out
 }
 
 /// Render a [`Hash`](tyalias@Hash) as lowercase hex.
@@ -126,10 +149,17 @@ pub fn from_hex(s: &str) -> Result<Hash, FromHexError> {
         });
     }
     let mut out = [0u8; HASH_LEN];
-    for i in 0..HASH_LEN {
-        let hi = hex_nibble(bytes[i * 2])?;
-        let lo = hex_nibble(bytes[i * 2 + 1])?;
-        out[i] = (hi << 4) | lo;
+    // Invalid digits map to `INVALID_NIBBLE`, which sets a bit above the low
+    // four. One check after the loop replaces a branch per digit.
+    let mut seen = 0u8;
+    for (dst, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let hi = HEX_NIBBLE[usize::from(pair[0])];
+        let lo = HEX_NIBBLE[usize::from(pair[1])];
+        seen |= hi | lo;
+        *dst = (hi << 4) | (lo & 0x0F);
+    }
+    if seen > 0x0F {
+        return Err(FromHexError::InvalidChar);
     }
     Ok(out)
 }
@@ -150,6 +180,25 @@ pub fn from_hex_bytes(s: &str) -> Option<Vec<u8>> {
         .map(|pair| Some((hex_nibble(pair[0]).ok()? << 4) | hex_nibble(pair[1]).ok()?))
         .collect()
 }
+
+const INVALID_NIBBLE: u8 = 0xFF;
+
+/// Value of each hex digit byte, or `INVALID_NIBBLE`.
+static HEX_NIBBLE: [u8; 256] = {
+    let mut table = [INVALID_NIBBLE; 256];
+    let mut i = 0u8;
+    while i < 10 {
+        table[(b'0' + i) as usize] = i;
+        i += 1;
+    }
+    let mut i = 0u8;
+    while i < 6 {
+        table[(b'a' + i) as usize] = 10 + i;
+        table[(b'A' + i) as usize] = 10 + i;
+        i += 1;
+    }
+    table
+};
 
 fn hex_nibble(b: u8) -> Result<u8, FromHexError> {
     match b {
@@ -184,18 +233,46 @@ impl fmt::Display for ObjectPath {
 /// Split a [`Hash`](tyalias@Hash) into its object-store path components.
 #[must_use]
 pub fn object_path(h: &Hash) -> ObjectPath {
-    let hex = to_hex(h);
-    let bytes = hex.as_bytes();
+    let mut hex = [0u8; HEX_LEN];
+    encode_hex(h, &mut hex);
     let mut dir = [0u8; 2];
     let mut file = [0u8; 62];
-    dir.copy_from_slice(&bytes[..2]);
-    file.copy_from_slice(&bytes[2..]);
+    dir.copy_from_slice(&hex[..2]);
+    file.copy_from_slice(&hex[2..]);
     ObjectPath { dir, file }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest cannot tell the two paths apart, so pin the cut-over
+    /// itself: 1 MiB and up goes to the threads, anything smaller stays
+    /// serial.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_cut_over_is_one_mebibyte() {
+        assert_eq!(PARALLEL_MIN, 1 << 20);
+        assert!(!hashes_in_parallel(0));
+        assert!(!hashes_in_parallel((1 << 20) - 1));
+        assert!(hashes_in_parallel(1 << 20));
+        assert!(hashes_in_parallel(usize::MAX));
+    }
+
+    #[test]
+    fn large_input_matches_serial_hasher() {
+        for len in [
+            0usize,
+            1,
+            (1 << 20) - 1,
+            1 << 20,
+            (1 << 20) + 1,
+            5 * (1 << 20) + 3,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+            assert_eq!(hash(&data), *blake3::hash(&data).as_bytes(), "len {len}");
+        }
+    }
 
     #[test]
     fn known_vector_hello() {
@@ -233,6 +310,34 @@ mod tests {
         let hex = to_hex(&h);
         let parsed = from_hex(&hex).unwrap();
         assert_eq!(h, parsed);
+    }
+
+    #[test]
+    fn from_hex_classifies_every_byte_like_to_digit() {
+        let valid = "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f";
+        for b in 0u8..=127 {
+            for pos in [0usize, 1, 31, 62, 63] {
+                let mut bytes = valid.as_bytes().to_vec();
+                bytes[pos] = b;
+                let s = std::str::from_utf8(&bytes).unwrap();
+                let digit = char::from(b).to_digit(16);
+                match from_hex(s) {
+                    Ok(h) => {
+                        let d = u8::try_from(digit.expect("digit")).unwrap();
+                        let got = if pos % 2 == 0 {
+                            h[pos / 2] >> 4
+                        } else {
+                            h[pos / 2] & 0x0F
+                        };
+                        assert_eq!(got, d);
+                    }
+                    Err(e) => {
+                        assert!(digit.is_none());
+                        assert_eq!(e, FromHexError::InvalidChar);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
