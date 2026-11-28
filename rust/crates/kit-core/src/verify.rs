@@ -425,6 +425,7 @@ pub use closure::{
     MAX_CLOSURE_BRANCH_BYTES, MAX_CLOSURE_PACKS, MAX_MANIFEST_BYTES, ObjectSource, export_closure,
     export_closure_with, valid_branch, verify_closure, verify_closure_manifest,
     verify_closure_packs, verify_closure_store, verify_closure_streaming,
+    verify_shallow_closure_store,
 };
 mod push;
 pub use push::{PushReport, verify_push};

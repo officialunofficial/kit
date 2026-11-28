@@ -1,8 +1,8 @@
 //! Refs subsystem.
 //!
 //! Implements the local-disk side of `docs/specs/SPEC-REFS.md`: ref names,
-//! the 65-byte wire encoding, the symbolic-or-detached `HEAD` file, and
-//! shallow-boundary persistence at `.kit/shallow`.
+//! the 65-byte wire encoding, and the symbolic-or-detached `HEAD` file.
+//! The shallow record at `.kit/shallow` is [`crate::shallow`].
 //!
 //! Wire format (per SPEC-REFS §1): exactly 64 lowercase-hex characters
 //! plus a trailing `0x0A` newline = 65 bytes. Uppercase hex is rejected
@@ -66,8 +66,6 @@ const HEAD_MAX_BYTES: u64 = 4 * 1024;
 /// file picked up extra whitespace, but anything pathological is
 /// rejected.
 pub const REF_FILE_MAX_BYTES: u64 = 128;
-/// Hard cap on `.kit/shallow` (1 MiB).
-const SHALLOW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Errors raised by this module.
 #[derive(Debug, thiserror::Error)]
@@ -1423,62 +1421,6 @@ pub fn list_tags_with(
     read_batch: impl FnOnce(&[RefCandidate]) -> Vec<RefReadOutcome>,
 ) -> RefResult<Vec<Ref>> {
     list_refs_under_with(layout.common_dir(), TAGS_DIR, read_batch)
-}
-
-// -----------------------------------------------------------------------------
-// Shallow boundaries (.kit/shallow)
-// -----------------------------------------------------------------------------
-
-/// Load shallow-boundary hashes from `.kit/shallow`. Returns `Ok(None)`
-/// if the file does not exist or is empty.
-pub fn load_shallow_boundaries(layout: &RepoLayout) -> RefResult<Option<Vec<Hash>>> {
-    let path = layout.shallow_file();
-    let bytes = match bounded_read::read_capped(&path, SHALLOW_MAX_BYTES) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-            return Err(RefError::InvalidRef("shallow file too large".to_string()));
-        }
-        Err(e) => return Err(RefError::Io(e)),
-    };
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let s = core::str::from_utf8(&bytes).map_err(|_| RefError::InvalidHead)?;
-    let mut out = Vec::new();
-    for line in s.split('\n') {
-        let trimmed = line.trim_end_matches(['\r', ' ', '\t']);
-        if trimmed.len() != HEX_LEN {
-            continue;
-        }
-        if let Some(h) = parse_lowercase_hash(trimmed.as_bytes()) {
-            out.push(h);
-        }
-    }
-    if out.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(out))
-}
-
-/// Write shallow-boundary hashes to `.kit/shallow`. Passing an empty
-/// slice removes the file.
-pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> RefResult<()> {
-    let path = layout.shallow_file();
-    if boundaries.is_empty() {
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(RefError::Io(e)),
-        }
-    } else {
-        let mut out = Vec::with_capacity(boundaries.len() * 65);
-        for h in boundaries {
-            out.extend_from_slice(&encode_ref_wire(h));
-        }
-        crate::durable::write_pointer(&path, &out, Parents::Create)?;
-        Ok(())
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -3277,67 +3219,6 @@ mod tests {
         let (_dir, kit) = fresh_repo();
         let err = delete_tag(&kit, "missing").unwrap_err();
         assert!(matches!(err, RefError::NotFound(_)));
-    }
-
-    // --- shallow boundaries --------------------------------------------
-
-    #[test]
-    fn load_shallow_returns_none_when_missing() {
-        let (_dir, kit) = fresh_repo();
-        assert_eq!(load_shallow_boundaries(&kit).unwrap(), None);
-    }
-
-    #[test]
-    fn write_and_load_shallow_round_trip() {
-        let (_dir, kit) = fresh_repo();
-        let bs = vec![h("b1"), h("b2"), h("b3")];
-        write_shallow_boundaries(&kit, &bs).unwrap();
-        let loaded = load_shallow_boundaries(&kit).unwrap().unwrap();
-        assert_eq!(loaded.len(), 3);
-        for b in &bs {
-            assert!(loaded.contains(b));
-        }
-    }
-
-    #[test]
-    fn write_empty_shallow_removes_file() {
-        let (_dir, kit) = fresh_repo();
-        write_shallow_boundaries(&kit, &[h("x")]).unwrap();
-        assert!(load_shallow_boundaries(&kit).unwrap().is_some());
-        write_shallow_boundaries(&kit, &[]).unwrap();
-        assert_eq!(load_shallow_boundaries(&kit).unwrap(), None);
-    }
-
-    #[test]
-    fn load_shallow_rejects_oversize_file() {
-        // SPEC-REFS §6: the shallow file is capped at 1 MiB.
-        let (_dir, kit) = fresh_repo();
-        let path = kit.shallow_file();
-        fs::write(
-            &path,
-            vec![b'a'; usize::try_from(SHALLOW_MAX_BYTES).unwrap() + 1],
-        )
-        .unwrap();
-        let err = load_shallow_boundaries(&kit).unwrap_err();
-        assert!(matches!(err, RefError::InvalidRef(_)));
-    }
-
-    #[test]
-    fn load_shallow_skips_invalid_lines() {
-        let (_dir, kit) = fresh_repo();
-        let path = kit.shallow_file();
-        let valid = h("ok");
-        let valid_hex = to_hex(&valid);
-        let mut content = String::new();
-        content.push_str("short\n");
-        content.push_str(&valid_hex);
-        content.push('\n');
-        content.push_str(&"z".repeat(64));
-        content.push('\n');
-        std::fs::write(&path, content).unwrap();
-        let loaded = load_shallow_boundaries(&kit).unwrap().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0], valid);
     }
 
     // --- remote-ref batching --------------------------------------

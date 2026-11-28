@@ -666,3 +666,11 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "shallow_record"
+path = "fuzz_targets/shallow_record.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

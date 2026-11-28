@@ -6,7 +6,7 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::{self, Hash};
 use kit_core::ops::diff::{WhitespaceMode, unified_hunks_opts};
-use kit_core::ops::merge::find_merge_base_strict;
+use kit_core::ops::merge::find_merge_base_within;
 use kit_core::ops::range_diff::{MAX_SERIES, Patch, Status, correspond};
 use libkit::log::{self, Entry, Filter, Query};
 
@@ -146,7 +146,9 @@ fn ranges(repo: &libkit::Repo, args: &[String]) -> Result<(String, String), u8> 
                 if b.is_empty() { "HEAD" } else { b },
             );
             let (ha, hb) = (resolve(a)?, resolve(b)?);
-            let base = match find_merge_base_strict(repo.store(), ha, hb) {
+            let boundary = kit_core::shallow::read(repo.layout())
+                .map_err(|e| super::error(&format!("merge base: {e}"), exit::DATAERR))?;
+            let base = match find_merge_base_within(repo.store(), &boundary, ha, hb) {
                 Ok(Some(base)) => hash::to_hex(&base),
                 Ok(None) => {
                     return Err(super::error(

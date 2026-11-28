@@ -28,7 +28,7 @@ fn rev(repo: &Repo, spec: &str) -> String {
 fn write_record(repo: &Repo, ids: &[&str]) {
     let mut ids: Vec<&str> = ids.to_vec();
     ids.sort_unstable();
-    let body: String = ids.iter().map(|id| format!("{id}\n")).collect();
+    let body: String = ids.iter().flat_map(|id| [*id, "\n"]).collect();
     std::fs::write(repo.kit_dir().join("shallow"), body).unwrap();
 }
 
@@ -67,9 +67,9 @@ fn gc_drops_the_history_beyond_the_boundary_and_keeps_the_boundary() {
 #[test]
 fn log_and_rev_list_stop_at_the_boundary() {
     let (repo, ids) = shallow_at_c3();
-    let subjects: Vec<String> = stdout(&repo.ok(&["log", "--format=%s"]))
+    let subjects: Vec<String> = stdout(&repo.ok(&["log", "--oneline"]))
         .lines()
-        .map(str::to_owned)
+        .map(|l| l.split_once(' ').unwrap().1.to_owned())
         .collect();
     assert_eq!(subjects, ["c5", "c4", "c3"]);
     let listed: Vec<String> = stdout(&repo.ok(&["rev-list", "HEAD"]))
@@ -186,7 +186,7 @@ fn a_record_that_is_not_canonical_is_refused() {
         b.clone(),
     ] {
         std::fs::write(repo.kit_dir().join("shallow"), &body).unwrap();
-        let out = repo.run(&["log", "--format=%s"]);
+        let out = repo.run(&["log", "--oneline"]);
         assert!(!out.status.success(), "{body:?}: {}", stdout(&out));
         assert!(
             stderr(&out).contains("shallow"),

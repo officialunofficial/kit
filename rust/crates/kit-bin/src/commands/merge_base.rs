@@ -10,7 +10,7 @@
 use std::io::Write;
 
 use clap::Parser;
-use kit_core::ops::merge::{find_merge_base_strict, is_ancestor_strict};
+use kit_core::ops::merge::{find_merge_base_within, is_ancestor_within};
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
@@ -71,8 +71,12 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
+    let boundary = match kit_core::shallow::read(&layout) {
+        Ok(boundary) => boundary,
+        Err(e) => return emit_err(&format!("merge-base: {e}"), exit::DATAERR),
+    };
     if opts.is_ancestor {
-        return match is_ancestor_strict(&store, a, b) {
+        return match is_ancestor_within(&store, &boundary, a, b) {
             Ok(true) => exit::OK,
             Ok(false) => exit::GENERAL_ERROR,
             // Exit 1 means "not an ancestor"; an unreadable history is not
@@ -81,7 +85,7 @@ pub fn run(args: &[String]) -> u8 {
         };
     }
 
-    match find_merge_base_strict(&store, a, b) {
+    match find_merge_base_within(&store, &boundary, a, b) {
         Ok(Some(base)) => {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "{}", format::hex_hash(&base));

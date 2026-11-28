@@ -21,6 +21,7 @@ use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, EntryMode};
 use kit_core::ops::blame::find_file_in_tree;
 use kit_core::ops::line_log::{RangeHunk, RangeSet, changes, hunks, map_across};
+use kit_core::shallow;
 use kit_core::store::ObjectStore;
 use kit_core::worktree::read_blob;
 
@@ -108,7 +109,8 @@ type Ranges = BTreeMap<String, RangeSet>;
 /// file at the starting commit, and [`Error::ReadFile`] when a file or a
 /// tree cannot be read.
 pub fn history(repo: &Repo, request: &Request<'_>) -> Result<Option<Vec<LineEntry>>, Error> {
-    let store = repo.store();
+    let boundary = shallow::read(repo.layout()).map_err(super::Error::Shallow)?;
+    let store = &super::Walker::new(repo.store(), &boundary);
     let Some(tip) = super::resolve_tip(repo, request.start)? else {
         return Ok(None);
     };
@@ -131,7 +133,7 @@ pub fn history(repo: &Repo, request: &Request<'_>) -> Result<Option<Vec<LineEntr
         return Ok(Some(out));
     }
     let mut pending: HashMap<Hash, Ranges> = HashMap::from([(tip, start)]);
-    for entry in super::walk(store, &[tip], request.first_parent)? {
+    for entry in super::walk_within(store, &[tip], request.first_parent)? {
         let Some(mut ranges) = pending.remove(&entry.hash) else {
             continue;
         };
@@ -192,7 +194,7 @@ struct Step {
 
 /// Carry `ranges` from `commit` to `parent`, or to nothing for a root.
 fn carry(
-    store: &ObjectStore,
+    store: &super::Walker<'_>,
     commit: &Commit,
     parent: Option<&Hash>,
     ranges: &Ranges,

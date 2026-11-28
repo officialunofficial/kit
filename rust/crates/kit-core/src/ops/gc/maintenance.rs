@@ -574,6 +574,7 @@ fn collect(
     // a missing hard closure does. Only manual gc classifies stale roots.
     let live = mark_live_checked(
         store,
+        &crate::shallow::read(layout)?,
         &roots,
         MarkLimits::DEFAULT,
         &mut |_, _, _| {},

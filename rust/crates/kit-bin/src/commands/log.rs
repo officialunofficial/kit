@@ -856,6 +856,13 @@ fn decorations(repo: &libkit::Repo) -> Result<HashMap<Hash, Vec<String>>, u8> {
             _ => list.insert(0, "HEAD".to_owned()),
         }
     }
+    // A commit in the shallow record ends its history here, and git marks
+    // it `grafted`.
+    let boundary =
+        kit_core::shallow::read(layout).map_err(|e| emit_err(&e.to_string(), exit::DATAERR))?;
+    for commit in boundary.iter() {
+        names.entry(*commit).or_default().push("grafted".to_owned());
+    }
     Ok(names)
 }
 

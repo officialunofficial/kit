@@ -26,7 +26,7 @@ use kit_core::ops::conflict_state::{
 };
 use kit_core::ops::graph::AncestorError;
 pub use kit_core::ops::merge::Favor;
-use kit_core::ops::merge::{MergeResult, find_merge_base_strict, merge_trees_favoring};
+use kit_core::ops::merge::{MergeResult, find_merge_base_within, merge_trees_favoring};
 use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
@@ -62,6 +62,9 @@ pub enum Error {
     /// commit. The error names it. Nothing was changed.
     #[error("find merge base: {0}")]
     History(AncestorError),
+    /// The shallow boundary record cannot be read or is not canonical.
+    #[error("{0}")]
+    Shallow(kit_core::shallow::ShallowError),
     /// An object that must be a commit is another kind of object.
     #[error("object is not a commit")]
     NotACommit,
@@ -247,7 +250,10 @@ pub fn start(
 
     // A base found in part of the history would merge the wrong changes, so
     // the walk reads every commit and fails before anything changes.
-    let base = find_merge_base_strict(store, ours, theirs).map_err(|e| match e {
+    // In a shallow repository a base that can lie beyond the boundary is an
+    // error too.
+    let boundary = kit_core::shallow::read(layout).map_err(Error::Shallow)?;
+    let base = find_merge_base_within(store, &boundary, ours, theirs).map_err(|e| match e {
         AncestorError::Limit(limit) => Error::MergeBase(limit),
         other => Error::History(other),
     })?;

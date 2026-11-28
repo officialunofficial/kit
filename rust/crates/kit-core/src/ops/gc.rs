@@ -54,11 +54,12 @@ use crate::hash::{self, Hash};
 use crate::index;
 use crate::layout::RepoLayout;
 use crate::object::{Object, ObjectType};
+use crate::shallow::Boundary;
 use crate::store::{ObjectStore, StoreError};
 
 use super::bisect;
 use super::conflict_state;
-use super::graph::{ClosureMode, MAX_REACHABLE, children};
+use super::graph::{MAX_REACHABLE, children};
 use super::rebase;
 use super::recovery;
 use super::stash;
@@ -78,6 +79,8 @@ use crate::refs::MAX_REF_WALK_DEPTH;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum GcRootsError {
+    #[error("shallow record: {0}")]
+    Shallow(#[from] crate::shallow::ShallowError),
     #[error("refs: {0}")]
     Refs(#[from] refs::RefError),
     #[error("stash: {0}")]
@@ -543,7 +546,7 @@ impl ChunkIds {
 }
 
 /// Mark every object `kit gc` keeps live: the closure over `roots` in
-/// [`ClosureMode::History`], with the chunks of each manifest held apart.
+/// [`super::graph::ClosureMode::History`], with the chunks of each manifest held apart.
 ///
 /// The walk is breadth-first over `objects`. A manifest queues nothing: its
 /// chunk ids go to a buffer, which is later checked once per distinct id for
@@ -560,7 +563,13 @@ fn mark_live(
     roots: &BTreeSet<Hash>,
     limits: MarkLimits,
 ) -> Result<LiveSet, GcRootsError> {
-    mark_live_observed(store, roots, limits, &mut |_, _, _| {})
+    mark_live_observed(
+        store,
+        &Boundary::default(),
+        roots,
+        limits,
+        &mut |_, _, _| {},
+    )
 }
 
 /// Take a bounded FIFO window without probing ids the serial walk skips.
@@ -575,15 +584,25 @@ fn take_probe_window(queue: &mut VecDeque<Hash>, objects: &BTreeSet<Hash>) -> Ve
 
 fn mark_live_observed(
     store: &ObjectStore,
+    boundary: &Boundary,
     roots: &BTreeSet<Hash>,
     limits: MarkLimits,
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<LiveSet, GcRootsError> {
-    mark_live_checked(store, roots, limits, progress, &|| Ok(()), &|| Ok(()))
+    mark_live_checked(
+        store,
+        boundary,
+        roots,
+        limits,
+        progress,
+        &|| Ok(()),
+        &|| Ok(()),
+    )
 }
 
 fn mark_live_checked(
     store: &ObjectStore,
+    boundary: &Boundary,
     roots: &BTreeSet<Hash>,
     limits: MarkLimits,
     progress: &mut dyn FnMut(&'static str, usize, u64),
@@ -593,7 +612,8 @@ fn mark_live_checked(
     let mut last_progress = std::time::Instant::now();
     progress("gc_mark", 0, 0);
     let mut objects: BTreeSet<Hash> = BTreeSet::new();
-    let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
+    // A commit in the shallow record is live: it is where the history stops.
+    let mut queue: VecDeque<Hash> = roots.iter().chain(boundary.iter()).copied().collect();
     let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
     while !queue.is_empty() {
         checkpoint()?;
@@ -633,7 +653,7 @@ fn mark_live_checked(
                 continue;
             }
             let object = store.read_object(&h)?;
-            let edges = children(&object, ClosureMode::History);
+            let edges = children(&object, boundary.mode(&h));
             if matches!(object, Object::ChunkedBlob(_)) {
                 drop(object);
                 ids.extend(&edges)?;
@@ -702,7 +722,7 @@ pub(crate) fn classify_soft_root(
     store: &ObjectStore,
     root: Hash,
 ) -> Result<Option<Hash>, GcRootsError> {
-    soft::SoftGraph::new(store, MarkLimits::DEFAULT).classify(root)
+    soft::SoftGraph::new(store, &Boundary::default(), MarkLimits::DEFAULT).classify(root)
 }
 
 /// `live_objects_with` at the default limits.
@@ -755,15 +775,19 @@ fn live_objects_observed(
     empty_attestation: &mut dyn FnMut(PathBuf),
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
     let (hard, soft) = collect_root_sets(layout, empty_attestation)?;
+    let boundary = crate::shallow::read(layout)?;
     if soft.is_empty() {
-        return Ok((mark_live_observed(store, &hard, limits, progress)?, vec![]));
+        return Ok((
+            mark_live_observed(store, &boundary, &hard, limits, progress)?,
+            vec![],
+        ));
     }
     let mut all = hard.clone();
     all.extend(soft.iter().map(|root| root.hash));
-    match mark_live_observed(store, &all, limits, progress) {
+    match mark_live_observed(store, &boundary, &all, limits, progress) {
         Ok(live) => Ok((live, vec![])),
         Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
-            soft::mark(store, hard, soft, limits, progress)
+            soft::mark(store, &boundary, hard, soft, limits, progress)
         }
         Err(error) => Err(error),
     }
@@ -1637,7 +1661,8 @@ mod tests {
         let (base, _) = commit_one(&store, b"base", b"base", vec![]);
         let (one, _) = commit_one(&store, b"one", b"one", vec![base]);
         let (two, _) = commit_one(&store, b"two", b"two", vec![one]);
-        let mut graph = soft::SoftGraph::new(&store, MarkLimits::DEFAULT);
+        let boundary = Boundary::default();
+        let mut graph = soft::SoftGraph::new(&store, &boundary, MarkLimits::DEFAULT);
         assert_eq!(graph.classify(two).unwrap(), None);
         let scanned = graph.scanned();
         assert_eq!(graph.classify(one).unwrap(), None);

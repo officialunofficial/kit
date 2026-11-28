@@ -50,8 +50,8 @@ pub use graph::{
 };
 pub use merge::{
     Conflict, ConflictKind, Favor, MergeOptions, MergeResult, RenameConflict, find_merge_base,
-    find_merge_base_strict, is_ancestor, is_ancestor_strict, merge_trees, merge_trees_favoring,
-    merge_trees_with,
+    find_merge_base_strict, find_merge_base_within, is_ancestor, is_ancestor_strict,
+    is_ancestor_within, merge_trees, merge_trees_favoring, merge_trees_with,
 };
 pub use recovery::{RecoveryEntry, RecoveryError, RetentionPolicy};
 pub use restore::{

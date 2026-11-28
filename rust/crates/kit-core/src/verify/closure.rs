@@ -421,6 +421,20 @@ pub(crate) fn walk(
     roots: &[Hash],
     mode: ClosureMode,
     source: &mut impl ObjectSource,
+    known: impl FnMut(&Hash) -> Known,
+    root_rule: RootRule,
+    visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
+) -> Result<Walk, VerifyError> {
+    walk_within(roots, &|_| mode, source, known, root_rule, visit)
+}
+
+/// [`walk`] where `mode` picks the edges to follow from each object: a
+/// shallow repository's history walk follows no parent of a commit in its
+/// record.
+fn walk_within(
+    roots: &[Hash],
+    mode: &dyn Fn(&Hash) -> ClosureMode,
+    source: &mut impl ObjectSource,
     mut known: impl FnMut(&Hash) -> Known,
     root_rule: RootRule,
     mut visit: impl FnMut(&Hash, &Object) -> Result<(), VerifyError>,
@@ -489,7 +503,7 @@ pub(crate) fn walk(
         }
         visit(&id, &object)?;
 
-        let child_ids = typed_children(&object, mode);
+        let child_ids = typed_children(&object, mode(&id));
         if matches!(object, Object::ChunkedBlob(_)) {
             manifests.push(id);
         }
@@ -921,6 +935,39 @@ pub fn verify_closure_store(
 ) -> Result<ClosureReport, VerifyError> {
     let mut source = store;
     verify_closure_streaming(root, mode, &mut source)
+}
+
+/// [`verify_closure_store`] in history mode for a shallow repository: the
+/// walk follows no parent of a commit in `boundary`, so the history beyond
+/// the boundary is neither read nor reported missing. Whether the record
+/// itself is right is [`crate::shallow::check`].
+///
+/// # Errors
+///
+/// The errors of [`verify_closure_store`].
+pub fn verify_shallow_closure_store(
+    store: &ObjectStore,
+    root: &Hash,
+    boundary: &crate::shallow::Boundary,
+) -> Result<ClosureReport, VerifyError> {
+    let mut source = store;
+    let walked = walk_within(
+        std::slice::from_ref(root),
+        &|id| boundary.mode(id),
+        &mut source,
+        |_| Known::No,
+        RootRule::Fail,
+        |_, _| Ok(()),
+    )?;
+    Ok(ClosureReport {
+        root: *root,
+        mode: ClosureMode::History,
+        verified: walked.verified,
+        missing: walked.missing,
+        corrupt: walked.corrupt,
+        unreferenced: Vec::new(),
+        unreferenced_checked: false,
+    })
 }
 
 /// Re-hashes every supplied object and walks from `root` with

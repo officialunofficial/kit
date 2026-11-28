@@ -2105,6 +2105,16 @@ pub fn maintenance_stamp_one_iteration(input: &[u8]) {
     kit_core::ops::gc::fuzz_maintenance_stamp(input);
 }
 
+/// Check that an accepted shallow boundary record is canonical: it encodes
+/// back to the input bytes.
+pub fn shallow_record_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(boundary) = kit_core::shallow::fuzz_parse(input) {
+        assert!(!boundary.is_empty());
+        assert_eq!(kit_core::shallow::encode(&boundary), input);
+    }
+}
+
 /// Exercise index validation with a bounded input.
 pub fn local_pack_index_one_iteration(input: &[u8]) {
     kit_core::store::fuzz_local_pack_index(&input[..input.len().min(MAX_INPUT)]);
@@ -4274,6 +4284,20 @@ mod tests {
         for outcome in [0, 1, 2, 3, 4, 5, 6, 7, u8::MAX] {
             bytes[8] = outcome;
             run_one(&bytes, maintenance_stamp_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_shallow_record() {
+        run_iterated_unit(shallow_record_one_iteration).unwrap();
+        let line = format!("{}\n", "ab".repeat(32));
+        for case in [
+            line.clone(),
+            line.repeat(2),
+            line.to_uppercase(),
+            String::new(),
+        ] {
+            run_one(case.as_bytes(), shallow_record_one_iteration).unwrap();
         }
     }
 

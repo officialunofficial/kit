@@ -29,7 +29,7 @@ use kit_core::hash::Hash;
 use kit_core::index;
 use kit_core::object::Object;
 use kit_core::ops::graph::AncestorError;
-use kit_core::ops::merge::find_merge_base_strict;
+use kit_core::ops::merge::find_merge_base_within;
 use kit_core::ops::{
     BINARY_SNIFF_LEN, DiffEntry, DiffKind, RenameOptions, RenameReport, WhitespaceMode,
     detect_renames, diff_line_counts, diff_trees, is_binary, unified_hunks_opts,
@@ -85,6 +85,9 @@ pub enum Error {
     /// commit. The error names it.
     #[error("merge base: {0}")]
     History(AncestorError),
+    /// The shallow boundary record cannot be read or is not canonical.
+    #[error("{0}")]
+    Shallow(kit_core::shallow::ShallowError),
     /// `HEAD` could not be read.
     #[error("resolve HEAD: {0}")]
     ResolveHead(RefError),
@@ -449,12 +452,12 @@ fn resolve_endpoints(
     {
         let commit_a = peeled(repo, a)?;
         let commit_b = peeled(repo, b)?;
-        let base = find_merge_base_strict(repo.store(), commit_a, commit_b)
-            .map_err(merge_base_error)?
-            .ok_or_else(|| Error::NoMergeBaseBetween {
+        let base = merge_base_within(repo, commit_a, commit_b)?.ok_or_else(|| {
+            Error::NoMergeBaseBetween {
                 a: a.to_owned(),
                 b: b.to_owned(),
-            })?;
+            }
+        })?;
         let old = tree_of(repo, &base)?;
         let new = tree_of(repo, &commit_b)?;
         return Ok((Some(old), Some(new), args[1..].to_vec()));
@@ -539,9 +542,13 @@ fn merge_base_endpoints(
 }
 
 fn merge_base_of(repo: &Repo, a: Hash, b: Hash) -> Result<Hash, Error> {
-    find_merge_base_strict(repo.store(), a, b)
-        .map_err(merge_base_error)?
-        .ok_or(Error::NoMergeBase)
+    merge_base_within(repo, a, b)?.ok_or(Error::NoMergeBase)
+}
+
+/// The merge base of `a` and `b` inside the repository's shallow boundary.
+fn merge_base_within(repo: &Repo, a: Hash, b: Hash) -> Result<Option<Hash>, Error> {
+    let boundary = kit_core::shallow::read(repo.layout()).map_err(Error::Shallow)?;
+    find_merge_base_within(repo.store(), &boundary, a, b).map_err(merge_base_error)
 }
 
 /// The error of a strict merge base walk. A base found in part of the

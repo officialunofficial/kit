@@ -6,7 +6,8 @@
 use super::{GcRootsError, LiveSet, MarkLimits, SoftRoot, mark_live_observed};
 use crate::hash::{self, Hash};
 use crate::object::{Object, ObjectType};
-use crate::ops::graph::{ClosureMode, children};
+use crate::ops::graph::children;
+use crate::shallow::Boundary;
 use crate::store::{ObjectStore, StoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -25,15 +26,17 @@ struct Node {
 
 pub(super) struct SoftGraph<'a> {
     store: &'a ObjectStore,
+    boundary: &'a Boundary,
     limits: MarkLimits,
     nodes: BTreeMap<Hash, Node>,
     chunks: BTreeMap<Hash, Option<ObjectType>>,
 }
 
 impl<'a> SoftGraph<'a> {
-    pub(super) fn new(store: &'a ObjectStore, limits: MarkLimits) -> Self {
+    pub(super) fn new(store: &'a ObjectStore, boundary: &'a Boundary, limits: MarkLimits) -> Self {
         Self {
             store,
+            boundary,
             limits,
             nodes: BTreeMap::new(),
             chunks: BTreeMap::new(),
@@ -64,7 +67,7 @@ impl<'a> SoftGraph<'a> {
             });
         }
         let object = self.store.read_object(&h)?;
-        let edges = children(&object, ClosureMode::History);
+        let edges = children(&object, self.boundary.mode(&h));
         let chunks = matches!(object, Object::ChunkedBlob(_));
         let mut status = Status::Visiting;
         if chunks {
@@ -150,12 +153,13 @@ impl<'a> SoftGraph<'a> {
 
 pub(super) fn mark(
     store: &ObjectStore,
+    boundary: &Boundary,
     hard: BTreeSet<Hash>,
     soft: Vec<SoftRoot>,
     limits: MarkLimits,
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
-    let mut graph = SoftGraph::new(store, limits);
+    let mut graph = SoftGraph::new(store, boundary, limits);
     let mut roots = hard;
     let mut last = std::time::Instant::now();
     progress("gc_mark", 0, 0);
@@ -183,7 +187,7 @@ pub(super) fn mark(
     // Release completeness metadata before the ordinary, shared union mark.
     // That mark retains the existing distinct-object and distinct-chunk caps.
     drop(graph);
-    let live = mark_live_observed(store, &roots, limits, progress)?;
+    let live = mark_live_observed(store, boundary, &roots, limits, progress)?;
     progress("gc_mark", live.len(), 0);
     Ok((live, skipped.into_iter().collect()))
 }

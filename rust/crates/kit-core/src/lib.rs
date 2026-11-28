@@ -77,6 +77,8 @@ pub mod ignore;
 pub mod index;
 pub mod ref_listing;
 pub mod refs;
+// The shallow boundary record (SPEC-SHALLOW).
+pub mod shallow;
 // SPEC-TRANSPORT-CONNECT §7.4 repository identity grammar (namespaces and
 // names), shared by server addressing and the grant codec.
 pub mod repo_identity;

@@ -185,7 +185,10 @@ fn old_walk(store: &ObjectStore, roots: &BTreeSet<Hash>) -> Result<BTreeSet<Hash
         if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
             continue;
         }
-        queue.extend(children(&store.read_object(&h)?, ClosureMode::History));
+        queue.extend(children(
+            &store.read_object(&h)?,
+            crate::ops::graph::ClosureMode::History,
+        ));
     }
     Ok(live)
 }

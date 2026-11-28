@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 use kit_core::hash::{Hash, from_hex, to_hex};
+use kit_core::object::Object;
 use kit_core::pack_key;
 use kit_core::protocol::PACK_BODY_LIMIT;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::verify::{
     ClosureReport, ExportOptions, VerifyError, export_closure_with, valid_branch, verify_closure,
-    verify_closure_manifest, verify_closure_store,
+    verify_closure_manifest, verify_closure_store, verify_shallow_closure_store,
 };
 use kit_core::{ClosureMode, reachable_objects, reachable_snapshot};
 
@@ -358,6 +359,10 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     } else {
         ClosureMode::Snapshot
     };
+    let boundary = match kit_core::shallow::read(&layout) {
+        Ok(b) => b,
+        Err(e) => return emit_err(&format!("shallow record: {e}"), exit::DATAERR),
+    };
     let report = if opts.show_unreferenced {
         let hashes = match store.iter_object_hashes() {
             Ok(h) => h,
@@ -388,6 +393,23 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
         }
         report.corrupt.sort_by_key(|(id, _)| *id);
         report
+    } else if mode == ClosureMode::History && !boundary.is_empty() {
+        // The history stops at the shallow record: check the record names
+        // exactly the commits whose parents are absent, then the window.
+        let tip = revspec::peel_tags(&store, root);
+        if let Err(v) =
+            kit_core::shallow::check(&[tip], &boundary, |id| match store.read_object(id) {
+                Ok(Object::Commit(c)) => Some(c.parents),
+                Ok(Object::Remix(r)) => Some(r.parents),
+                _ => None,
+            })
+        {
+            return emit_err(&format!("shallow record: {v}"), exit::DATAERR);
+        }
+        match verify_shallow_closure_store(&store, &root, &boundary) {
+            Ok(r) => r,
+            Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
+        }
     } else {
         match verify_closure_store(&store, &root, mode) {
             Ok(r) => r,

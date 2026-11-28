@@ -26,6 +26,7 @@ use crate::object::{EntryMode, Object, Tree, TreeEntry};
 use crate::ops::graph::{AncestorError, read_history_commit};
 use crate::ops::similarity::RenameOptions;
 use crate::serialize;
+use crate::shallow::Boundary;
 use crate::store::{MAX_TREE_DEPTH, ObjectSink, ObjectSource, StoreError, WalkBudget};
 
 mod renames;
@@ -511,6 +512,154 @@ fn is_ancestor_strict_with_cap<S: ObjectSource + ?Sized>(
         stack.extend(read_history_commit(store, current)?.parents);
     }
     Ok(false)
+}
+
+/// [`find_merge_base_strict`] in a repository whose history stops at
+/// `boundary`. Both walks stop at the commits in the record, and the second
+/// walk picks the base as [`find_merge_base_strict`] does.
+///
+/// The answer stands only when no common ancestor the walks cannot see
+/// could be as near. Such an ancestor lies past a boundary commit on at
+/// least one side, so its total depth is more than the depth of that
+/// side's nearest boundary commit. Otherwise the walk fails with
+/// [`AncestorError::BeyondShallowBoundary`]: it never answers from the part
+/// of the history it holds. With an empty boundary it is
+/// [`find_merge_base_strict`].
+///
+/// # Errors
+///
+/// [`AncestorError::BeyondShallowBoundary`] as above, and every error of
+/// [`find_merge_base_strict`].
+pub fn find_merge_base_within<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    a: Hash,
+    b: Hash,
+) -> Result<Option<Hash>, AncestorError> {
+    if boundary.is_empty() {
+        return find_merge_base_strict(store, a, b);
+    }
+    if a == b {
+        return Ok(Some(a));
+    }
+    let side_a = window_depths(store, boundary, a)?;
+    let mut cut_b: Option<usize> = None;
+    let mut seen_b: HashSet<Hash> = HashSet::new();
+    let mut queue: VecDeque<(Hash, usize)> = VecDeque::new();
+    seen_b.insert(b);
+    queue.push_back((b, 0));
+    let mut best: Option<(Hash, usize)> = None;
+    while let Some((node, depth)) = queue.pop_front() {
+        if let Some((_, best_total)) = best
+            && depth > best_total
+        {
+            break;
+        }
+        if let Some(&ancestor_depth) = side_a.depths.get(&node) {
+            let total = ancestor_depth + depth;
+            if best.is_none_or(|(_, t)| total < t) {
+                best = Some((node, total));
+            }
+        }
+        let commit = read_history_commit(store, node)?;
+        if boundary.contains(&node) {
+            if !commit.parents.is_empty() && cut_b.is_none() {
+                cut_b = Some(depth);
+            }
+            continue;
+        }
+        for p in commit.parents {
+            if !seen_b.contains(&p) {
+                if seen_b.len() >= MAX_STRICT_WALK_COMMITS {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                seen_b.insert(p);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+    // The nearest a hidden common ancestor can be.
+    let hidden = [side_a.nearest_cut, cut_b]
+        .into_iter()
+        .flatten()
+        .map(|cut| cut + 1)
+        .min();
+    match (best, hidden) {
+        (best, None) => Ok(best.map(|(h, _)| h)),
+        (Some((h, total)), Some(bound)) if total < bound => Ok(Some(h)),
+        _ => Err(AncestorError::BeyondShallowBoundary),
+    }
+}
+
+/// The commits a walk from `start` reaches inside the window, each at its
+/// smallest depth, and the smallest depth of a boundary commit whose
+/// parents the walk did not follow.
+struct WindowDepths {
+    depths: HashMap<Hash, usize>,
+    nearest_cut: Option<usize>,
+}
+
+fn window_depths<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    start: Hash,
+) -> Result<WindowDepths, AncestorError> {
+    let mut depths: HashMap<Hash, usize> = HashMap::new();
+    let mut nearest_cut = None;
+    let mut queue: VecDeque<(Hash, usize)> = VecDeque::new();
+    depths.insert(start, 0);
+    queue.push_back((start, 0));
+    while let Some((node, depth)) = queue.pop_front() {
+        let commit = read_history_commit(store, node)?;
+        if boundary.contains(&node) {
+            if !commit.parents.is_empty() && nearest_cut.is_none() {
+                nearest_cut = Some(depth);
+            }
+            continue;
+        }
+        for p in commit.parents {
+            if !depths.contains_key(&p) {
+                if depths.len() >= MAX_STRICT_WALK_COMMITS {
+                    return Err(strict_limit(MERGE_BASE_LIMIT));
+                }
+                depths.insert(p, depth + 1);
+                queue.push_back((p, depth + 1));
+            }
+        }
+    }
+    Ok(WindowDepths {
+        depths,
+        nearest_cut,
+    })
+}
+
+/// [`is_ancestor_strict`] in a repository whose history stops at
+/// `boundary`. The walk stops at the commits in the record. When it does
+/// not reach `ancestor` and had to stop at a boundary commit, the answer
+/// lies beyond the boundary and the walk fails with
+/// [`AncestorError::BeyondShallowBoundary`].
+///
+/// # Errors
+///
+/// [`AncestorError::BeyondShallowBoundary`] as above, and every error of
+/// [`is_ancestor_strict`].
+pub fn is_ancestor_within<S: ObjectSource + ?Sized>(
+    store: &S,
+    boundary: &Boundary,
+    ancestor: Hash,
+    descendant: Hash,
+) -> Result<bool, AncestorError> {
+    if boundary.is_empty() {
+        return is_ancestor_strict(store, ancestor, descendant);
+    }
+    let walk = window_depths(store, boundary, descendant)?;
+    if walk.depths.contains_key(&ancestor) {
+        Ok(true)
+    } else if walk.nearest_cut.is_some() {
+        Err(AncestorError::BeyondShallowBoundary)
+    } else {
+        Ok(false)
+    }
 }
 
 fn strict_limit(limit: &'static str) -> AncestorError {
@@ -2034,5 +2183,110 @@ mod walk_budget_tests {
         let exact = (67 + 100) + 2 * (67 + 102);
         merge(exact).unwrap();
         assert!(matches!(merge(exact - 1), Err(StoreError::TreeTooLarge)));
+    }
+
+    mod shallow_walks {
+        use super::super::{
+            find_merge_base_strict, find_merge_base_within, is_ancestor_strict, is_ancestor_within,
+        };
+        use crate::hash::Hash;
+        use crate::object::{Commit, Identity, Object, Tree, object_id_from_bytes};
+        use crate::ops::graph::AncestorError;
+        use crate::serialize;
+        use crate::shallow::{Boundary, exact_record};
+        use crate::store::MemorySource;
+        use proptest::prelude::*;
+
+        /// Commits 0..n, each with parents among the lower numbers, written
+        /// to a full store and, where `present`, to a shallow one.
+        fn stores(
+            edges: &[Vec<prop::sample::Index>],
+            present: &[bool],
+        ) -> (MemorySource, MemorySource, Vec<Hash>, Vec<Vec<Hash>>) {
+            let mut full = MemorySource::default();
+            let mut part = MemorySource::default();
+            let tree = serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap();
+            let tree_id = object_id_from_bytes(&tree);
+            full.insert(tree_id, tree.clone()).unwrap();
+            part.insert(tree_id, tree).unwrap();
+            let mut ids: Vec<Hash> = Vec::new();
+            let mut parents_of: Vec<Vec<Hash>> = Vec::new();
+            for (i, ps) in edges.iter().enumerate() {
+                let mut parents: Vec<Hash> = if i == 0 {
+                    vec![]
+                } else {
+                    ps.iter().map(|ix| ids[ix.index(i)]).collect()
+                };
+                parents.dedup();
+                let bytes = serialize::serialize(&Object::Commit(Commit {
+                    tree_hash: tree_id,
+                    parents: parents.clone(),
+                    author: Identity::ed25519([0; 32]),
+                    signer: [0; 32],
+                    message: format!("c{i}").into_bytes(),
+                    timestamp: i as u64,
+                    message_hash: [0; 32],
+                    content_digest: [0; 32],
+                    signature: [0; 64],
+                }))
+                .unwrap();
+                let id = object_id_from_bytes(&bytes);
+                full.insert(id, bytes.clone()).unwrap();
+                if present[i] {
+                    part.insert(id, bytes).unwrap();
+                }
+                ids.push(id);
+                parents_of.push(parents);
+            }
+            (full, part, ids, parents_of)
+        }
+
+        fn graph() -> impl Strategy<Value = (Vec<Vec<prop::sample::Index>>, Vec<bool>, usize, usize)>
+        {
+            (2usize..20).prop_flat_map(|n| {
+                (
+                    proptest::collection::vec(
+                        proptest::collection::vec(any::<prop::sample::Index>(), 0..3),
+                        n,
+                    ),
+                    proptest::collection::vec(proptest::bool::weighted(0.8), n),
+                    0..n,
+                    0..n,
+                )
+            })
+        }
+
+        proptest! {
+            /// A walk that stops at the exact record either fails with the
+            /// typed error or gives the answer the whole history gives.
+            #[test]
+            fn a_shallow_answer_is_the_full_answer(
+                (edges, mut present, a, b) in graph()
+            ) {
+                present[a] = true;
+                present[b] = true;
+                let (full, part, ids, parents_of) = stores(&edges, &present);
+                let index = |h: &Hash| ids.iter().position(|x| x == h);
+                let boundary: Boundary = exact_record(&[ids[a], ids[b]], |h| {
+                    index(h).filter(|&i| present[i]).map(|i| parents_of[i].clone())
+                });
+                let (ha, hb) = (ids[a], ids[b]);
+
+                match find_merge_base_within(&part, &boundary, ha, hb) {
+                    Ok(base) => prop_assert_eq!(base, find_merge_base_strict(&full, ha, hb).unwrap()),
+                    Err(e) => prop_assert!(matches!(e, AncestorError::BeyondShallowBoundary), "{e}"),
+                }
+                match is_ancestor_within(&part, &boundary, ha, hb) {
+                    Ok(v) => prop_assert_eq!(v, is_ancestor_strict(&full, ha, hb).unwrap()),
+                    Err(e) => prop_assert!(matches!(e, AncestorError::BeyondShallowBoundary), "{e}"),
+                }
+                if boundary.is_empty() {
+                    prop_assert_eq!(
+                        find_merge_base_within(&part, &boundary, ha, hb).unwrap(),
+                        find_merge_base_strict(&full, ha, hb).unwrap()
+                    );
+                }
+            }
+        }
     }
 }
