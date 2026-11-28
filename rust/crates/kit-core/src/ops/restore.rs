@@ -999,6 +999,19 @@ where
 /// directories, since files of one directory contend for its lock.
 const PENDING_WRITES: usize = 4096;
 
+/// The threads that write `jobs` handed-off files: two for each core, since
+/// a file write waits on the file system more than on the processor, up to
+/// 16, and one for each 32 files at most. Each thread writes a contiguous
+/// run of files, so threads mostly write in different directories.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_threads(jobs: usize) -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cores = *CORES.get_or_init(|| {
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+    });
+    (cores * 2).min(16).min(jobs / 32).max(1)
+}
+
 /// A regular file the walk found to write: [`restore_blob_with`] with no
 /// case-only rename source.
 struct PendingWrite {
@@ -1009,8 +1022,9 @@ struct PendingWrite {
     executable: bool,
 }
 
-/// Regular files the walk hands off and writes together, on several
-/// threads, in batches of up to [`PENDING_WRITES`] that span directories.
+/// Regular files the walk hands off and writes together, on
+/// [`write_threads`] threads, in batches of up to [`PENDING_WRITES`] that
+/// span directories.
 /// Each write is the one the walk would make, so every byte is verified and
 /// each file is published whole. Outcomes are taken in walk order: the
 /// first failed file in that order is the error, and the files written and
@@ -1053,8 +1067,22 @@ impl PendingWrites {
         };
         #[cfg(not(target_arch = "wasm32"))]
         let outcomes: Vec<_> = {
-            use rayon::prelude::*;
-            jobs.par_iter().map(write).collect()
+            let threads = write_threads(jobs.len());
+            let per_thread = jobs.len().div_ceil(threads.max(1)).max(1);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = jobs
+                    .chunks(per_thread)
+                    .map(|slice| scope.spawn(move || slice.iter().map(write).collect::<Vec<_>>()))
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    })
+                    .collect()
+            })
         };
         #[cfg(target_arch = "wasm32")]
         let outcomes: Vec<_> = jobs.iter().map(write).collect();
