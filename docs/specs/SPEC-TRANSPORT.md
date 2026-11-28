@@ -566,13 +566,13 @@ ordinary ref write, and a client verifies what it fetches.
 
 ```
 client → server:    Hello { proto = PROTOCOL_VERSION_1, client_id }
-server → client:    HelloResponse { proto, server_id }
+server → client:    HelloResponse { proto, server_id, download_window }
                       OR
                     Error
 
 client → server:    one of: ListRefs, ReadRef, UpdateRef, ReadRepoCursor,
                             PackExists, UploadPack (+ PackChunks),
-                            DownloadPack, Close
+                            DownloadPack, DownloadWindow, Close
 server → client:    matching *Response, OR Error
 ```
 
@@ -613,6 +613,22 @@ replies with `DownloadPackHeader { total_bytes }` followed by a
 sequence of `PackChunk`s ending in `last=true`. If the pack is
 absent the server replies with `Error { code = ERROR_CODE_KEY_NOT_FOUND }`
 before any header is emitted.
+
+Shallow windows (SPEC-SHALLOW §8.2): a server that sets
+`HelloResponse.download_window` answers `DownloadWindow { tips, depth, have }`.
+The reply is one or more packs, each a `DownloadWindowPack { pack_id,
+total_bytes }` followed by its `PackChunk`s as in a download, then one
+`DownloadWindowBoundary { commits }`. The server builds the whole window
+before its first frame, so a refusal is a lone `Error`:
+`ERROR_CODE_INVALID_REQUEST` for a request outside the limits or a window
+over 1 GiB, and `ERROR_CODE_KEY_NOT_FOUND` for a tip, or a parent inside the
+window, that it lacks. The client checks that each chunk names its pack and
+continues it at its offset, that `last` marks exactly the final byte of
+`total_bytes`, that `pack_id` is the BLAKE3 of the bytes, and then the window
+itself (SPEC-SHALLOW SH1, SH3). The packs of one reply are capped at 2 GiB.
+The request is not retried: the packs that arrived are stored, and the
+caller starts the fetch again. A client that finds `download_window` unset
+fails with "this remote cannot serve a shallow fetch".
 
 #### 4.2.1 `UpdateRef` CAS encoding
 

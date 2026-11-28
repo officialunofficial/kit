@@ -210,7 +210,14 @@ DownloadWindow { tips: [commit id], depth: u32, have: [commit id] }
   of the transport. A deepen sends the record as `have` and a greater depth.
 
 The Connect service advertises the request in `GetServerInfo` (STC §2.1). The
-SSH conversation (SPEC-TRANSPORT §4.2) adds one frame. A client that finds no
+SSH conversation (SPEC-TRANSPORT §4.2) advertises it in `HelloResponse` and
+adds the request frame and its two reply frames.
+
+`kit serve` stores packs as pushes uploaded them, like a file remote. To
+answer a window it unpacks every pack into a private object store in the
+system temporary directory, builds the window pack from that store, and
+removes the store when the request ends. The server pays for the full
+unpack; the client downloads only the window. A client that finds no
 advertisement fails with "this remote cannot serve a shallow fetch".
 
 ### 8.3 Sparse
