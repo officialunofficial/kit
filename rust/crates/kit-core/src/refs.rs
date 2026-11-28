@@ -1047,6 +1047,14 @@ pub fn update_ref_with_ancestry(
 ) -> RefResult<()> {
     check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let (_history, mutation) = acquire_history_mutation(layout, branch)?;
+    // A shallow repository cannot hold the chain from the root, so it
+    // publishes no ancestry (SPEC-SHALLOW). The plain write still checks
+    // the condition and invalidates the snapshot of the old tip.
+    let shallow = crate::shallow::read(layout)
+        .map_err(|e| RefError::InvalidRef(format!("{branch}: shallow record: {e}")))?;
+    if !shallow.is_empty() {
+        return mutation.write(&encode_ref_wire(target), condition);
+    }
     crate::history::ancestry::advance(layout, branch, &mutation, condition, *target, store).map_err(
         |e| match e {
             crate::history::HistoryError::Ref(e) => e,
