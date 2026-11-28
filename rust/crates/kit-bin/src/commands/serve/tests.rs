@@ -108,6 +108,7 @@ fn with_current_server_id(golden: &[u8]) -> Vec<u8> {
     let resp = HelloResponse {
         proto: Some(ProtocolVersion::ProtocolVersion1.into()),
         server_id: Some(GOLDEN_SERVER_ID.to_owned()),
+        download_window: Some(true),
         ..Default::default()
     };
     assert_eq!(first, frame(Body::HelloResponse(Box::new(resp.clone()))));
