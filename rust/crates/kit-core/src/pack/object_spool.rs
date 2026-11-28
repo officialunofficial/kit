@@ -68,6 +68,32 @@ struct Frame {
     file: u32,
     offset: u64,
     len: u32,
+    /// The object's first bytes, kept when it was staged, so
+    /// [`ObjectSpool::head`] answers without a read.
+    head: Head,
+}
+
+/// Up to the first ten bytes of a staged object: its type tag, prologue and,
+/// for a blob, its payload length. Empty when the frame was taken from a
+/// spool that did not keep them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Head {
+    bytes: [u8; 10],
+    len: u8,
+}
+
+impl Head {
+    fn of(bytes: &[u8]) -> Self {
+        let mut head = Self::default();
+        let len = bytes.len().min(head.bytes.len());
+        head.bytes[..len].copy_from_slice(&bytes[..len]);
+        head.len = u8::try_from(len).expect("ten bytes at most");
+        head
+    }
+
+    fn get(&self) -> Option<&[u8]> {
+        (self.len != 0).then(|| &self.bytes[..usize::from(self.len)])
+    }
 }
 
 /// The spool's own file, which donated frames keep reading after the spool is gone.
@@ -164,6 +190,7 @@ impl ObjectSpool {
                 file: 0,
                 offset: spool.end,
                 len,
+                head: Head::of(bytes),
             };
             spool.writer.write_all(bytes)?;
             spool.end += u64::from(len);
@@ -209,6 +236,7 @@ impl ObjectSpool {
                     file: 0,
                     offset: 0,
                     len,
+                    head: Head::of(bytes),
                 },
             );
             spool.loose.insert(id, file);
@@ -240,21 +268,22 @@ impl ObjectSpool {
             let mut other = from.inner.lock().expect("object spool mutex");
             let mut moved = Vec::new();
             for &(position, id, len, ty) in entries {
-                if !other
+                let Some(head) = other
                     .by_id
                     .get(&id)
-                    .is_some_and(|frame| frame.loose && frame.len == len)
-                {
+                    .filter(|frame| frame.loose && frame.len == len)
+                    .map(|frame| frame.head)
+                else {
                     return Err(StoreError::ObjectNotFound(to_hex(&id)));
-                }
+                };
                 if let Some(file) = other.loose.remove(&id) {
-                    moved.push(((position, id, len, ty), file));
+                    moved.push(((position, id, len, ty), file, head));
                 }
             }
             moved
         };
         let mut spool = self.inner.lock().expect("object spool mutex");
-        for ((position, id, len, ty), file) in moved {
+        for ((position, id, len, ty), file, head) in moved {
             if spool
                 .by_id
                 .get(&id)
@@ -268,6 +297,7 @@ impl ObjectSpool {
                         file: 0,
                         offset: 0,
                         len,
+                        head,
                     },
                 );
                 spool.loose.insert(id, file);
@@ -316,7 +346,12 @@ impl ObjectSpool {
                     .copied()
                     .filter(|frame| !frame.loose && frame.len == len)
                     .ok_or_else(|| StoreError::ObjectNotFound(to_hex(&id)))?;
-                moved.push(((position, id, len, ty), frame.file as usize, frame.offset));
+                moved.push((
+                    (position, id, len, ty),
+                    frame.file as usize,
+                    frame.offset,
+                    frame.head,
+                ));
             }
             (files, moved)
         };
@@ -324,7 +359,7 @@ impl ObjectSpool {
         // Where each of the donor's files that an entry reads sits among this
         // spool's donors.
         let mut used = vec![false; files.len()];
-        for &(_, donor_file, _) in &moved {
+        for &(_, donor_file, _, _) in &moved {
             used[donor_file] = true;
         }
         let slots: Vec<u32> = files
@@ -345,7 +380,7 @@ impl ObjectSpool {
                 u32::try_from(at + 1).expect("bounded donor files")
             })
             .collect();
-        for ((position, id, len, ty), donor_file, offset) in moved {
+        for ((position, id, len, ty), donor_file, offset, head) in moved {
             let file = slots[donor_file];
             if spool
                 .by_id
@@ -360,6 +395,7 @@ impl ObjectSpool {
                         file,
                         offset,
                         len,
+                        head,
                     },
                 );
             }
@@ -422,9 +458,10 @@ impl ObjectSpool {
         self.read_before(id, usize::MAX, |_| Ok(()))
     }
 
-    /// The type and, for a blob, the payload length of a staged object, read
-    /// from its ten-byte head alone, as [`crate::store::ObjectStore::object_head`]
-    /// reads a stored one. The rest of the object is neither read nor hashed.
+    /// The type and, for a blob, the payload length of a staged object, from
+    /// its ten-byte head alone, as [`crate::store::ObjectStore::object_head`]
+    /// reads a stored one. The head was kept when the object was staged, so
+    /// nothing is read. The rest of the object is neither read nor hashed.
     ///
     /// # Errors
     /// A local read error, or a head that is not an object's.
@@ -436,6 +473,9 @@ impl ObjectSpool {
         let Some(frame) = spool.by_id.get(id).copied() else {
             return Ok(None);
         };
+        if let Some(kept) = frame.head.get() {
+            return Ok(Some(crate::store::head_at(&mut &kept[..])?));
+        }
         let mut head = [0; 10];
         let len = head.len().min(frame.len as usize);
         Self::read_frame(spool, id, frame, &mut head[..len])?;
@@ -960,6 +1000,32 @@ mod tests {
             .map(|(position, id, _, _)| (position, id))
             .collect();
         assert_eq!(ids, [(0, a), (1, b), (2, a), (3, big), (5, own)]);
+    }
+
+    #[test]
+    fn a_head_comes_from_what_staging_kept_and_an_absorbed_frame_carries_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"spooled head";
+        let (id, bytes) = blob(data);
+        let len = u32::try_from(bytes.len()).unwrap();
+        let expected = Some((ObjectType::Blob, Some(data.len() as u64)));
+        let donor = ObjectSpool::new(dir.path()).unwrap();
+        donor.append(0, id, ObjectType::Blob, &bytes).unwrap();
+        // Damage the staged head on disk: a head that read it would fail.
+        {
+            let mut file = donor.inner.lock().unwrap();
+            file.writer.flush().unwrap();
+            crate::pack::write_spooled(&file.writer.get_ref().0, 0, &[0xff; 10]).unwrap();
+        }
+        assert_eq!(donor.head(&id).unwrap(), expected);
+
+        let window = ObjectSpool::new(dir.path()).unwrap();
+        window
+            .absorb(&donor, &[(0, id, len, ObjectType::Blob)])
+            .unwrap();
+        assert_eq!(window.head(&id).unwrap(), expected);
+        assert!(window.read(&id).is_err());
+        assert_eq!(window.head(&blob(b"absent").0).unwrap(), None);
     }
 
     #[test]

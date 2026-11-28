@@ -58,10 +58,14 @@ fn checks(locator: &Locator) -> usize {
 /// A store handle whose catalog probes the index files, or holds their rows.
 fn reader(layout: &RepoLayout, probing: bool) -> ObjectStore {
     let store = ObjectStore::open(layout).unwrap();
-    if !probing {
-        store.packs.discovery.lock().unwrap().budgets =
-            Some((super::ROW_CACHE_BYTES, super::ROUTE_CACHE_BYTES));
+    let mut discovery = store.packs.discovery.lock().unwrap();
+    if probing {
+        // Loading the rows would replace the locators that count checks.
+        discovery.probe_budget = Some(usize::MAX);
+    } else {
+        discovery.budgets = Some((super::ROW_CACHE_BYTES, super::ROUTE_CACHE_BYTES));
     }
+    drop(discovery);
     store
 }
 

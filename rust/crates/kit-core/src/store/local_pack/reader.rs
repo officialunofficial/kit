@@ -396,6 +396,26 @@ impl Locator {
         })
     }
 
+    /// The ids the pair holds.
+    pub(super) fn count(&self) -> usize {
+        self.count
+    }
+
+    /// [`Self::open_frame`] for a pair a guarded walk found exact: the frame
+    /// lies within the pack, so it is present, and nothing is read. A pair
+    /// not found exact is opened and read as [`Self::open_frame`] does.
+    pub(super) fn frame_present(
+        &self,
+        file: &File,
+        frame: Frame,
+        checked: bool,
+    ) -> StoreResult<()> {
+        if checked {
+            return self.frame_start(frame).map(|_| ());
+        }
+        self.open_frame(file, frame, checked)
+    }
+
     pub(super) fn row_charge(&self) -> usize {
         self.rows.len()
     }
