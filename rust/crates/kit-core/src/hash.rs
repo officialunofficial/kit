@@ -24,12 +24,18 @@ pub const ZERO: Hash = [0u8; HASH_LEN];
 #[cfg(not(target_arch = "wasm32"))]
 const PARALLEL_MIN: usize = 1024 * 1024;
 
+/// Whether [`hash`] splits an input of `len` bytes across threads.
+#[cfg(not(target_arch = "wasm32"))]
+const fn hashes_in_parallel(len: usize) -> bool {
+    len >= PARALLEL_MIN
+}
+
 /// Hash arbitrary bytes in one shot. The digest is the same for every
 /// input length and thread count.
 #[must_use]
 pub fn hash(data: &[u8]) -> Hash {
     #[cfg(not(target_arch = "wasm32"))]
-    if data.len() >= PARALLEL_MIN {
+    if hashes_in_parallel(data.len()) {
         let mut h = blake3::Hasher::new();
         h.update_rayon(data);
         return *h.finalize().as_bytes();
@@ -207,6 +213,19 @@ pub fn object_path(h: &Hash) -> ObjectPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest cannot tell the two paths apart, so pin the cut-over
+    /// itself: 1 MiB and up goes to the threads, anything smaller stays
+    /// serial.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_cut_over_is_one_mebibyte() {
+        assert_eq!(PARALLEL_MIN, 1 << 20);
+        assert!(!hashes_in_parallel(0));
+        assert!(!hashes_in_parallel((1 << 20) - 1));
+        assert!(hashes_in_parallel(1 << 20));
+        assert!(hashes_in_parallel(usize::MAX));
+    }
 
     #[test]
     fn large_input_matches_serial_hasher() {
