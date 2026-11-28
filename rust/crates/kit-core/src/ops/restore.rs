@@ -2102,6 +2102,12 @@ fn write_file_atomic(
     {
         return Ok(observed);
     }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    if case_source.is_none()
+        && let InPlace::Written(observed) = write_in_place(dir, name, data, executable, observe)?
+    {
+        return Ok(observed);
+    }
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     let result = tmp.write_all(data).map_err(RestoreError::from);
     finish_or_discard_tmp(
@@ -2113,6 +2119,59 @@ fn write_file_atomic(
         observe,
         case_source,
     )
+}
+
+/// What [`write_in_place`] did.
+#[cfg(all(unix, not(target_os = "linux")))]
+enum InPlace {
+    /// The file is in place, with its stat fields when they were asked for.
+    Written(Option<StatFields>),
+    /// The name exists or cannot be created here, and nothing was created.
+    Unavailable,
+}
+
+/// Write `data` to `dir/name` when the name does not exist, by creating the
+/// file there, as git does. On these systems a file cannot be written with
+/// no name and linked into place, and a temporary name and a rename cost
+/// about half again as much per file. [`InPlace::Unavailable`] leaves the
+/// write to a temporary name, which reports its own errors. A failed write removes the
+/// file it created. An interrupted write can leave a partly written file at
+/// the name; see `docs/specs/SPEC-WORKTREE.md`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn write_in_place(
+    dir: &Path,
+    name: &str,
+    data: &[u8],
+    executable: bool,
+    observe: bool,
+) -> RestoreResult<InPlace> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = dir.join(name);
+    let Ok(mut file) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    else {
+        return Ok(InPlace::Unavailable);
+    };
+    let result = file.write_all(data).and_then(|()| {
+        if executable {
+            file.set_permissions(fs::Permissions::from_mode(0o755))
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = result {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(error.into());
+    }
+    Ok(InPlace::Written(if observe {
+        observe_handle(&file)
+    } else {
+        None
+    }))
 }
 
 /// Create a fresh tmp file in `dir`. The tmp name is new: a name that is
@@ -4749,6 +4808,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains(&"ab".repeat(32)), "{err}");
+    }
+
+    /// On a Unix system without unnamed files, a new name is created in
+    /// place with no temporary name, with its mode and observation, and an
+    /// existing name is still replaced through a rename.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn a_new_name_is_written_in_place_and_an_existing_one_is_renamed_over() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = TempDir::new().unwrap();
+        let InPlace::Written(observed) =
+            write_in_place(dir.path(), "run", b"#!/bin/sh\n", true, true).unwrap()
+        else {
+            panic!("a new name is written in place");
+        };
+        let meta = fs::symlink_metadata(dir.path().join("run")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o755);
+        assert_eq!(observed.map(|fields| fields.2), Some(meta.ino()));
+        assert!(matches!(
+            write_in_place(dir.path(), "run", b"other", false, false).unwrap(),
+            InPlace::Unavailable
+        ));
+        write_file_atomic(dir.path(), "run", b"other", false, false, None).unwrap();
+        assert_eq!(fs::read(dir.path().join("run")).unwrap(), b"other");
+        assert_ne!(
+            fs::symlink_metadata(dir.path().join("run")).unwrap().ino(),
+            meta.ino()
+        );
+        assert_eq!(temp_shaped_names(dir.path()), Vec::<String>::new());
     }
 
     /// Files of several directories are written in one batch, and each
