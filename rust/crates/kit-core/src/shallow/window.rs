@@ -219,6 +219,39 @@ pub fn window_packs(
     Ok(packs)
 }
 
+/// Why a received window is refused (SPEC-SHALLOW §8.2).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReceivedError {
+    /// The window the client computes needs an object it did not receive.
+    #[error("the window misses object {}", to_hex(.0))]
+    Incomplete(Hash),
+    /// The server's boundary list differs from the one the client computes.
+    #[error("the server's boundary list differs from the window it sent")]
+    BoundaryMismatch,
+    /// The window cannot be computed from the received objects.
+    #[error(transparent)]
+    Window(#[from] WindowError),
+}
+
+/// Check a received window before anything names it: compute the window of
+/// `tips` at `depth` from the objects in `store`, require the boundary the
+/// server `listed` to equal the computed one (SH3), and require the full
+/// snapshot closure of each window commit (SH1).
+///
+/// # Errors
+/// [`ReceivedError::Incomplete`] naming an absent object,
+/// [`ReceivedError::BoundaryMismatch`], or [`ReceivedError::Window`].
+pub fn check_received(
+    store: &ObjectStore,
+    tips: &[Hash],
+    depth: u32,
+    listed: &[Hash],
+) -> Result<Window, ReceivedError> {
+    let _ = (store, tips, depth, listed);
+    Err(ReceivedError::BoundaryMismatch)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

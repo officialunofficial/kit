@@ -17,8 +17,8 @@
 mod window;
 
 pub use window::{
-    MAX_DEPTH, MAX_WINDOW_COMMITS, MAX_WINDOW_TIPS, Window, WindowError, window, window_in,
-    window_objects, window_packs,
+    MAX_DEPTH, MAX_WINDOW_COMMITS, MAX_WINDOW_TIPS, ReceivedError, Window, WindowError,
+    check_received, window, window_in, window_objects, window_packs,
 };
 
 use std::collections::{BTreeSet, HashSet};

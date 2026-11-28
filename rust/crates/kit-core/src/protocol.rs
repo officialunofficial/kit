@@ -802,6 +802,71 @@ impl fmt::Debug for RepoCursor {
     }
 }
 
+/// The refusal of a remote that cannot serve a shallow fetch
+/// (SPEC-SHALLOW §8): file and S3 storage, and a server that does not
+/// advertise the window request.
+pub const SHALLOW_UNSUPPORTED: &str = "this remote cannot serve a shallow fetch";
+
+/// A request for the window of some tips at a depth (SPEC-SHALLOW §8.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowRequest {
+    /// The commits the window starts from.
+    pub tips: Vec<Hash>,
+    /// The depth of the window: 1 holds the tips alone.
+    pub depth: u32,
+    /// Commits the client holds, with their snapshot closures. A deepen
+    /// sends its record here.
+    pub have: Vec<Hash>,
+}
+
+impl WindowRequest {
+    /// The most tips, and the most `have` commits, of one request.
+    pub const MAX_COMMITS: usize = crate::shallow::MAX_WINDOW_TIPS;
+
+    /// Check the limits of SPEC-SHALLOW §8.2: from 1 to
+    /// [`Self::MAX_COMMITS`] tips, at most as many `have` commits, and a
+    /// depth from 1 to [`crate::shallow::MAX_DEPTH`].
+    ///
+    /// # Errors
+    /// [`TransportError::Unsupported`] naming the broken limit.
+    pub fn validate(&self) -> TransportResult<()> {
+        if self.tips.is_empty() || self.tips.len() > Self::MAX_COMMITS {
+            return Err(TransportError::Unsupported(
+                "a window request names from 1 to 1,000 tips",
+            ));
+        }
+        if self.have.len() > Self::MAX_COMMITS {
+            return Err(TransportError::Unsupported(
+                "a window request names at most 1,000 held commits",
+            ));
+        }
+        if self.depth == 0 || self.depth > crate::shallow::MAX_DEPTH {
+            return Err(TransportError::Unsupported(
+                "a window depth is from 1 to 2147483647",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Where [`Transport::download_window`] writes the packs of a window.
+pub trait WindowSink {
+    /// Start the next pack: its key and exact length. The returned sink
+    /// takes its bytes.
+    ///
+    /// # Errors
+    /// The sink's refusal, such as [`TransportError::PayloadTooLarge`].
+    fn begin_pack(&mut self, key: &PackKey, len: u64) -> TransportResult<&mut dyn PackSink>;
+
+    /// The bytes of the pack `begin_pack` started are complete. The sink
+    /// checks them against the key.
+    ///
+    /// # Errors
+    /// [`TransportError::InvalidResponse`] for bytes that do not match the
+    /// key, or a local failure.
+    fn end_pack(&mut self) -> TransportResult<()>;
+}
+
 pub trait Transport: Send + Sync {
     /// Whether the remote supports the attestation log. Unknown sources refuse.
     fn supports_attestations(&self) -> bool {
@@ -907,6 +972,31 @@ pub trait Transport: Send + Sync {
         let mut sink = MemorySink::new(max);
         self.download_pack(key, ref_hint, &mut sink)?;
         sink.into_bytes()
+    }
+
+    /// Whether the remote serves [`Self::download_window`]. The default is
+    /// `false`: a remote that only stores packs cannot build a window.
+    fn supports_download_window(&self) -> bool {
+        false
+    }
+
+    /// Download the window `request` names (SPEC-SHALLOW §8.2): each pack
+    /// into `sink`, then the boundary the server computed, which is
+    /// advisory. The caller computes the boundary again from the objects it
+    /// received and checks every closure before it writes a record or a
+    /// ref. No attempt is retried: a failure ends the window.
+    ///
+    /// # Errors
+    /// [`TransportError::Unsupported`] with [`SHALLOW_UNSUPPORTED`] from a
+    /// remote that cannot serve it, the default; a request outside the
+    /// limits of [`WindowRequest::validate`]; or the transport's error.
+    fn download_window(
+        &self,
+        request: &WindowRequest,
+        sink: &mut dyn WindowSink,
+    ) -> TransportResult<Vec<Hash>> {
+        let _ = (request, sink);
+        Err(TransportError::Unsupported(SHALLOW_UNSUPPORTED))
     }
 
     /// Unconditional ref write — equivalent to
