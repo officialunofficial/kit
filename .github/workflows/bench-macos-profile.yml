@@ -1,0 +1,89 @@
+name: "Bench: macOS clone profile"
+
+# Temporary: splits the clone of 10,000 small files into fetch and checkout
+# for kit and git on macOS, and sums file system calls with fs_usage.
+
+on:
+  push:
+    branches:
+      - claude/project-thread-qo0kjb
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: bench-vs-git-macos-latest
+          protoc: "false"
+      - name: Install hyperfine
+        run: brew install hyperfine
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked -p kit-bin --bin kit
+      - name: Profile
+        run: |
+          K="$PWD/rust/target/release/kit"
+          W="$(mktemp -d)"; W="$(cd "$W" && pwd -P)"
+          python3 - "$W/small10k" <<'PY'
+          import os, sys
+          root = sys.argv[1]
+          rng = __import__("random").Random(10000)
+          for d in range(100):
+              os.makedirs(f"{root}/d{d:02}", exist_ok=True)
+              for f in range(100):
+                  with open(f"{root}/d{d:02}/f{f:02}.bin", "wb") as out:
+                      out.write(rng.randbytes(1024))
+          PY
+          mkdir -p "$W/src/kit" "$W/src/git" "$W/remotes/kit"
+          (cd "$W/src/kit" && "$K" init >/dev/null 2>&1 && "$K" keygen >/dev/null 2>&1 && cp -R "$W/small10k/" . \
+            && "$K" add . >/dev/null && "$K" commit -m bench >/dev/null 2>&1 \
+            && "$K" remote add origin "kit+file://$W/remotes/kit" >/dev/null && "$K" push origin >/dev/null 2>&1)
+          (cd "$W/src/git" && git init -q -b main && git config user.email b@b && git config user.name b && cp -R "$W/small10k/" . \
+            && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$W/remotes/git.git")
+          cd "$W"
+          sysctl -n hw.ncpu machdep.cpu.brand_string
+          hyperfine -N --warmup 2 --runs 15 --export-json phases.json \
+            --prepare 'rm -rf work' -n kit-clone "$K clone kit+file://$W/remotes/kit work" \
+            --prepare 'rm -rf work' -n git-clone "git clone -q file://$W/remotes/git.git work" \
+            --prepare 'rm -rf work' -n kit-fetch "$K clone -n kit+file://$W/remotes/kit work" \
+            --prepare 'rm -rf work' -n git-fetch "git clone -q -n file://$W/remotes/git.git work" \
+            --prepare "rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work" -n kit-checkout "$K -C work checkout main" \
+            --prepare "rm -rf work && git clone -q -n file://$W/remotes/git.git work" -n git-checkout "git -C work reset -q --hard"
+          python3 - phases.json <<'PY'
+          import json, sys
+          for r in json.load(open(sys.argv[1]))["results"]:
+              t = r.get("summary", {}).get("time_wall_clock", r)
+              print("PHASE", r["command"].split()[0] if False else r.get("name", r["command"]), round(t["mean"] * 1000), "ms +-", round(t["stddev"] * 1000), "user", round(r.get("user", 0) * 1000), "sys", round(r.get("system", 0) * 1000))
+          PY
+          for tool in kit git; do
+            rm -rf work
+            sudo fs_usage -w -f filesys > "fs-$tool.txt" 2>/dev/null &
+            FS=$!
+            sleep 3
+            if [ $tool = kit ]; then "$K" clone -q kit+file://$W/remotes/kit work; else git clone -q file://$W/remotes/git.git work; fi
+            sleep 2
+            sudo kill -INT $FS; sleep 2
+            python3 - "fs-$tool.txt" $tool <<'PY'
+          import collections, re, sys
+          count = collections.Counter(); spent = collections.Counter()
+          for line in open(sys.argv[1], errors="replace"):
+              parts = line.split()
+              if len(parts) < 4 or not parts[-1].startswith(sys.argv[2]):
+                  continue
+              m = re.search(r"\s(\d+\.\d+)( W)?\s+\S+$", line)
+              if not m:
+                  continue
+              call = parts[1]
+              count[call] += 1; spent[call] += float(m.group(1))
+          for call, n in sorted(count.items(), key=lambda kv: -spent[kv[0]])[:25]:
+              print("FS", sys.argv[2], call, n, round(spent[call] * 1000, 1), "ms")
+          print("FS", sys.argv[2], "TOTAL", sum(count.values()), round(sum(spent.values()) * 1000, 1), "ms")
+          PY
+          done
+          head -50 fs-kit.txt | sed 's/^/SAMPLE /'
