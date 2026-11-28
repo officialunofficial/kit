@@ -60,8 +60,8 @@ jobs:
             && git add . && git commit -q -m bench && git clone -q --bare --no-local . "$W/remotes/git.git")
           cd "$W"
           "$K" clone -q "kit+file://$W/remotes/kit" check && test -f check/d42/f17.bin && (cd check && "$K" status) && rm -rf check
-          KP="rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work"
-          GP="rm -rf work && git clone -q -n file://$W/remotes/git.git work"
+          KP="sh -c 'rm -rf work && $K clone -q -n kit+file://$W/remotes/kit work'"
+          GP="sh -c 'rm -rf work && git clone -q -n file://$W/remotes/git.git work'"
           for i in 1 2 3; do
             hyperfine -N --warmup 2 --runs 15 --export-json "p$i.json" \
               --prepare "$KP" -n checkout-main "$M -C work checkout main" \
