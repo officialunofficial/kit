@@ -19,11 +19,28 @@ pub type Hash = [u8; HASH_LEN];
 /// annotation fields on commit objects (`message_hash`, `content_digest`).
 pub const ZERO: Hash = [0u8; HASH_LEN];
 
-/// Hash arbitrary bytes in one shot.
+/// Input length from which [`hash`] splits the work across threads.
+/// Below it the thread hand-off costs more than it saves.
+#[cfg(not(target_arch = "wasm32"))]
+const PARALLEL_MIN: usize = 1024 * 1024;
+
+/// Whether [`hash`] splits an input of `len` bytes across threads.
+#[cfg(not(target_arch = "wasm32"))]
+const fn hashes_in_parallel(len: usize) -> bool {
+    len >= PARALLEL_MIN
+}
+
+/// Hash arbitrary bytes in one shot. The digest is the same for every
+/// input length and thread count.
 #[must_use]
 pub fn hash(data: &[u8]) -> Hash {
-    let h = blake3::hash(data);
-    *h.as_bytes()
+    #[cfg(not(target_arch = "wasm32"))]
+    if hashes_in_parallel(data.len()) {
+        let mut h = blake3::Hasher::new();
+        h.update_rayon(data);
+        return *h.finalize().as_bytes();
+    }
+    *blake3::hash(data).as_bytes()
 }
 
 /// Incremental BLAKE3 hasher for streaming data.
@@ -228,6 +245,34 @@ pub fn object_path(h: &Hash) -> ObjectPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest cannot tell the two paths apart, so pin the cut-over
+    /// itself: 1 MiB and up goes to the threads, anything smaller stays
+    /// serial.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_cut_over_is_one_mebibyte() {
+        assert_eq!(PARALLEL_MIN, 1 << 20);
+        assert!(!hashes_in_parallel(0));
+        assert!(!hashes_in_parallel((1 << 20) - 1));
+        assert!(hashes_in_parallel(1 << 20));
+        assert!(hashes_in_parallel(usize::MAX));
+    }
+
+    #[test]
+    fn large_input_matches_serial_hasher() {
+        for len in [
+            0usize,
+            1,
+            (1 << 20) - 1,
+            1 << 20,
+            (1 << 20) + 1,
+            5 * (1 << 20) + 3,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+            assert_eq!(hash(&data), *blake3::hash(&data).as_bytes(), "len {len}");
+        }
+    }
 
     #[test]
     fn known_vector_hello() {
